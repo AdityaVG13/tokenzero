@@ -446,6 +446,12 @@ pub(crate) fn count_tokens_tail(text: &str, start_byte_offset: usize) -> usize {
 /// When an envelope is larger than its input, the raw counts still expose that
 /// overhead; a "savings" ratio must not report a negative percentage.
 pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
+    // `usize` → `u64` is lossless on every supported target.
+    savings_ratio_u64(raw_tokens as u64, used_tokens as u64)
+}
+
+/// Width-preserving savings ratio for class-typed `u64` token counts.
+pub(crate) fn savings_ratio_u64(raw_tokens: u64, used_tokens: u64) -> f64 {
     if raw_tokens == 0 {
         return 0.0;
     }

@@ -192,7 +192,23 @@ impl<'a, C: TokenClass> Sum<&'a Tok<C>> for Tok<C> {
 /// the types now enforce which argument is which.
 #[must_use]
 pub fn savings_ratio_typed(raw: Tok<Raw>, visible: Tok<Visible>) -> f64 {
-    crate::tokens::savings_ratio(raw.get() as usize, visible.get() as usize)
+    crate::tokens::savings_ratio_u64(raw.get(), visible.get())
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn savings_ratio_typed_does_not_truncate_u64_counts() {
+        let raw = Tok::<Raw>::new(u64::from(u32::MAX) + 100);
+        let visible = Tok::<Visible>::new(100);
+        let ratio = savings_ratio_typed(raw, visible);
+        assert!(
+            ratio > 0.999,
+            "u64 token counts must not collapse through usize: {ratio}"
+        );
+    }
 }
 
 #[cfg(test)]

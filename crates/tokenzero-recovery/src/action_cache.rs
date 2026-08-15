@@ -169,15 +169,25 @@ impl EvictionSlackGuard {
 
     /// `sigma = W_R - 0.99W` in PPM of demanded mass (can be negative).
     pub fn slack_ppm(&self) -> i64 {
-        let floor_ppm = ppm_of(self.demanded_mass * 99 / 100, self.demanded_mass);
+        let floor = retained_floor(self.demanded_mass).unwrap_or(u64::MAX);
+        let floor_ppm = ppm_of(floor, self.demanded_mass);
         let resident_ppm = ppm_of(self.resident_mass, self.demanded_mass);
-        resident_ppm as i64 - floor_ppm as i64
+        let resident = i64::try_from(resident_ppm).unwrap_or(i64::MAX);
+        let floor = i64::try_from(floor_ppm).unwrap_or(i64::MAX);
+        resident.saturating_sub(floor)
     }
 
     /// Guard one eviction decision: evicting `evict_weight` must keep
     /// retained valid mass at or above 99% of demanded mass.
     pub fn guard_eviction(&self, evict_weight: u64) -> Result<(), ActionCacheError> {
-        let floor = self.demanded_mass * 99 / 100;
+        let Some(floor) = retained_floor(self.demanded_mass) else {
+            return Err(ActionCacheError::EvictionRefused {
+                resident_mass: self.resident_mass,
+                demanded_mass: self.demanded_mass,
+                evict_weight,
+                slack_ppm: self.slack_ppm(),
+            });
+        };
         let after = self.resident_mass.saturating_sub(evict_weight);
         if after < floor {
             return Err(ActionCacheError::EvictionRefused {
@@ -605,6 +615,11 @@ fn ppm_of(numerator: u64, denominator: u64) -> u64 {
     numerator.saturating_mul(1_000_000) / denominator
 }
 
+/// 99% retained-mass floor. `None` when `demanded_mass * 99` does not fit in u64.
+fn retained_floor(demanded_mass: u64) -> Option<u64> {
+    demanded_mass.checked_mul(99).map(|n| n / 100)
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -702,6 +717,31 @@ mod serve_l3_recheck_tests {
         assert!(
             !index.has_in_flight_serve(&item.key),
             "failed serve must not leave a pin that blocks GC: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slack_width_tests {
+    use super::*;
+
+    #[test]
+    fn retained_floor_rejects_u64_width_loss() {
+        assert_eq!(retained_floor(100), Some(99));
+        assert_eq!(retained_floor(u64::MAX), None);
+        EvictionSlackGuard::new(u64::MAX, u64::MAX)
+            .unwrap()
+            .guard_eviction(1)
+            .expect_err("overflowing 99% floor must refuse eviction");
+    }
+
+    #[test]
+    fn slack_ppm_does_not_truncate_u64_to_negative_i64() {
+        let guard = EvictionSlackGuard::new(u64::MAX, 1).unwrap();
+        assert_eq!(
+            guard.slack_ppm(),
+            i64::MAX,
+            "PPM above i64::MAX must saturate, not wrap negative"
         );
     }
 }

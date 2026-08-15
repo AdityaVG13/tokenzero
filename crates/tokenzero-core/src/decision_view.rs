@@ -327,7 +327,7 @@ impl DecisionViewSection {
         kind: DecisionViewSectionKind,
         map: &ExactTokenMap,
     ) -> Result<Self, DecisionViewError> {
-        let byte_len = map.byte_len();
+        let byte_len = map.checked_byte_len()?;
         if byte_len > MAX_DECISION_VIEW_BYTES {
             return Err(DecisionViewError::ViewByteLimit {
                 actual: byte_len,

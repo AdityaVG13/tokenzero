@@ -329,7 +329,8 @@ impl SegmentStore {
         let p = self.root.join(&self.manifest.hot.data_file);
         let mut f = OpenOptions::new().append(true).read(true).open(p)?;
         let start = f.seek(SeekFrom::End(0))?;
-        f.write_all(&(mb.len() as u32).to_le_bytes())?;
+        let meta_len = u32::try_from(mb.len()).map_err(|_| SegmentStoreError::Overflow)?;
+        f.write_all(&meta_len.to_le_bytes())?;
         f.write_all(&(b.len() as u64).to_le_bytes())?;
         f.write_all(&mb)?;
         let offset = start
@@ -523,6 +524,14 @@ fn next_generation(generation: u64) -> Result<u64, SegmentStoreError> {
 fn hash(b: &[u8]) -> String {
     crate::migration::full_sha256_hex(b)
 }
+
+/// On-disk payload length as an allocation size. Uses the descriptor's written
+/// bound rather than `DEFAULT_SEGMENT_BYTES`, so a configured larger segment
+/// can still recover. `u64` → `usize` truncation is a hard reject.
+fn recover_payload_len(dl: u64, written_bytes: u64) -> Option<usize> {
+    let len = usize::try_from(dl).ok()?;
+    (dl <= written_bytes).then_some(len)
+}
 fn checksum(m: &SegmentManifest) -> Result<String, serde_json::Error> {
     let mut c = m.clone();
     c.checksum.clear();
@@ -634,14 +643,19 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
         if f.read_exact(&mut a).is_err() {
             break;
         }
-        let ml = u32::from_le_bytes(a) as usize;
+        let ml = match usize::try_from(u32::from_le_bytes(a)) {
+            Ok(ml) => ml,
+            Err(_) => break,
+        };
         let mut z = [0; 8];
         if f.read_exact(&mut z).is_err() {
             break;
         }
         let dl = u64::from_le_bytes(z);
+        let Some(payload_len) = recover_payload_len(dl, d.written_bytes) else {
+            break;
+        };
         if ml > 1_048_576
-            || dl > DEFAULT_SEGMENT_BYTES * 4
             || start
                 .checked_add(12)
                 .and_then(|n| n.checked_add(ml as u64))
@@ -657,7 +671,7 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
         let Ok(m) = serde_json::from_slice::<Meta>(&mb) else {
             break;
         };
-        let mut b = vec![0; dl as usize];
+        let mut b = vec![0; payload_len];
         if f.read_exact(&mut b).is_err() || hash(&b) != m.sha256 {
             break;
         }
@@ -687,7 +701,8 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
 fn read_entry(p: &Path, e: &SegmentEntry) -> Result<Vec<u8>, SegmentStoreError> {
     let mut f = File::open(p)?;
     f.seek(SeekFrom::Start(e.offset))?;
-    let mut b = vec![0; e.len as usize];
+    let len = usize::try_from(e.len).map_err(|_| SegmentStoreError::Overflow)?;
+    let mut b = vec![0; len];
     f.read_exact(&mut b)?;
     if hash(&b) != e.sha256 {
         return Err(SegmentStoreError::CorruptPayload(e.ref_id.clone()));
@@ -711,7 +726,8 @@ fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 fn sync_dir(p: &Path) -> io::Result<()> {
     match File::open(p) {
@@ -809,6 +825,27 @@ mod expand_lock_tests {
         assert!(
             leftovers.is_empty(),
             "failed index write must unlink tmp ({err}): {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn recover_payload_len_follows_written_bytes_not_default_segment() {
+        let larger_than_legacy_cap = DEFAULT_SEGMENT_BYTES
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(1))
+            .expect("default segment * 4 fits u64");
+        assert_eq!(
+            recover_payload_len(larger_than_legacy_cap, larger_than_legacy_cap),
+            usize::try_from(larger_than_legacy_cap).ok(),
+            "configured segments larger than DEFAULT*4 must still recover"
+        );
+        assert_eq!(
+            recover_payload_len(larger_than_legacy_cap, larger_than_legacy_cap - 1),
+            None
+        );
+        assert_eq!(
+            recover_payload_len(u64::MAX, u64::MAX),
+            usize::try_from(u64::MAX).ok()
         );
     }
 }

@@ -1584,10 +1584,9 @@ impl RecoveryStore {
                 }
             }
             if let Some((op, err)) = release_err {
-                return Err(io::Error::other(format!(
-                    "release CAS publish lease {op}: {err}"
-                ))
-                .into());
+                return Err(
+                    io::Error::other(format!("release CAS publish lease {op}: {err}")).into(),
+                );
             }
         }
         if failed > 0 {
@@ -2198,8 +2197,10 @@ impl RecoveryStore {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
                 for (i, chunk) in hex_key.as_bytes().chunks_exact(2).enumerate() {
-                    let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;
-                    let lo = (chunk[1] as char).to_digit(16).unwrap() as u8;
+                    let hi =
+                        hex_value(chunk[0]).expect("alias key already validated as lowercase hex");
+                    let lo =
+                        hex_value(chunk[1]).expect("alias key already validated as lowercase hex");
                     key[i] = (hi << 4) | lo;
                 }
                 return key;
@@ -3952,7 +3953,7 @@ fn blob_cas_marker(hash: &str, len: usize) -> String {
 pub(crate) fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
     let rest = value.strip_prefix(BLOB_MARKER_PREFIX)?;
     let (hash, rest) = rest.split_at_checked(64)?;
-    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !zero_ref::is_full_lower_hex(hash) {
         return None;
     }
     let len: usize = rest.strip_prefix(':')?.strip_suffix(':')?.parse().ok()?;
@@ -4159,38 +4160,42 @@ fn resolve_file_value(stored: &StoredFile) -> RefResolve {
 fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
     match value {
         BlobEntry::Inline(value) => {
-            let Some((hash, expected_len)) = parse_blob_marker(value) else {
-                return RefResolve::Found(value.clone());
-            };
-            if let Some(cache_path) = cache_path
-                && let Some(cas) = SharedCas::detect_from_cache_path(cache_path)
-            {
-                match shared_cas_utf8(&cas, hash) {
-                    Ok(text) if text.len() == expected_len => {
-                        return resolve_found_verified(
-                            true,
-                            text,
-                            hash.to_string(),
-                            RefResolve::DecodeFailed,
-                        );
+            if value.starts_with(BLOB_MARKER_PREFIX) {
+                let Some((hash, expected_len)) = parse_blob_marker(value) else {
+                    return RefResolve::DecodeFailed;
+                };
+                if let Some(cache_path) = cache_path
+                    && let Some(cas) = SharedCas::detect_from_cache_path(cache_path)
+                {
+                    match shared_cas_utf8(&cas, hash) {
+                        Ok(text) if text.len() == expected_len => {
+                            return resolve_found_verified(
+                                true,
+                                text,
+                                hash.to_string(),
+                                RefResolve::DecodeFailed,
+                            );
+                        }
+                        Ok(_) | Err(Some(SharedCasError::Corruption)) => {
+                            return RefResolve::DecodeFailed;
+                        }
+                        Err(None) => return RefResolve::DecodeFailed,
+                        Err(Some(SharedCasError::NotFound)) => {}
+                        Err(Some(_)) => return RefResolve::DecodeFailed,
                     }
-                    Ok(_) | Err(Some(SharedCasError::Corruption)) => {
-                        return RefResolve::DecodeFailed;
-                    }
-                    Err(None) => return RefResolve::DecodeFailed,
-                    Err(Some(SharedCasError::NotFound)) => {}
-                    Err(Some(_)) => return RefResolve::DecodeFailed,
                 }
+                let Some(cache_path) = cache_path else {
+                    return RefResolve::DecodeFailed;
+                };
+                let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
+                let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
+                    return RefResolve::DecodeFailed;
+                };
+                let ok = actual_hash == hash;
+                resolve_found_verified(ok, text, actual_hash, RefResolve::DecodeFailed)
+            } else {
+                RefResolve::Found(value.clone())
             }
-            let Some(cache_path) = cache_path else {
-                return RefResolve::DecodeFailed;
-            };
-            let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
-            let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
-                return RefResolve::DecodeFailed;
-            };
-            let ok = actual_hash == hash;
-            resolve_found_verified(ok, text, actual_hash, RefResolve::DecodeFailed)
         }
         BlobEntry::FileRef {
             path,
@@ -4915,6 +4920,50 @@ mod input_validation_boundary_tests {
         assert!(
             !blob_ref_proven_on_disk(&cache, &format!("tz://blob/{fake}")),
             "non-hex 64-char sidecar must not prove presence"
+        );
+    }
+
+    #[test]
+    fn blob_marker_hash_is_typed_lowercase_digest() {
+        let lower = format!("{BLOB_MARKER_PREFIX}{}:4:", "a".repeat(64));
+        assert_eq!(parse_blob_marker(&lower), Some((&*"a".repeat(64), 4)));
+        let upper = format!("{BLOB_MARKER_PREFIX}{}:4:", "A".repeat(64));
+        assert!(
+            parse_blob_marker(&upper).is_none(),
+            "uppercase hex is not a digest identity"
+        );
+        let mixed = format!(
+            "{BLOB_MARKER_PREFIX}{}:4:",
+            format!("{}{}", "a".repeat(63), "F")
+        );
+        assert!(parse_blob_marker(&mixed).is_none());
+    }
+
+    #[test]
+    fn malformed_blob_marker_prefix_is_not_inline_content() {
+        let mut store = RecoveryStore::new(None);
+        let blob_id = "ab".repeat(32);
+        let marker = format!("{BLOB_MARKER_PREFIX}{}:1:", "A".repeat(64));
+        store
+            .state
+            .blobs
+            .insert(format!("tz://blob/{blob_id}"), BlobEntry::Inline(marker));
+        let expanded = store.expand(
+            &format!("tz://blob/{blob_id}"),
+            Some("raw"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !expanded.found,
+            "typed marker prefix with invalid digest must not surface as Found content"
+        );
+        assert!(
+            expanded.reason.contains("decode-failed"),
+            "expected decode-failed, got {:?}",
+            expanded.reason
         );
     }
 

@@ -329,7 +329,15 @@ impl ExactTokenMap {
     }
 
     pub fn byte_len(&self) -> usize {
-        self.tokens.iter().map(|token| token.bytes.len()).sum()
+        self.checked_byte_len().unwrap_or(usize::MAX)
+    }
+
+    /// Sum of token byte lengths. Overflow is a type-width failure, not wrap.
+    pub fn checked_byte_len(&self) -> Result<usize, ModelArtifactError> {
+        self.tokens
+            .iter()
+            .try_fold(0usize, |total, token| total.checked_add(token.bytes.len()))
+            .ok_or(ModelArtifactError::LengthOverflow)
     }
 
     /// Reconstruct the exact original byte stream.
@@ -776,11 +784,7 @@ impl ModelCapsule {
         dependency_roots.push(dynamic_tail_map_digest.to_hex());
         let receipt = ModelCapsuleFormationReceipt::new(
             "tokenzero-core.model-capsule.v1",
-            capsule_contract_root(
-                source_root_digest,
-                model_profile_digest,
-                tokenizer.digest(),
-            )?,
+            capsule_contract_root(source_root_digest, model_profile_digest, tokenizer.digest())?,
             dependency_roots,
             render_payload_digest(&stable_prefix, &dynamic_tail)?,
             0,
@@ -1142,10 +1146,7 @@ fn model_capsule_digest(
 }
 
 /// Canonical digest of the full render payload (stable prefix + dynamic tail).
-fn render_payload_digest(
-    prefix: &[u8],
-    tail: &[u8],
-) -> Result<DigestV1, ModelArtifactError> {
+fn render_payload_digest(prefix: &[u8], tail: &[u8]) -> Result<DigestV1, ModelArtifactError> {
     let mut payload = Vec::with_capacity(prefix.len() + tail.len());
     payload.extend_from_slice(prefix);
     payload.extend_from_slice(tail);

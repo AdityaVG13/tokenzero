@@ -253,7 +253,11 @@ pub fn shell_schema() -> Value {
             },
             "no_rewrite": {"type": "boolean", "default": false},
             "stdin": {"type": "string"},
-            "timeout_seconds": positive_usize(ABI_DEFAULT_SHELL_TIMEOUT_SECS as usize),
+            "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "default": ABI_DEFAULT_SHELL_TIMEOUT_SECS
+            },
             "timeout_ms": {
                 "type": "integer",
                 "minimum": 1,
