@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +93,24 @@ pub struct BlobSidecarPruneReport {
     pub retained_referenced: usize,
 }
 
+/// Load the snapshot used as a prune root set. A missing cache is empty; an
+/// existing but unreadable cache is not -- treating that as empty would make
+/// every sidecar look unreferenced and delete it.
+fn load_prune_snapshot(
+    cache_path: &Path,
+    config: &RecoveryConfig,
+) -> Result<RecoveryState, RecoveryError> {
+    match load_state(cache_path, config)? {
+        Some(state) => Ok(state),
+        None if !cache_path.exists() => Ok(RecoveryState::empty(config)),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recovery snapshot is unreadable; refusing prune",
+        )
+        .into()),
+    }
+}
+
 /// Remove oldest unreferenced legacy blob sidecars until the budget is met.
 /// Sidecars referenced by the authoritative snapshot or journal are retained.
 pub fn prune_blob_sidecars(
@@ -102,7 +120,7 @@ pub fn prune_blob_sidecars(
 ) -> Result<BlobSidecarPruneReport, RecoveryError> {
     let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
     let config = RecoveryConfig::default();
-    let state = load_state(cache_path, &config)?.unwrap_or_else(|| RecoveryState::empty(&config));
+    let state = load_prune_snapshot(cache_path, &config)?;
     let referenced: HashSet<String> = state
         .blobs
         .values()
@@ -132,7 +150,10 @@ pub fn prune_blob_sidecars(
                 if referenced.contains(hash) {
                     retained_referenced += 1;
                 } else {
-                    files.push((metadata.modified().unwrap_or(UNIX_EPOCH), path, len));
+                    let Ok(modified) = metadata.modified() else {
+                        continue;
+                    };
+                    files.push((modified, path, len));
                 }
             }
         }
@@ -187,6 +208,7 @@ pub fn prune_recovery_blobs(
     dry_run: bool,
 ) -> Result<RecoveryBlobPruneReport, RecoveryError> {
     let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
+    let _ = load_prune_snapshot(cache_path, &RecoveryConfig::default())?;
     let directory = blob_sidecar_dir(cache_path);
     let mut store = RecoveryStore::new(Some(cache_path.to_path_buf()));
     let mut files = Vec::new();
@@ -207,7 +229,9 @@ pub fn prune_recovery_blobs(
                 let ref_id = format!("tz://blob/{hash}");
                 let len = metadata.len();
                 bytes_before = bytes_before.saturating_add(len);
-                let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                let Ok(modified) = metadata.modified() else {
+                    continue;
+                };
                 let expired = now.duration_since(modified).unwrap_or_default() >= max_age;
                 let (expansion_count, last_expanded) = ref_index_blob_lru(&ref_id);
                 let referenced = store.state.blobs.contains_key(&ref_id);
@@ -265,8 +289,7 @@ pub fn prune_recovery_blobs(
             }
         }
         store.persist_assuming_locked()?;
-        let published = load_state(cache_path, &store.config)?
-            .unwrap_or_else(|| RecoveryState::empty(&store.config));
+        let published = load_prune_snapshot(cache_path, &store.config)?;
         for (_, ref_id, _, _) in &victims {
             if published.blobs.contains_key(ref_id) {
                 return Err(io::Error::new(
@@ -309,4 +332,64 @@ pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
             total.saturating_add(metadata.len())
         });
     serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
+}
+
+#[cfg(test)]
+mod prune_option_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prune_blob_sidecars_refuses_unreadable_snapshot() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        fs::write(&cache, [0xff, 0xfe, 0x00]).unwrap();
+        let sidecar_dir = blob_sidecar_dir(&cache);
+        fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar = sidecar_dir.join(format!("{}.txt", "a".repeat(64)));
+        fs::write(&sidecar, b"payload-bytes-should-survive").unwrap();
+
+        let err = prune_blob_sidecars(&cache, 0, false)
+            .expect_err("unreadable snapshot must refuse prune");
+        assert!(sidecar.is_file(), "sidecar must survive refused prune");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unreadable"),
+            "error must name unreadable snapshot, got {msg}"
+        );
+    }
+
+    #[test]
+    fn prune_blob_sidecars_missing_snapshot_is_empty_root_set() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let sidecar_dir = blob_sidecar_dir(&cache);
+        fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar = sidecar_dir.join(format!("{}.txt", "b".repeat(64)));
+        fs::write(&sidecar, b"orphan").unwrap();
+        let report = prune_blob_sidecars(&cache, 0, false).unwrap();
+        assert_eq!(report.removed_files, 1);
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn prune_recovery_blobs_refuses_unreadable_snapshot() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        fs::write(&cache, [0xff, 0xfe, 0x00]).unwrap();
+        let sidecar_dir = blob_sidecar_dir(&cache);
+        fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar = sidecar_dir.join(format!("{}.txt", "c".repeat(64)));
+        fs::write(&sidecar, b"keep-me").unwrap();
+
+        let err = prune_recovery_blobs(&cache, 0, Duration::from_secs(0), false)
+            .expect_err("unreadable snapshot must refuse prune");
+        assert!(sidecar.is_file(), "sidecar must survive refused prune");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unreadable"),
+            "error must name unreadable snapshot, got {msg}"
+        );
+    }
 }

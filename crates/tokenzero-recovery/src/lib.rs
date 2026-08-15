@@ -116,7 +116,6 @@ const REF_INDEX_LEGACY_SHARD_PREFIX_LEN: usize = 2;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
-
 /// Profiling-only leaf spans for expand (TOKENZERO_PERF_PROFILE). No product effect when off.
 fn expand_leaf_span<R>(span: &'static str, f: impl FnOnce() -> R) -> R {
     static ENABLED: AtomicU8 = AtomicU8::new(0);
@@ -2957,12 +2956,15 @@ fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
         .split_once(':')
         .or_else(|| value.split_once(','))
         .unwrap_or((value, "3"));
-    let line = line_text
-        .trim()
-        .trim_start_matches('L')
-        .parse::<usize>()
-        .unwrap_or(1);
-    let radius = radius_text.trim().parse::<usize>().unwrap_or(3);
+    let Ok(line) = line_text.trim().trim_start_matches('L').parse::<usize>() else {
+        return (None, None);
+    };
+    if line == 0 {
+        return (None, None);
+    }
+    let Ok(radius) = radius_text.trim().parse::<usize>() else {
+        return (None, None);
+    };
     (
         Some(line.saturating_sub(radius).max(1)),
         Some(line.saturating_add(radius)),
@@ -2998,8 +3000,10 @@ fn resolve_selector_line_window(
         .into_iter()
         .find_map(|prefix| selector.strip_prefix(prefix).map(parse_line_fragment))
         .or_else(|| selector.strip_prefix("around:").map(parse_around_selector));
-    if let Some((start, end)) = window {
-        (*selected_start, *selected_end) = (start, end);
+    // Only a parsed start may replace the caller's line window. `(None, None)`
+    // is a malformed selector, not "clear the window and serve everything".
+    if let Some((Some(start), end)) = window {
+        (*selected_start, *selected_end) = (Some(start), end);
     }
 }
 
@@ -3390,10 +3394,7 @@ fn append_blob_refs_to_ref_index(
             .unwrap_or_else(|| classify_ref(ref_id, None));
         if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false, 0, None).is_ok() {
             if let Err(err) = compact_ref_index_if_needed(&shard) {
-                panic!(
-                    "ref-index compact failed for {}: {err}",
-                    shard.display()
-                );
+                panic!("ref-index compact failed for {}: {err}", shard.display());
             }
         }
     }
@@ -3652,10 +3653,7 @@ fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentC
         Some(now),
     );
     if let Err(err) = compact_ref_index_if_needed(&shard) {
-        panic!(
-            "ref-index compact failed for {}: {err}",
-            shard.display()
-        );
+        panic!("ref-index compact failed for {}: {err}", shard.display());
     }
 }
 
@@ -4631,3 +4629,54 @@ fn mtime_ns(meta: &fs::Metadata) -> u128 {
 #[cfg(test)]
 #[path = "../../../tests/recovery/inline/lib__select_content_tests.rs"]
 mod select_content_tests;
+
+#[cfg(test)]
+mod select_content_option_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_around_selector_does_not_default_to_line_one() {
+        let content = "one\ntwo\nthree\nfour\nfive\n".to_string();
+        assert_eq!(
+            select_content(
+                content.clone(),
+                Some("around:not-a-line"),
+                None,
+                None,
+                None,
+                None
+            ),
+            content,
+            "garbage around: must not silently slice around line 1"
+        );
+    }
+
+    #[test]
+    fn malformed_selector_does_not_clear_explicit_line_window() {
+        let content = "one\ntwo\nthree\nfour\nfive\n".to_string();
+        assert_eq!(
+            select_content(
+                content.clone(),
+                Some("around:xyz:1"),
+                Some(5),
+                Some(5),
+                None,
+                None
+            ),
+            "five\n"
+        );
+        assert_eq!(
+            select_content(content, Some("range:nope"), Some(2), Some(2), None, None),
+            "two\n"
+        );
+    }
+
+    #[test]
+    fn omitted_around_radius_still_defaults_to_three() {
+        let content = "1\n2\n3\n4\n5\n6\n7\n8\n9\n".to_string();
+        assert_eq!(
+            select_content(content, Some("around:5"), None, None, None, None),
+            "2\n3\n4\n5\n6\n7\n8\n"
+        );
+    }
+}
