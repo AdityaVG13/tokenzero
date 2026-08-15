@@ -1,5 +1,6 @@
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokenzero_core::McpToolSurface;
 use tokenzero_core::count_tokens;
@@ -206,6 +207,40 @@ fn surface_registration(engine: &TokenZeroEngine, surface: McpToolSurface) -> Su
     registration
 }
 
+fn lock_engine(engine: &Mutex<TokenZeroEngine>) -> MutexGuard<'_, TokenZeroEngine> {
+    engine
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn panic_payload_text(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = panic.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn dispatch_catching<T>(
+    op: &str,
+    f: impl FnOnce() -> Result<T, McpDispatchError>,
+) -> Result<T, McpDispatchError> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(panic) => Err(McpDispatchError::new(
+            "runtime",
+            format!(
+                "TokenZero handler panicked: {}",
+                panic_payload_text(panic.as_ref())
+            ),
+            false,
+        )
+        .with_op(op)),
+    }
+}
+
 struct EngineDispatcher {
     engine: Arc<Mutex<TokenZeroEngine>>,
 }
@@ -234,17 +269,19 @@ impl McpDispatcher for EngineDispatcher {
         arguments: Value,
         _context: &McpCallContext,
     ) -> Result<McpDispatchOutput, McpDispatchError> {
-        let engine = self.engine.lock().map_err(|_| {
-            McpDispatchError::new("runtime", "TokenZero engine lock poisoned", false).with_op(tool)
-        })?;
-        let result = call_tool_fastmcp(&engine, tool, &arguments, None).map_err(|error| {
-            McpDispatchError::new("runtime", error.message_text(), false).with_op(tool)
-        })?;
-        let texts = crate::fastmcp_mode::fastmcp_content_texts_from_tool_result(&result)
-            .map_err(|message| McpDispatchError::new("runtime", message, false).with_op(tool))?;
-        Ok(McpDispatchOutput::Text(
-            texts.into_iter().map(McpTextContent::new).collect(),
-        ))
+        dispatch_catching(tool, || {
+            let engine = lock_engine(&self.engine);
+            let result = call_tool_fastmcp(&engine, tool, &arguments, None).map_err(|error| {
+                McpDispatchError::new("runtime", error.message_text(), false).with_op(tool)
+            })?;
+            let texts = crate::fastmcp_mode::fastmcp_content_texts_from_tool_result(&result)
+                .map_err(|message| {
+                    McpDispatchError::new("runtime", message, false).with_op(tool)
+                })?;
+            Ok(McpDispatchOutput::Text(
+                texts.into_iter().map(McpTextContent::new).collect(),
+            ))
+        })
     }
 }
 
@@ -267,13 +304,13 @@ impl McpResourceReader for EngineResourceReader {
         uri: &str,
         _context: &McpCallContext,
     ) -> Result<McpResourceOutput, McpDispatchError> {
-        let engine = self.engine.lock().map_err(|_| {
-            McpDispatchError::new("runtime", "TokenZero engine lock poisoned", false).with_op(uri)
-        })?;
-        let payload = build_resource_payload(&engine, uri).map_err(|error| {
-            McpDispatchError::new("runtime", error.message_text(), false).with_op(uri)
-        })?;
-        Ok(McpResourceOutput::Text(payload))
+        dispatch_catching(uri, || {
+            let engine = lock_engine(&self.engine);
+            let payload = build_resource_payload(&engine, uri).map_err(|error| {
+                McpDispatchError::new("runtime", error.message_text(), false).with_op(uri)
+            })?;
+            Ok(McpResourceOutput::Text(payload))
+        })
     }
 }
 
@@ -351,3 +388,43 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
 #[cfg(test)]
 #[path = "../../../tests/mcp-compat/inline/fastmcp_mode__tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod crash_window_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn engine_lock_recovers_after_poison() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Mutex::new(TokenZeroEngine::new(EngineConfig::for_root(dir.path())));
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = engine.lock().expect("fresh lock");
+            panic!("poison engine");
+        }));
+        assert!(poisoned.is_err());
+        assert!(
+            engine.lock().is_err(),
+            "mutex must be poisoned before recovery"
+        );
+        let recovered = lock_engine(&engine);
+        assert!(
+            !recovered.session_id().is_empty(),
+            "poison recover must yield a usable engine"
+        );
+        drop(recovered);
+        let _again = lock_engine(&engine);
+    }
+
+    #[test]
+    fn dispatch_catching_maps_panic_to_runtime_error() {
+        let error = dispatch_catching::<()>("tz_read", || panic!("boom")).expect_err("panic");
+        assert_eq!(error.kind, "runtime");
+        assert_eq!(error.op.as_deref(), Some("tz_read"));
+        assert!(
+            error.message.contains("panicked") && error.message.contains("boom"),
+            "panic payload must stay on the wire: {}",
+            error.message
+        );
+    }
+}

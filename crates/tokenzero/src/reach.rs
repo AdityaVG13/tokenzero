@@ -199,11 +199,9 @@ fn write_json_artifact(path: &Path, report: &Json) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?
     }
-    fs::write(
+    tokenzero_engine::render::write_atomic(
         path,
-        serde_json::to_string_pretty(report)?
-            + "
-",
+        (serde_json::to_string_pretty(report)? + "\n").as_bytes(),
     )?;
     Ok(())
 }

@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -57,6 +57,42 @@ use zerostack_store::{
     tokenzero_work_root,
 };
 
+fn is_broken_pipe(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::BrokenPipe
+}
+
+fn map_stdout_write(result: io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if is_broken_pipe(&err) => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_stdout(text: &str) -> Result<()> {
+    let mut stdout = io::stdout();
+    map_stdout_write(stdout.write_all(text.as_bytes()).and_then(|_| stdout.flush()))
+}
+
+fn writeln_stdout(text: impl AsRef<str>) -> Result<()> {
+    let text = text.as_ref();
+    if text.ends_with('\n') {
+        write_stdout(text)
+    } else {
+        write_stdout(&format!("{text}\n"))
+    }
+}
+
+fn print_clap_error(err: clap::Error) -> ! {
+    let rendered = err.to_string();
+    if err.use_stderr() {
+        let _ = writeln!(io::stderr(), "{}", rendered.trim_end());
+    } else {
+        let _ = write_stdout(&rendered);
+    }
+    std::process::exit(err.exit_code());
+}
+
 fn emit_json_md<T, F, J, M>(output_json: J, output_md: M, as_json: bool, run: F) -> Result<()>
 where
     T: serde::Serialize,
@@ -101,9 +137,9 @@ fn emit_migration_report(
         text.push_str(&format!("\nSafe alternative: {safe_alternative}\n"));
     }
     if as_json {
-        println!("{json}");
+        writeln_stdout(json)?;
     } else {
-        println!("{text}");
+        writeln_stdout(text)?;
     }
     if failed {
         if as_json {
@@ -170,7 +206,7 @@ fn main() -> Result<()> {
 
     // Fast path: avoid building the full clap command tree for --version/-V.
     if argv.len() == 2 && matches!(argv[1].to_str(), Some("--version" | "-V")) {
-        println!("tokenzero {}", env!("CARGO_PKG_VERSION"));
+        writeln_stdout(format!("tokenzero {}", env!("CARGO_PKG_VERSION")))?;
         return Ok(());
     }
 
@@ -225,12 +261,14 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             }
-            err.exit();
+            print_clap_error(err);
         }
     };
     let Some(command) = cli.command else {
-        Cli::command().print_help()?;
-        println!();
+        let mut help = Vec::new();
+        Cli::command().write_help(&mut help)?;
+        write_stdout(&String::from_utf8_lossy(&help))?;
+        writeln_stdout("")?;
         return Ok(());
     };
     dispatch_command!(command;
@@ -257,7 +295,7 @@ fn main() -> Result<()> {
         );
         emit_with_json(dispatch_cli_tool(&engine, "tz_discover", json!({})), args.json)?;
     }
-    RobotDocs(args) => { handle_robot_docs(args); }
+    RobotDocs(args) => { handle_robot_docs(args)?; }
     McpServer(args) => {
         #[cfg(feature = "surface-mcp")]
         {
@@ -932,19 +970,16 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
                 // n3fx (R-012): --json must emit a structured JSON error, never
                 // a bare text error, so JSON consumers can parse every path.
                 if args.tool.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "schema_version": "tokenzero.cli.v1",
-                            "status": "error",
-                            "tool": "ingest",
-                            "ack": "9",
-                            "error": {
-                                "code": "ingest_read_failed",
-                                "message": format!("could not read {}: {}", input.display(), err),
-                            },
-                        }))?
-                    );
+                    writeln_stdout(serde_json::to_string_pretty(&json!({
+                        "schema_version": "tokenzero.cli.v1",
+                        "status": "error",
+                        "tool": "ingest",
+                        "ack": "9",
+                        "error": {
+                            "code": "ingest_read_failed",
+                            "message": format!("could not read {}: {}", input.display(), err),
+                        },
+                    }))?)?;
                     std::process::exit(1);
                 }
                 return Err(err.into());
@@ -1035,7 +1070,7 @@ fn handle_run(args: RunArgs) -> Result<EmitResponse> {
             .clone()
             .unwrap_or_else(|| tokenzero_runtime::current_platform().to_string());
         let plan = plan_command_for_platform(&argv, args.cwd.as_deref(), false, &platform)?;
-        println!("{}", serde_json::to_string_pretty(&plan)?);
+        writeln_stdout(serde_json::to_string_pretty(&plan)?)?;
         std::process::exit(0);
     }
     let mut stdin_payload = None;
@@ -1228,7 +1263,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
         }
         Some(DoctorCommand::Ls) => emit_exit_json(install::doctor_ls(&root())),
         Some(DoctorCommand::RobotDocs) => {
-            print!("{}", install::doctor_robot_docs());
+            write_stdout(&install::doctor_robot_docs())?;
             Ok(())
         }
         Some(DoctorCommand::Explain { finding_id }) => {
@@ -1274,15 +1309,14 @@ fn emit_doctor_health(args: &DoctorArgs) -> Result<()> {
             json!({"schema_version": "tokenzero.doctor.health.v1", "status": status, "ok": ok, "line": line, "finding_count": finding_count, "blocking_findings": blocking, "informational_findings": info, "exit_code": exit_code}),
         )
     } else {
-        println!("{line}");
+        writeln_stdout(line)?;
         exit_if_nonzero(exit_code);
         Ok(())
     }
 }
 
 fn print_pretty<T: serde::Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
+    writeln_stdout(serde_json::to_string_pretty(value)?)
 }
 fn exit_if_nonzero(code: i32) {
     if code != 0 {
@@ -1342,7 +1376,7 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
             if args.json {
                 print_pretty(&report)
             } else {
-                print!("{}", tokenzero_pulse::render_text(&report));
+                write_stdout(&tokenzero_pulse::render_text(&report))?;
                 Ok(())
             }
         }
@@ -1380,7 +1414,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
             if args.json {
                 print_pretty(&report)?;
             } else {
-                print!("{}", report.render_text());
+                write_stdout(&report.render_text())?;
             }
         }
         Some(SessionLedgerCommand::Query { query }) => {
@@ -1454,12 +1488,9 @@ fn emit_pulse_result<T: serde::Serialize>(
         Ok(value) => emit_value(value, as_json),
         Err(err) if as_json => {
             let kind = err.kind();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
+            writeln_stdout(serde_json::to_string_pretty(
                     &json!({"schema_version": "tokenzero.pulse.error.v1", "ok": false, "status": "error", "operation": operation, "error_kind": io_error_kind_name(kind), "retryable": kind == std::io::ErrorKind::WouldBlock, "error": err.to_string(), "exit_code": 1})
-                )?
-            );
+                )?)?;
             std::process::exit(1);
         }
         Err(err) => Err(err.into()),
@@ -1754,15 +1785,12 @@ fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {
     emit_value(capabilities_json(), args.json)
 }
 
-fn handle_robot_docs(args: RobotDocsArgs) {
-    print!(
-        "{}",
-        match args.command {
+fn handle_robot_docs(args: RobotDocsArgs) -> Result<()> {
+    write_stdout(match args.command {
             RobotDocsCommand::Guide => robot_docs_guide(),
             RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
             RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
-        }
-    );
+        })
 }
 
 fn handle_package_audit(args: PackageAuditArgs) -> Result<serde_json::Value> {
@@ -1809,7 +1837,7 @@ fn handle_quote(args: QuoteArgs) -> Result<()> {
     if args.json {
         print_pretty(&json!({"platform": args.platform, "argv": argv, "command": quoted}))
     } else {
-        println!("{quoted}");
+        writeln_stdout(quoted)?;
         Ok(())
     }
 }
@@ -2281,18 +2309,18 @@ fn emit(value: EmitResponse) -> Result<()> {
             .iter()
             .map(|response| serde_json::from_str::<serde_json::Value>(&cli_json(response)))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        println!("{}", serde_json::to_string_pretty(&values)?);
+        writeln_stdout(serde_json::to_string_pretty(&values)?)?;
     } else {
         for response in &responses {
             if response.tool == "expand" && response.status == "ok" {
                 if let Some(visible) = &response.visible {
-                    print!("{}", visible.text);
+                    write_stdout(&visible.text)?;
                 }
             } else {
-                print!(
-                    "{}",
-                    render_cli_text_options(response, complete_read_source)
-                );
+                write_stdout(&render_cli_text_options(
+                    response,
+                    complete_read_source,
+                ))?;
             }
         }
     }
@@ -2355,16 +2383,16 @@ fn emit_with_json_options(
 ) -> Result<()> {
     let exit_error = response.status == "error";
     if as_json {
-        println!("{}", cli_json(&response));
+        writeln_stdout(cli_json(&response))?;
     } else if response.tool == "expand" && response.status == "ok" {
         if let Some(visible) = &response.visible {
-            print!("{}", visible.text);
+            write_stdout(&visible.text)?;
         }
     } else {
-        print!(
-            "{}",
-            render_cli_text_options(&response, complete_read_source)
-        );
+        write_stdout(&render_cli_text_options(
+            &response,
+            complete_read_source,
+        ))?;
     }
     if exit_error {
         std::process::exit(1);
@@ -2576,5 +2604,28 @@ mod package_audit_dist_tests {
         std::fs::write(&file, b"not-a-real-archive").unwrap();
         let artifacts = collect_package_audit_artifacts(&file).unwrap();
         assert_eq!(artifacts, vec![file]);
+    }
+}
+
+#[cfg(test)]
+mod stdout_crash_window_tests {
+    use super::{is_broken_pipe, map_stdout_write};
+    use std::io::{self, ErrorKind};
+
+    #[test]
+    fn broken_pipe_is_a_clean_write_not_a_panic() {
+        let err = io::Error::new(ErrorKind::BrokenPipe, "closed pipe");
+        assert!(is_broken_pipe(&err));
+        map_stdout_write(Err(err)).expect("broken pipe must not fail the CLI process");
+    }
+
+    #[test]
+    fn other_stdout_errors_still_fail_loud() {
+        let err = io::Error::new(ErrorKind::PermissionDenied, "stdout");
+        assert!(!is_broken_pipe(&err));
+        let message = map_stdout_write(Err(err))
+            .expect_err("permission errors must stay visible")
+            .to_string();
+        assert!(message.contains("stdout") || message.contains("Permission"), "{message}");
     }
 }
