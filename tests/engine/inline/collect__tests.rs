@@ -436,3 +436,54 @@ fn distinct_windows_and_symbols_stay_distinct() {
     assert!(rendered.contains("| 2: first hit here"), "{rendered}");
     assert!(rendered.contains("| 4: second hit here"), "{rendered}");
 }
+
+/// Literal TransformFamily: `tz_find` / `collect_search` uses exact substring
+/// (`literal_substring_hit`). Bug class: case-folding or dropping a hit when
+/// the needle is present as exact bytes.
+#[test]
+fn transform_family_literal_collect_search_preserves_needle_bytes() {
+    let needle = "NeedleCase";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("hay.rs"),
+        format!("alpha\npre-{needle}-post\nomega\n"),
+    )
+    .unwrap();
+    let mut stats = SearchStats::default();
+    let mut matches = Vec::new();
+    collect_search(
+        dir.path(),
+        dir.path(),
+        needle,
+        20,
+        50,
+        MAX_WALK_DEPTH,
+        &mut stats,
+        &mut matches,
+    );
+    assert!(
+        matches.iter().any(|m| m.text.contains(needle)),
+        "collect_search (tz_find backend) must keep exact needle bytes"
+    );
+    assert!(matches.iter().all(|m| literal_substring_hit(&m.text, needle)));
+}
+
+#[test]
+fn transform_family_literal_planted_casefold_or_drop_fails() {
+    let needle = "NeedleCase";
+    let line = format!("pre-{needle}-post");
+    assert!(
+        literal_substring_hit(&line, needle),
+        "current matcher must be exact substring"
+    );
+    let folded = line.to_ascii_lowercase();
+    assert!(
+        !literal_substring_hit(&folded, needle),
+        "planted case-fold must drop the exact needle: {folded}"
+    );
+    let dropped = "alpha\nomega\n";
+    assert!(
+        !literal_substring_hit(dropped, needle),
+        "planted drop-hit must not match"
+    );
+}

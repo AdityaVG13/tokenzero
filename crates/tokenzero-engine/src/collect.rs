@@ -54,6 +54,11 @@ pub struct SearchMatch {
     pub text: String,
 }
 
+/// In-process `tz_find` matcher: exact substring, not regex and not case-fold.
+pub(crate) fn literal_substring_hit(line: &str, query: &str) -> bool {
+    line.contains(query)
+}
+
 /// Context lines inlined on each side of a hit, matching FSZero's
 /// TARGET_CONTEXT_LINES policy for one-call actionable discovery results.
 const TARGET_CONTEXT_LINES: usize = 2;
@@ -512,7 +517,7 @@ pub(crate) fn collect_search(
                 .map(|rel| rel.display().to_string())
                 .unwrap_or_else(|| path_display.clone());
             for (idx, line) in text.lines().enumerate() {
-                if line.contains(query) {
+                if literal_substring_hit(line, query) {
                     if matches.len() >= max_results {
                         stats.truncated_by_results = true;
                         break;
