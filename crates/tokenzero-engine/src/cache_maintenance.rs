@@ -202,7 +202,32 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     })
 }
 
-pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
+fn open_maintenance_lock(cache_path: &Path) -> io::Result<File> {
+    let lock_path = engine_store_dir(cache_path).join("maintenance.lock");
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+}
+
+fn try_acquire_maintenance_lock(cache_path: &Path) -> io::Result<Option<File>> {
+    let lock = open_maintenance_lock(cache_path)?;
+    if FileExt::try_lock(&lock).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(lock))
+}
+
+fn acquire_maintenance_lock(cache_path: &Path) -> io::Result<File> {
+    let lock = open_maintenance_lock(cache_path)?;
+    FileExt::lock(&lock)?;
+    Ok(lock)
+}
+
+/// Sweep/GC/prune body. Callers must already hold `maintenance.lock`.
+fn run_cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     let tmp_sweep = tokenzero_recovery::sweep_stale_tmp_files(
         cache_path,
         tokenzero_recovery::STALE_TMP_MAX_AGE,
@@ -242,6 +267,20 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     })
 }
 
+/// CLI / explicit maintenance. Same exclusive `maintenance.lock` as the
+/// auto-coalesced constructor path (blocking so the requested sweep runs).
+pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
+    match acquire_maintenance_lock(cache_path) {
+        // SAFETY: `maintenance.lock` is the persist gate for gc.last, blob
+        // prune, spill prune, and plan-journal GC. The CLI writer used to skip
+        // this flock while MCP `cache_maintenance_coalesced` held it, so P1
+        // (constructor) and P2 (CLI) could tear the same store. Do not call
+        // this from a holder of the same lock (second fd self-deadlocks).
+        Ok(_lock) => run_cache_maintenance(cache_path, dry_run),
+        Err(error) => json!({"error": error.to_string()}),
+    }
+}
+
 pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
     {
         let Ok(guard) = auto_maintenance_state().lock() else {
@@ -266,30 +305,22 @@ pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
     if !dry_run && marker_fresh(&marker, AUTO_MAINTENANCE_COALESCE) {
         return json!({"coalesced": true, "skipped": "recent_cross_process"});
     }
-    let lock_path = engine_store_dir(cache_path).join("maintenance.lock");
-    let lock = match OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-    {
-        Ok(lock) => lock,
+    let lock = match try_acquire_maintenance_lock(cache_path) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return json!({"coalesced": true, "skipped": "cross_process_locked"}),
         Err(error) => return json!({"coalesced": true, "error": error.to_string()}),
     };
-    if FileExt::try_lock(&lock).is_err() {
-        return json!({"coalesced": true, "skipped": "cross_process_locked"});
-    }
     if !dry_run && marker_fresh(&marker, AUTO_MAINTENANCE_COALESCE) {
         return json!({"coalesced": true, "skipped": "recent_cross_process"});
     }
-    let report = cache_maintenance(cache_path, dry_run);
+    let report = run_cache_maintenance(cache_path, dry_run);
     if !dry_run {
         let _ = atomic_touch(&marker);
     }
     if let Ok(mut guard) = auto_maintenance_state().lock() {
         *guard = Some((cache_path.to_path_buf(), Instant::now()));
     }
+    drop(lock);
     report
 }
 

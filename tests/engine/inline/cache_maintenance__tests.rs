@@ -72,3 +72,27 @@ fn coalesced_maintenance_drops_state_before_marker_fs() {
         "auto_maintenance STATE must not stay held across marker_fresh I/O"
     );
 }
+
+#[test]
+fn cache_maintenance_and_coalesced_share_maintenance_lock() {
+    let directory = tempdir().unwrap();
+    let engine = directory.path().join("tokenzero");
+    fs::create_dir_all(&engine).unwrap();
+    let cache = engine.join("recovery-cache.json");
+    let pause = Arc::new(FsPause {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+    });
+    *FS_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
+
+    let worker_cache = cache.clone();
+    let worker = thread::spawn(move || cache_maintenance(&worker_cache, false));
+    pause.entered.wait();
+    let skipped = cache_maintenance_coalesced(&cache, false);
+    pause.release.wait();
+    worker.join().unwrap();
+    assert_eq!(
+        skipped["skipped"], "cross_process_locked",
+        "CLI cache_maintenance must hold the same maintenance.lock flock that coalesced try_locks; P1 CLI + P2 constructor otherwise GC the same store"
+    );
+}

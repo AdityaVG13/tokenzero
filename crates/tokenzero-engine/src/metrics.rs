@@ -3,18 +3,19 @@
 //! Tracks call counts, error counts, slow-call counts, and latency per
 //! canonical tool. In-process counters cover the current session; a small
 //! JSON sidecar next to the recovery cache accumulates the same counters
-//! across sessions (each call merges its own one-call delta, so concurrent
-//! processes accumulate rather than clobber — atomic rename prevents partial
-//! writes; a lost increment under a rare read-modify-write race is acceptable
-//! for approximate telemetry). Exposed via `resource://tokenzero/metrics`.
+//! across sessions (each flush merges dirty deltas under an exclusive flock
+//! so concurrent processes accumulate rather than clobber; atomic rename
+//! prevents partial writes). Exposed via `resource://tokenzero/metrics`.
 //!
-//! All recording is fail-open: a poisoned lock or unwritable sidecar never
-//! propagates an error into a tool call.
+//! All recording is fail-open: a poisoned lock, contended flock, or
+//! unwritable sidecar never propagates an error into a tool call.
 
+use fs4::FileExt;
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -92,8 +93,9 @@ pub(crate) struct ToolMetrics {
     /// Pending one-call deltas not yet merged to the on-disk sidecar.
     dirty: Mutex<BTreeMap<String, ToolStat>>,
     last_disk_flush: Mutex<Instant>,
-    /// Serializes take-dirty → load → merge → atomic write so concurrent
-    /// in-process flushes cannot clobber the same tmp file or drop a family.
+    /// In-process dirty-take / RMW companion. Not the cross-process persist
+    /// gate — that is `MetricsPersistLock` (flock). Lock order is flock then
+    /// `persist`; there is no persist-then-flock path.
     persist: Mutex<()>,
     tmp_nonce: AtomicU64,
 }
@@ -160,6 +162,14 @@ impl ToolMetrics {
 
     /// Merge dirty deltas into the on-disk sidecar (fail-open).
     pub(crate) fn flush_persisted(&self) {
+        // SAFETY: flock is the persist gate for `tool-metrics.json`. Two MCP
+        // processes (P1, P2) both RMW this sidecar; an in-process `persist`
+        // mutex cannot serialize them. Acquire flock first so a contended
+        // wait does not hold `persist`. Dirty is not taken until both gates
+        // are held, so a skipped flock leaves deltas for the next flush.
+        let Some(_lock) = MetricsPersistLock::acquire(&self.path) else {
+            return;
+        };
         let _persist = match self.persist.lock() {
             Ok(guard) => guard,
             Err(_) => return,
@@ -291,6 +301,51 @@ impl ToolMetrics {
     }
 }
 
+fn metrics_lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "tool-metrics.json".into(), |name| name.to_os_string());
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// RAII exclusive flock over a sibling lock file for the metrics sidecar.
+struct MetricsPersistLock {
+    file: std::fs::File,
+}
+
+impl MetricsPersistLock {
+    fn acquire(sidecar: &Path) -> Option<Self> {
+        let lock_path = metrics_lock_path(sidecar);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .ok()?;
+        const LOCK_ATTEMPTS: usize = 50;
+        for attempt in 0..LOCK_ATTEMPTS {
+            match FileExt::try_lock(&file) {
+                Ok(()) => return Some(Self { file }),
+                Err(_) if attempt + 1 < LOCK_ATTEMPTS => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for MetricsPersistLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 fn load_persisted_from_path(path: &Path) -> BTreeMap<String, ToolStat> {
     let mut out = BTreeMap::new();
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -312,3 +367,7 @@ impl Drop for ToolMetrics {
         self.flush_persisted();
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/metrics__tests.rs"]
+mod tests;
