@@ -1166,8 +1166,12 @@ impl<'a> LegacyMigration<'a> {
 
         // Persist alias removals successfully before deleting manifest.
         if apply && report.failed == 0 {
-            if let Err(_err) = self.store.persist_pending() {
-                report.record_error("store-persist", "persist failed: rollback incomplete", None);
+            if let Err(err) = self.store.persist_pending() {
+                report.record_error(
+                    "store-persist",
+                    format!("persist failed: rollback incomplete: {err}"),
+                    None,
+                );
                 // Don't delete manifest if persist failed
                 return report;
             }
@@ -1254,11 +1258,15 @@ impl<'a> LegacyMigration<'a> {
         // Treat persist failure as failure. Never delete CAS.
         if apply
             && report.migrated > 0
-            && let Err(_err) = self.store.persist_pending()
+            && let Err(err) = self.store.persist_pending()
         {
             report.failed += report.migrated;
             report.migrated = 0;
-            report.record_error("store-persist", "persist failed: cleanup incomplete", None);
+            report.record_error(
+                "store-persist",
+                format!("persist failed: cleanup incomplete: {err}"),
+                None,
+            );
         }
 
         report

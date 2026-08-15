@@ -871,11 +871,19 @@ fn ordinal_generation_path(path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn read_ordinal_generation(path: &Path) -> u64 {
-    fs::read_to_string(ordinal_generation_path(path))
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
+fn read_ordinal_generation(path: &Path) -> Result<u64, RecoveryError> {
+    let sidecar = ordinal_generation_path(path);
+    match fs::read_to_string(&sidecar) {
+        Ok(value) => value.trim().parse::<u64>().map_err(|_| {
+            invalid_data(format!(
+                "ordinal generation sidecar is unreadable: {}",
+                sidecar.display()
+            ))
+            .into()
+        }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn write_ordinal_generation(path: &Path, generation: u64) -> Result<(), RecoveryError> {
@@ -913,14 +921,14 @@ fn write_ordinal_generation(path: &Path, generation: u64) -> Result<(), Recovery
 }
 
 fn ensure_ordinal_generation_floor(path: &Path, generation: u64) -> Result<(), RecoveryError> {
-    if read_ordinal_generation(path) < generation {
+    if read_ordinal_generation(path)? < generation {
         write_ordinal_generation(path, generation)?;
     }
     Ok(())
 }
 
 fn next_ordinal_generation(path: &Path) -> Result<u64, RecoveryError> {
-    let current = read_ordinal_generation(path);
+    let current = read_ordinal_generation(path)?;
     // Generation one predates the durable sidecar. Never allocate it again, so
     // an upgraded cache cannot ABA-reuse a legacy ordinal after snapshot loss.
     let next = if current == 0 {
@@ -1441,12 +1449,12 @@ impl RecoveryStore {
         let Some(path) = self.persistence_path.as_deref() else {
             return Ok(());
         };
-        let wal = recovery_session_wal(path, &self.config)
-            .ok()
-            .map(|wal| wal.wal_path());
-        let published = match wal.as_deref() {
-            Some(wal) if wal.exists() => wal,
-            _ => path,
+        let wal = recovery_session_wal(path, &self.config)?;
+        let wal_path = wal.wal_path();
+        let published = if wal_path.exists() {
+            wal_path.as_path()
+        } else {
+            path
         };
         Self::sync_published_file(published)?;
         Self::sync_published_directory(path)
@@ -1586,7 +1594,7 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        let existing = match load_state(&path, &self.config)? {
+        let existing = match load_state_if_present(&path, &self.config)? {
             Some(existing) => {
                 ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
                 existing
@@ -2806,7 +2814,7 @@ impl RecoveryStore {
         let unchanged_since_last_write = self.disk_identity.is_some()
             && !wal.foreign_write_since(self.disk_identity, self.journal_identity);
         if !unchanged_since_last_write {
-            let existing = match load_state(&path, &self.config)? {
+            let existing = match load_state_if_present(&path, &self.config)? {
                 Some(existing) => {
                     ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
                     existing
@@ -3760,6 +3768,24 @@ pub(crate) fn load_state(
     };
     state.configure(config);
     Ok(Some(apply_session_wal(state, path, config)))
+}
+
+/// `None` only when the snapshot file is absent. An existing unreadable,
+/// unparseable, or oversized file is an error so persist/prune cannot treat
+/// it as empty and overwrite or delete dependents.
+pub(crate) fn load_state_if_present(
+    path: &Path,
+    config: &RecoveryConfig,
+) -> Result<Option<RecoveryState>, RecoveryError> {
+    match load_state(path, config)? {
+        Some(state) => Ok(Some(state)),
+        None if !path.exists() => Ok(None),
+        None => Err(invalid_data(format!(
+            "recovery snapshot is unreadable: {}",
+            path.display()
+        ))
+        .into()),
+    }
 }
 
 // Large blobs use verified content-addressed sidecars.

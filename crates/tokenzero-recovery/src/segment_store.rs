@@ -391,7 +391,7 @@ impl SegmentStore {
                 remove(&self.root.join(&d.data_file))?;
                 remove(&self.root.join(&d.index_file))?;
             }
-            sync_dir(&self.root);
+            sync_dir(&self.root)?;
         }
         Ok(n)
     }
@@ -436,7 +436,7 @@ impl SegmentStore {
         let p = Self::manifest_path(&self.cache_path);
         fs::copy(&p, bak(&p))?;
         File::open(bak(&p))?.sync_all()?;
-        sync_dir(&self.root);
+        sync_dir(&self.root)?;
         Ok(())
     }
 
@@ -457,7 +457,7 @@ impl SegmentStore {
             File::open(bak(&p))?.sync_all()?
         }
         fs::rename(tmp, p)?;
-        sync_dir(&self.root);
+        sync_dir(&self.root)?;
         Ok(())
     }
 }
@@ -531,7 +531,7 @@ fn cleanup_orphan_segments(
             remove(&entry.path())?;
         }
     }
-    sync_dir(root);
+    sync_dir(root)?;
     Ok(())
 }
 fn bak(p: &Path) -> PathBuf {
@@ -558,7 +558,7 @@ fn write_index(
     f.sync_all()?;
     drop(f);
     fs::rename(t, p)?;
-    sync_dir(root);
+    sync_dir(root)?;
     Ok(())
 }
 fn load_index(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentStoreError> {
@@ -674,9 +674,11 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-fn sync_dir(p: &Path) {
-    if let Ok(f) = File::open(p) {
-        let _ = f.sync_all();
+fn sync_dir(p: &Path) -> io::Result<()> {
+    match File::open(p) {
+        Ok(f) => crate::tolerate_unsupported_sync(f.sync_all()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 struct Lock(File);

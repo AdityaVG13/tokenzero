@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BlobEntry, PersistLock, RecoveryConfig, RecoveryError, RecoveryState, RecoveryStore,
-    blob_sidecar_dir, load_state, parse_blob_marker, recovery_lock_path, ref_index_blob_lru,
+    blob_sidecar_dir, load_state_if_present, parse_blob_marker, recovery_lock_path,
+    ref_index_blob_lru,
 };
 
 /// Age after which an abandoned atomic-write temp file is reclaimable. A
@@ -100,15 +101,7 @@ fn load_prune_snapshot(
     cache_path: &Path,
     config: &RecoveryConfig,
 ) -> Result<RecoveryState, RecoveryError> {
-    match load_state(cache_path, config)? {
-        Some(state) => Ok(state),
-        None if !cache_path.exists() => Ok(RecoveryState::empty(config)),
-        None => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "recovery snapshot is unreadable; refusing prune",
-        )
-        .into()),
-    }
+    Ok(load_state_if_present(cache_path, config)?.unwrap_or_else(|| RecoveryState::empty(config)))
 }
 
 /// Remove oldest unreferenced legacy blob sidecars until the budget is met.
@@ -390,6 +383,76 @@ mod prune_option_tests {
         assert!(
             msg.contains("unreadable"),
             "error must name unreadable snapshot, got {msg}"
+        );
+    }
+
+    #[test]
+    fn persist_pending_refuses_unreadable_snapshot() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let poison = [0xff, 0xfe, 0x00];
+        fs::write(&cache, poison).unwrap();
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .persist_pending()
+            .expect_err("unreadable snapshot must refuse persist");
+        assert_eq!(
+            fs::read(&cache).unwrap(),
+            poison,
+            "persist must not overwrite an unreadable snapshot"
+        );
+    }
+
+    #[test]
+    fn persist_pending_refuses_unparseable_snapshot() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let poison = b"{not-json";
+        fs::write(&cache, poison).unwrap();
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .persist_pending()
+            .expect_err("unparseable snapshot must refuse persist");
+        assert_eq!(
+            fs::read(&cache).unwrap(),
+            poison,
+            "persist must not overwrite an unparseable snapshot"
+        );
+    }
+
+    #[test]
+    fn persist_pending_refuses_corrupt_ordinal_generation() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut sidecar = cache.as_os_str().to_os_string();
+        sidecar.push(".ordinal-generation");
+        fs::write(&sidecar, "not-a-number\n").unwrap();
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let err = store
+            .persist_pending()
+            .expect_err("corrupt ordinal generation must refuse persist");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unreadable"),
+            "error must name unreadable ordinal sidecar, got {msg}"
+        );
+        assert!(
+            !cache.exists(),
+            "persist must not create a snapshot after a corrupt generation sidecar"
+        );
+    }
+
+    #[test]
+    fn persist_pending_missing_snapshot_still_creates() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .persist_pending()
+            .expect("missing snapshot must persist");
+        assert!(
+            cache.is_file(),
+            "missing snapshot persist must create the file"
         );
     }
 }
