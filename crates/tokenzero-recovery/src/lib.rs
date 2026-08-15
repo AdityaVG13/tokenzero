@@ -57,7 +57,10 @@ pub mod store_schema;
 pub mod working_set;
 
 pub use frecency::{HALF_LIFE_SECS, burst_compress, coldest, decay, score, score_from_order};
-pub use memory_verbs::{MemoryVerb, MemoryVerbEffect, MemoryVerbRequest, describe_memory_verb};
+pub use memory_verbs::{
+    MemoryVerb, MemoryVerbEffect, MemoryVerbError, MemoryVerbRequest, apply_memory_verb,
+    describe_memory_verb,
+};
 
 pub use action_cache::{
     ACTIONCACHE_GC_GRACE_SECS, ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError,
@@ -104,6 +107,7 @@ const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const TMP_RETRIES: usize = 16;
 const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_READ_MAX_BYTES: usize = (REF_INDEX_MAX_BYTES as usize) * 16;
+const REF_INDEX_COMPACT_EMERGENCY_MAX_BYTES: usize = REF_INDEX_READ_MAX_BYTES * 4;
 // Two-character shards saturated in production, making every append recompact
 // an irreducible multi-megabyte file. New writes use three characters while
 // reads retain compatibility with the immutable two-character generation.
@@ -3427,7 +3431,22 @@ fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
     let Some(file) = open_optional_file(shard)? else {
         return Ok(());
     };
-    let Some(text) = read_limited_utf8(file, REF_INDEX_READ_MAX_BYTES)? else {
+    let file_len = file.metadata()?.len();
+    let cap = if file_len > REF_INDEX_READ_MAX_BYTES as u64 {
+        (file_len
+            .saturating_add(1)
+            .min(REF_INDEX_COMPACT_EMERGENCY_MAX_BYTES as u64)) as usize
+    } else {
+        REF_INDEX_READ_MAX_BYTES
+    };
+    let Some(text) = read_limited_utf8(file, cap)? else {
+        if file_len > cap as u64 {
+            return Err(invalid_data(format!(
+                "ref index shard exceeds emergency compact cap ({cap} bytes): {}",
+                shard.display()
+            ))
+            .into());
+        }
         return Ok(());
     };
     write_ref_index_entries(shard, newest_ref_index_entries(&text, None).values())
