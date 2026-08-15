@@ -40,10 +40,10 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
         "zero.token.expand(ref: string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? } | Array<string | { ref, ... }>, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number } | { items: Array<{ text: string }>, count: number }>";
     "zero.token.compact", "zero.token", "Store arbitrary text/data behind a tz:// recovery ref via ingest" =>
         "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>";
-    "zero.token.compactMany", "zero.token", "Batch compact many payloads in one CodeMode step with one visible ack" =>
-        "zero.token.compactMany(items: Array<string | any>): Promise<{ items: Array<{ ref: string }>, refs: string[], count: number }>";
-    "zero.token.expandMany", "zero.token", "Batch expand many tz:// refs in one CodeMode step" =>
-        "zero.token.expandMany(items: Array<string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? }>): Promise<{ items: Array<{ text: string }>, count: number }>";
+    "zero.token.multiCompact", "zero.token", "Batch compact many payloads in one CodeMode step with one visible ack" =>
+        "zero.token.multiCompact(items: Array<string | any>): Promise<{ items: Array<{ ref: string }>, refs: string[], count: number }>";
+    "zero.token.multiExpand", "zero.token", "Batch expand many tz:// refs in one CodeMode step" =>
+        "zero.token.multiExpand(items: Array<string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? }>): Promise<{ items: Array<{ text: string }>, count: number }>";
     "zero.token.dedupe", "zero.token", "Deduplicate JSON/string values while preserving first occurrence order" =>
         "zero.token.dedupe(items: any[]): Promise<{ items: any[], count: number }>";
     "zero.expand", "zero", "Recover exact bytes from a tz:// ref (compatibility alias for zero.token.expand)" =>
@@ -157,8 +157,8 @@ fn make_example(path: &str) -> &'static str {
         "zero.edit" => r#"zero.edit("src/lib.rs", [{ find: "old", replace: "new" }])"#,
         "zero.expand" | "zero.token.expand" => r#"zero.expand("tz://blob/abc123")"#,
         "zero.compact" | "zero.token.compact" => r#"zero.compact(large_output)"#,
-        "zero.token.compactMany" => r#"zero.token.compactMany([payloadA, payloadB])"#,
-        "zero.token.expandMany" => r#"zero.token.expandMany([refA, refB])"#,
+        "zero.token.multiCompact" => r#"zero.token.multiCompact([payloadA, payloadB])"#,
+        "zero.token.multiExpand" => r#"zero.token.multiExpand([refA, refB])"#,
         "zero.token.dedupe" => r#"zero.token.dedupe([refA, refA, refB])"#,
         "zero.compact_max" => r#"zero.compact_max(large_output)"#,
         "zero.ingest" => r#"zero.ingest("large text payload")"#,
@@ -193,11 +193,11 @@ fn related_methods(path: &str) -> Vec<&'static str> {
         "zero.edit" => vec!["zero.read", "zero.find"],
         "zero.expand" | "zero.token.expand" => vec!["zero.compact", "zero.read"],
         "zero.compact" | "zero.token.compact" | "zero.compact_max" => {
-            vec!["zero.expand", "zero.ingest", "zero.token.compactMany"]
+            vec!["zero.expand", "zero.ingest", "zero.token.multiCompact"]
         }
-        "zero.token.compactMany" => vec!["zero.token.expandMany", "zero.token.dedupe"],
-        "zero.token.expandMany" => vec!["zero.token.compactMany", "zero.expand"],
-        "zero.token.dedupe" => vec!["zero.token.compactMany"],
+        "zero.token.multiCompact" => vec!["zero.token.multiExpand", "zero.token.dedupe"],
+        "zero.token.multiExpand" => vec!["zero.token.multiCompact", "zero.expand"],
+        "zero.token.dedupe" => vec!["zero.token.multiCompact"],
         "zero.pipe" => vec!["zero.batch", "zero.pick", "zero.filter_lines"],
         "zero.pick" => vec!["zero.pipe", "zero.filter_lines"],
         "zero.filter_lines" => vec!["zero.find", "zero.pick", "zero.pipe"],

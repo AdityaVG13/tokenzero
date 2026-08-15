@@ -125,11 +125,11 @@ pub fn classify_method(method: &str) -> OperationClass {
         .replace('-', "_");
     let classes = [
         (
-            "read,find,grep,glob,tree,expand,expandMany,expand_many,dedupe,mem,recall,rewrite,discover,pick,filter_lines,count,first,verdict,raw,count_tokens,assert,codemode.search,codemode.describe,codemode.limits,codemode.journalDoctor,journalDoctor,journal_doctor,codemode.journalInspect,journalInspect,journal_inspect,codemode.journalResume,journalResume,journal_resume,search,describe,limits",
+            "read,find,grep,glob,tree,expand,multiExpand,multi_expand,dedupe,mem,recall,rewrite,discover,pick,filter_lines,count,first,verdict,raw,count_tokens,assert,codemode.search,codemode.describe,codemode.limits,codemode.journalDoctor,journalDoctor,journal_doctor,codemode.journalInspect,journalInspect,journal_inspect,codemode.journalResume,journalResume,journal_resume,search,describe,limits",
             OperationClass::ReadOnly,
         ),
         (
-            "edit,codemode.journalRollback,journalRollback,journal_rollback,compact,compactMany,compact_many,compact_max,ingest,cache_pack,store_put,store_alias,migration_apply",
+            "edit,codemode.journalRollback,journalRollback,journal_rollback,compact,multiCompact,multi_compact,compact_max,ingest,cache_pack,store_put,store_alias,migration_apply",
             OperationClass::ReversibleStoreMutation,
         ),
         (

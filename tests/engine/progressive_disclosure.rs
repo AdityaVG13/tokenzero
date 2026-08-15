@@ -102,7 +102,7 @@ fn fixture_args(
 }
 
 fn is_expand_family(name: &str) -> bool {
-    name == "tz_expand" || name.ends_with(".expand") || name.ends_with("expandMany")
+    name == "tz_expand" || name.ends_with(".expand") || name.ends_with("multiExpand")
 }
 
 fn is_material_content_op(name: &str) -> bool {

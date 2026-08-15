@@ -699,9 +699,9 @@ fn build_registry() -> Vec<Operation> {
             error_kinds: read_errors(),
         }),
         binding_ex(BindingExSpec {
-            name: "zero.token.compactMany",
+            name: "zero.token.multiCompact",
             description: "Batch compact many payloads in one CodeMode step.",
-            aliases: &["zero.compactMany"],
+            aliases: &["zero.multiCompact"],
             mutability: M::StoreOnly,
             cost_class: K::Medium,
             ref_ownership: R::Multi,
@@ -716,9 +716,9 @@ fn build_registry() -> Vec<Operation> {
             error_kinds: read_errors(),
         }),
         binding_ex(BindingExSpec {
-            name: "zero.token.expandMany",
+            name: "zero.token.multiExpand",
             description: "Batch expand many tz:// refs in one CodeMode step.",
-            aliases: &["zero.expandMany"],
+            aliases: &["zero.multiExpand"],
             mutability: M::ReadOnly,
             cost_class: K::Medium,
             ref_ownership: R::Multi,

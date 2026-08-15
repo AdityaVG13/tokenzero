@@ -229,23 +229,23 @@ fn background_job_is_typed_codemode_only_and_bounded_without_cancel_claims() {
 #[test]
 fn mixed_and_homogeneous_batch_families_stay_distinct() {
     let mixed = resolve_operation("zero.batch").expect("mixed batch");
-    let compact_many = resolve_operation("zero.token.compactMany").expect("compact-many batch");
-    let expand_many = resolve_operation("zero.token.expandMany").expect("expand-many batch");
+    let multi_compact = resolve_operation("zero.token.multiCompact").expect("compact-many batch");
+    let multi_expand = resolve_operation("zero.token.multiExpand").expect("expand-many batch");
 
     assert_eq!(mixed.name, "tz_batch");
     assert_eq!(mixed.mutability, Mutability::WorkspaceMutating);
     assert!(mixed.args.schema["properties"].get("ops").is_some());
-    assert_eq!(compact_many.mutability, Mutability::StoreOnly);
+    assert_eq!(multi_compact.mutability, Mutability::StoreOnly);
     assert!(
-        compact_many.args.schema["properties"]
+        multi_compact.args.schema["properties"]
             .get("items")
             .is_some()
     );
-    assert_eq!(expand_many.mutability, Mutability::ReadOnly);
-    assert!(expand_many.args.schema["properties"].get("items").is_some());
-    assert_ne!(mixed.name, compact_many.name);
-    assert_ne!(mixed.name, expand_many.name);
-    assert_ne!(compact_many.name, expand_many.name);
+    assert_eq!(multi_expand.mutability, Mutability::ReadOnly);
+    assert!(multi_expand.args.schema["properties"].get("items").is_some());
+    assert_ne!(mixed.name, multi_compact.name);
+    assert_ne!(mixed.name, multi_expand.name);
+    assert_ne!(multi_compact.name, multi_expand.name);
 }
 
 #[test]

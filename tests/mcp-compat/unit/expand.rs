@@ -330,7 +330,7 @@ fn codemode_expand_passes_symbol() {
 }
 
 #[test]
-fn codemode_expand_many_mixed_windows() {
+fn codemode_multi_expand_mixed_windows() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("lines.txt");
     fs::write(&file, "one\ntwo\nthree\n").unwrap();

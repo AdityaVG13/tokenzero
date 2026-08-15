@@ -233,7 +233,7 @@ impl OperationClass {
             "search" | "grep" | "find" => Self::Search,
             "edit" | "write" | "mutate" => Self::Mutate,
             "shell" => Self::Shell,
-            "expand" | "expand_many" => Self::Expand,
+            "expand" | "multi_expand" => Self::Expand,
             "compact" | "cache_pack" => Self::Compact,
             "execute_code" | "codemode" => Self::Plan,
             _ => Self::Other,

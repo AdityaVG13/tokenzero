@@ -65,7 +65,7 @@ impl ExpandParams {
                     .to_string(),
             );
         };
-        // Object form `{ref, ...}` — same shape as expandMany items / MCP tool args.
+        // Object form `{ref, ...}` — same shape as multiExpand items / MCP tool args.
         if first.is_object() {
             if args.len() > 1 {
                 return Err(
@@ -74,7 +74,7 @@ impl ExpandParams {
                         .to_string(),
                 );
             }
-            return Self::from_expand_many_item(first);
+            return Self::from_multi_expand_item(first);
         }
         let ref_id = first
             .as_str()
@@ -119,7 +119,7 @@ impl ExpandParams {
         Ok(params)
     }
 
-    pub fn from_expand_many_item(item: &Value) -> Result<Self, String> {
+    pub fn from_multi_expand_item(item: &Value) -> Result<Self, String> {
         if let Some(ref_id) = item.as_str() {
             return Ok(Self {
                 ref_id: ref_id.to_string(),
@@ -128,11 +128,11 @@ impl ExpandParams {
         }
         let map = item
             .as_object()
-            .ok_or_else(|| "expandMany item must be a tz:// ref string or object".to_string())?;
+            .ok_or_else(|| "multiExpand item must be a tz:// ref string or object".to_string())?;
         let ref_id = map
             .get("ref")
             .and_then(Value::as_str)
-            .ok_or_else(|| "expandMany item object requires ref".to_string())?
+            .ok_or_else(|| "multiExpand item object requires ref".to_string())?
             .to_string();
         Ok(Self {
             ref_id,
