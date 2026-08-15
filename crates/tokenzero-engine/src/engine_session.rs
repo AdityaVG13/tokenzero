@@ -1,5 +1,5 @@
-use super::config::{ServeFlight, new_session_id};
-use super::session_persist::SessionPersistence;
+use super::config::{new_session_id, ServeFlight};
+use super::session_persist::{SessionPersistSnapshot, SessionPersistence};
 use super::*;
 
 impl TokenZeroEngine {
@@ -281,24 +281,32 @@ impl TokenZeroEngine {
         pending: Vec<(ServeKey, ServedRecord)>,
         summary: &SessionSummary,
     ) -> (u64, u64) {
-        let Ok(mut slot) = self.session.lock() else {
-            return (0, 0);
+        let (watermark, snapshot) = {
+            let Ok(mut slot) = self.session.lock() else {
+                return (0, 0);
+            };
+            let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
+            let changed_keys: Vec<_> = pending
+                .into_iter()
+                .map(|(key, record)| {
+                    memory.record(key.clone(), record);
+                    key
+                })
+                .collect();
+            memory.absorb(summary);
+            if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
+                memory.note_bytes(full, delta);
+            }
+            let watermark = memory.advance_hwm();
+            let snapshot = self
+                .session_persist
+                .is_some()
+                .then(|| SessionPersistSnapshot::from_memory(memory, &changed_keys));
+            (watermark, snapshot)
         };
-        let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
-        let changed_keys: Vec<_> = pending
-            .into_iter()
-            .map(|(key, record)| {
-                memory.record(key.clone(), record);
-                key
-            })
-            .collect();
-        memory.absorb(summary);
-        if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
-            memory.note_bytes(full, delta);
-        }
-        let watermark = memory.advance_hwm();
-        if let Some(ref persist) = self.session_persist {
-            persist.persist(memory, &changed_keys);
+        if let (Some(persist), Some(snapshot)) = (self.session_persist.as_ref(), snapshot.as_ref())
+        {
+            persist.persist(snapshot);
         }
         watermark
     }

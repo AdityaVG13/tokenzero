@@ -104,37 +104,33 @@ impl SessionPersistence {
         memory.restore_from_persist(records, scope.rollup.clone(), scope.session_hwm);
     }
 
-    pub(crate) fn persist(&self, memory: &SessionMemory, changed_keys: &[ServeKey]) {
-        let _ = crate::perf_profile::_profile_session_persist(|| {
-            self.persist_inner(memory, changed_keys)
-        });
+    pub(crate) fn persist(&self, snapshot: &SessionPersistSnapshot) {
+        let _ = crate::perf_profile::_profile_session_persist(|| self.persist_inner(snapshot));
     }
 
-    fn persist_inner(
-        &self,
-        memory: &SessionMemory,
-        changed_keys: &[ServeKey],
-    ) -> std::io::Result<bool> {
+    fn persist_inner(&self, snapshot: &SessionPersistSnapshot) -> std::io::Result<bool> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         ensure_private_dir(parent)?;
         let _lock = SessionPersistLock::acquire(session_lock_path(&self.path))?;
-        let snapshot = memory.records_snapshot();
-        let records = changed_keys
-            .iter()
-            .filter_map(|key| {
-                snapshot.get(key).map(|record| PersistedRecordEntry {
-                    key: key.clone(),
-                    record: record.clone(),
-                    seq: 0,
-                })
+        if self
+            .last_persisted
+            .lock()
+            .ok()
+            .as_deref()
+            .and_then(Option::as_deref)
+            .and_then(|body| serde_json::from_str::<PersistedDelta>(body).ok())
+            .is_some_and(|prev| {
+                prev.scope_id == self.scope_id && snapshot.session_hwm <= prev.session_hwm
             })
-            .collect();
+        {
+            return Ok(false);
+        }
         let delta = PersistedDelta {
             version: STATE_VERSION,
             scope_id: self.scope_id.clone(),
-            records,
-            rollup: memory.persisted_rollup(),
-            session_hwm: memory.session_hwm(),
+            records: snapshot.records.clone(),
+            rollup: snapshot.rollup.clone(),
+            session_hwm: snapshot.session_hwm,
         };
         let delta_body = serde_json::to_string(&delta)?;
         if self
@@ -157,22 +153,15 @@ impl SessionPersistence {
             .is_none_or(|state| state.version < STATE_VERSION)
         {
             let mut state = base.unwrap_or_default();
-            let mut records: Vec<_> = snapshot
-                .iter()
-                .map(|(key, record)| PersistedRecordEntry {
-                    key: key.clone(),
-                    record: record.clone(),
-                    seq: 0,
-                })
-                .collect();
+            let mut records = snapshot.records.clone();
             normalize_records(&mut records);
             state.version = STATE_VERSION;
             state.scopes.insert(
                 self.scope_id.clone(),
                 PersistedScope {
                     records,
-                    rollup: memory.persisted_rollup(),
-                    session_hwm: memory.session_hwm(),
+                    rollup: snapshot.rollup.clone(),
+                    session_hwm: snapshot.session_hwm,
                 },
             );
             let body = serde_json::to_string_pretty(&state)?;
@@ -272,6 +261,35 @@ struct PersistedDelta {
     records: Vec<PersistedRecordEntry>,
     rollup: SessionRollup,
     session_hwm: u64,
+}
+
+/// Changed records plus rollup/hwm captured under the session mutex.
+/// Persist merges this into on-disk state under the flock only.
+pub(crate) struct SessionPersistSnapshot {
+    records: Vec<PersistedRecordEntry>,
+    rollup: SessionRollup,
+    session_hwm: u64,
+}
+
+impl SessionPersistSnapshot {
+    pub(crate) fn from_memory(memory: &SessionMemory, changed_keys: &[ServeKey]) -> Self {
+        let live = memory.records_snapshot();
+        let records = changed_keys
+            .iter()
+            .filter_map(|key| {
+                live.get(key).map(|record| PersistedRecordEntry {
+                    key: key.clone(),
+                    record: record.clone(),
+                    seq: 0,
+                })
+            })
+            .collect();
+        Self {
+            records,
+            rollup: memory.persisted_rollup(),
+            session_hwm: memory.session_hwm(),
+        }
+    }
 }
 
 fn load_state(path: &Path) -> Option<SessionMemoryState> {
