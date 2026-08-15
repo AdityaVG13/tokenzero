@@ -112,19 +112,6 @@ impl SessionPersistence {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         ensure_private_dir(parent)?;
         let _lock = SessionPersistLock::acquire(session_lock_path(&self.path))?;
-        if self
-            .last_persisted
-            .lock()
-            .ok()
-            .as_deref()
-            .and_then(Option::as_deref)
-            .and_then(|body| serde_json::from_str::<PersistedDelta>(body).ok())
-            .is_some_and(|prev| {
-                prev.scope_id == self.scope_id && snapshot.session_hwm <= prev.session_hwm
-            })
-        {
-            return Ok(false);
-        }
         let delta = PersistedDelta {
             version: STATE_VERSION,
             scope_id: self.scope_id.clone(),
@@ -328,7 +315,7 @@ fn apply_delta(state: &mut SessionMemoryState, delta: PersistedDelta) {
     );
     scope.records = records.into_values().collect();
     scope.rollup = delta.rollup;
-    scope.session_hwm = delta.session_hwm;
+    scope.session_hwm = scope.session_hwm.max(delta.session_hwm);
     state.version = STATE_VERSION;
 }
 

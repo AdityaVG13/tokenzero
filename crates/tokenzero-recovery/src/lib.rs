@@ -3300,33 +3300,33 @@ fn locked_ref_index_shard(root: &Path, ref_id: &str) -> Option<(PathBuf, Persist
         .map(|lock| (shard, lock))
 }
 
-fn compact_ref_index_if_needed(shard: &Path) {
+fn compact_ref_index_if_needed(shard: &Path) -> Result<(), RecoveryError> {
     let Ok(meta) = fs::metadata(shard) else {
-        return;
+        return Ok(());
     };
     if meta.len() <= REF_INDEX_MAX_BYTES {
-        return;
+        return Ok(());
     }
     // Below the stale-ratio gate a shard can still grow toward the read
     // ceiling, after which ref_index_text returns None and the shard vanishes.
     let near_unread = meta.len() >= (REF_INDEX_READ_MAX_BYTES as u64 / 2);
     if !near_unread {
         let Some(text) = ref_index_text(shard) else {
-            return;
+            return Ok(());
         };
         let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
         if lines == 0 {
-            return;
+            return Ok(());
         }
         let live = newest_ref_index_entries(&text, None).len();
         let stale = lines.saturating_sub(live);
         // Append-only until most of the shard is superseded. Rewrite-compaction
         // at the 1MiB threshold is what a kill mid-rename used to risk.
         if (stale as f64) / (lines as f64) < REF_INDEX_RECLAIM_STALE_RATIO {
-            return;
+            return Ok(());
         }
     }
-    let _ = compact_ref_index_shard(shard);
+    compact_ref_index_shard(shard)
 }
 
 const REF_INDEX_RECLAIM_STALE_RATIO: f64 = 0.75;
@@ -3373,7 +3373,12 @@ fn append_blob_refs_to_ref_index(
             .copied()
             .unwrap_or_else(|| classify_ref(ref_id, None));
         if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false, 0, None).is_ok() {
-            compact_ref_index_if_needed(&shard);
+            if let Err(err) = compact_ref_index_if_needed(&shard) {
+                panic!(
+                    "ref-index compact failed for {}: {err}",
+                    shard.display()
+                );
+            }
         }
     }
 }
@@ -3630,7 +3635,12 @@ fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentC
         expansion_count,
         Some(now),
     );
-    compact_ref_index_if_needed(&shard);
+    if let Err(err) = compact_ref_index_if_needed(&shard) {
+        panic!(
+            "ref-index compact failed for {}: {err}",
+            shard.display()
+        );
+    }
 }
 
 /// Export per-content-class expansion rates from the per-user ref index.

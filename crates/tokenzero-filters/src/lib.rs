@@ -164,7 +164,7 @@ fn rewrite_for_spec(family: &str, spec: &str) -> Option<String> {
 fn probe_install() -> bool {
     let tokenzero = match std::env::var_os(TOKENZERO_BIN_ENV) {
         Some(path) if !path.is_empty() => is_executable_file(Path::new(&path)),
-        _ => find_on_path("tokenzero").is_some(),
+        _ => find_on_path("tokenzero").is_some() || well_known_tokenzero().is_some(),
     };
     let rg_override = match std::env::var_os(TOKENZERO_RG_PATH_ENV) {
         Some(path) if !path.is_empty() => is_executable_file(Path::new(&path)),
@@ -173,7 +173,24 @@ fn probe_install() -> bool {
     tokenzero && rg_override
 }
 
+fn well_known_tokenzero() -> Option<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/tokenzero"),
+        PathBuf::from("/usr/local/bin/tokenzero"),
+        PathBuf::from("/usr/bin/tokenzero"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(".tokenzero/bin/tokenzero"));
+        candidates.push(home.join(".cargo/bin/tokenzero"));
+    }
+    candidates.into_iter().find(|path| is_executable_file(path))
+}
+
 fn probe_mcp() -> bool {
+    if !probe_install() {
+        return false;
+    }
     let surface_ok = match std::env::var(TOKENZERO_MCP_TOOL_SURFACE_ENV) {
         Err(_) => true,
         Ok(value) => mcp_surface_ok(&value),

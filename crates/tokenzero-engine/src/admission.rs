@@ -40,6 +40,7 @@ pub enum AdmissionReason {
     InlineCheaperThanRef,
     NoExpectedReuse,
     ExpansionAlways,
+    EstimatesMissing,
 }
 
 /// One admission decision for one payload. Serialized form is the
@@ -127,10 +128,21 @@ impl AdmissionEstimator {
         horizon: Option<u64>,
         handling_cost_tokens: u64,
     ) -> AdmissionDecision {
-        let p_milli = expansion_probability_milli
-            .unwrap_or(self.default_expansion_probability_milli)
-            .min(1000);
-        let horizon = horizon.unwrap_or(self.default_horizon);
+        let (p_milli, horizon) = match (expansion_probability_milli, horizon) {
+            (Some(p), Some(h)) => (p.min(1000), h),
+            _ => {
+                return AdmissionDecision {
+                    schema: ADMISSION_SCHEMA_V1,
+                    policy: AdmissionPolicy::HorizonCost,
+                    admit_exact_ref: false,
+                    reason: AdmissionReason::EstimatesMissing,
+                    payload_bytes,
+                    expansion_probability_milli: expansion_probability_milli.unwrap_or(0),
+                    horizon: horizon.unwrap_or(0),
+                    handling_cost_tokens,
+                };
+            }
+        };
         let payload_tokens = u128::from((payload_bytes / ADMISSION_BYTES_PER_TOKEN) as u64);
         let (admit, reason) = if horizon == 0 {
             (false, AdmissionReason::NoExpectedReuse)

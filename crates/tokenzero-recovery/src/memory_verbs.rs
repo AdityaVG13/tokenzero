@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 
-use crate::working_set::{SpanAnchor, WorkingSet};
+use crate::working_set::{SpanAnchor, WorkingSet, WorkingSetResponse};
 use crate::{RecoveryError, RecoveryStore};
 
 /// Six RACC actions-v2 memory-management verbs (tokenzero-fmeo).
@@ -134,7 +134,7 @@ pub fn apply_memory_verb(
     match request.verb {
         MemoryVerb::Store => {
             let (text, anchor) = payload_anchor(request)?;
-            working_set.admit(store, text, anchor)?;
+            require_visible_admit(request.verb, working_set.admit(store, text, anchor)?)?;
         }
         MemoryVerb::CommitSession => {
             let path = store.persistence_path.clone().ok_or_else(|| {
@@ -166,7 +166,10 @@ pub fn apply_memory_verb(
                     format!("no capsule at {label}"),
                 ));
             };
-            working_set.rewrite_render(store, text, anchor)?;
+            require_visible_admit(
+                request.verb,
+                working_set.rewrite_render(store, text, anchor)?,
+            )?;
         }
         MemoryVerb::ForgetVisible => {
             let id = span_id(request)?;
@@ -201,6 +204,19 @@ pub fn apply_memory_verb(
         substrate: request.verb.substrate_target().to_string(),
         applied: true,
     })
+}
+
+fn require_visible_admit(
+    verb: MemoryVerb,
+    admission: crate::working_set::Admission,
+) -> Result<(), MemoryVerbError> {
+    if matches!(admission.response, WorkingSetResponse::AlreadyResident) {
+        return Err(not_applied(
+            verb,
+            "already resident; no visible working-set mutation",
+        ));
+    }
+    Ok(())
 }
 
 fn not_applied(verb: MemoryVerb, reason: impl Into<String>) -> MemoryVerbError {

@@ -607,9 +607,7 @@ impl TokenZeroEngine {
                 "horizon_cost_refused",
                 "HorizonCost admission refused: expansion probability and \
                  horizon estimates are missing",
-                Some(
-                    "use ByteThreshold, or supply per-call expansion_probability_milli and horizon",
-                ),
+                Some("use ByteThreshold until labeled expansion/horizon exist"),
             )),
         }
     }
