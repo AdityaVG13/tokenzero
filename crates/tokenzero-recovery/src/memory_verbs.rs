@@ -199,7 +199,7 @@ pub fn apply_memory_verb(
         }
         MemoryVerb::LinkRefs => {
             let (source, alias) = link_pair(request)?;
-            if !working_set.link_refs(store, source, alias) {
+            if !working_set.link_refs(store, source, alias)? {
                 return Err(not_applied(
                     request.verb,
                     format!("link_refs did not record {source} -> {alias}"),

@@ -445,8 +445,11 @@ impl WorkingSet {
 
         self.telemetry.faults = self.telemetry.faults.saturating_add(1);
         let started = Instant::now();
-        let effective_start = start_line.or(fragment_window.map(|window| window.0));
-        let effective_end = end_line.or(fragment_window.map(|window| window.1));
+        // Expand's fragment on the ref wins over start_line/end_line args.
+        // Mirror that here so the advertised absolute window matches the
+        // bytes actually returned (not the caller's overridden range).
+        let effective_start = fragment_window.map(|window| window.0).or(start_line);
+        let effective_end = fragment_window.map(|window| window.1).or(end_line);
         let partial = effective_start.is_some() || effective_end.is_some();
         // Expand the span's canonical blob ref. `lookup_ref` may be a
         // link_refs alias; portable expand rejects many alias spellings
@@ -469,12 +472,23 @@ impl WorkingSet {
             };
             (span.anchor.clone(), canonical.clone(), expand_ref)
         };
-        let result = store.expand(&expand_ref, Some("raw"), start_line, end_line, None, None);
+        let result = store.expand(
+            &expand_ref,
+            Some("raw"),
+            effective_start,
+            effective_end,
+            None,
+            None,
+        );
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         self.record_rehydration_latency(elapsed_us);
         self.refresh_rates();
         if !result.found {
-            return Ok(None);
+            return Err(std::io::Error::other(format!(
+                "working-set rehydrate of owned ref {ref_id} failed: {}",
+                result.reason
+            ))
+            .into());
         }
         let rehydrated_tokens = count_tokens(&result.content) as u64;
 
@@ -568,30 +582,40 @@ impl WorkingSet {
     }
 
     /// Record that `alias` recovers the same spans as `source`.
-    /// Persists `alias -> source` so `RecoveryStore::expand` can resolve it.
-    /// Returns false when `source` is unknown, equal to `alias`, or the map is unchanged.
-    pub fn link_refs(&mut self, store: &mut RecoveryStore, source: &str, alias: &str) -> bool {
+    /// Persists `alias -> source` so `RecoveryStore::expand` can resolve it
+    /// after restart. Returns `Ok(false)` when `source` is unknown, equal to
+    /// `alias`, or the map is unchanged. Persist failure is `Err`, never a
+    /// successful unpersisted serve.
+    pub fn link_refs(
+        &mut self,
+        store: &mut RecoveryStore,
+        source: &str,
+        alias: &str,
+    ) -> Result<bool, RecoveryError> {
         if source.is_empty() || alias.is_empty() || source == alias {
-            return false;
+            return Ok(false);
         }
         let Some(ids) = self.evicted_refs.get(source).cloned() else {
-            return false;
+            return Ok(false);
         };
         if ids.is_empty() {
-            return false;
+            return Ok(false);
         }
+        let already = self
+            .evicted_refs
+            .get(alias)
+            .is_some_and(|entry| ids.iter().all(|id| entry.contains(id)));
+        if already {
+            return Ok(false);
+        }
+        store.store_alias(alias, source)?;
         let entry = self.evicted_refs.entry(alias.to_string()).or_default();
-        let before = entry.len();
         for id in ids {
             if !entry.contains(&id) {
                 entry.push(id);
             }
         }
-        if entry.len() <= before {
-            return false;
-        }
-        store.store_alias_deferred(alias, source);
-        true
+        Ok(true)
     }
 
     pub fn used_tokens(&self) -> usize {
@@ -916,5 +940,103 @@ mod input_validation_tests {
             set.take_prefetch_hints().len() <= MAX_QUEUED_PREFETCH_HINTS,
             "undrained prefetch hints must not grow without bound"
         );
+    }
+
+    #[test]
+    fn link_refs_survives_store_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("recovery-cache.json");
+        let mut store = RecoveryStore::new(Some(path.clone()));
+        let mut set = WorkingSet::new(8192);
+        let body = "link-persist-body\nsecond line\n";
+        let admission = set
+            .admit(
+                &mut store,
+                body.into(),
+                SpanAnchor {
+                    path: PathBuf::from("src/link.rs"),
+                    symbol: None,
+                    start_line: 1,
+                    end_line: 2,
+                },
+            )
+            .unwrap();
+        let source = set
+            .evict(&mut store, admission.id)
+            .unwrap()
+            .expect("page out")
+            .ref_id;
+        let alias = "tz://s/0123456789abcdef";
+        assert!(set.link_refs(&mut store, &source, alias).unwrap());
+
+        let mut reopened = RecoveryStore::new(Some(path));
+        let expanded = reopened.expand(alias, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "{}", expanded.reason);
+        assert_eq!(expanded.content, body);
+    }
+
+    #[test]
+    fn rehydrate_owned_ref_fails_loud_when_expand_misses() {
+        let dir = tempdir().unwrap();
+        let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+        let mut set = WorkingSet::new(8192);
+        let admission = set
+            .admit(
+                &mut store,
+                "only one line\n".into(),
+                SpanAnchor {
+                    path: PathBuf::from("src/one.rs"),
+                    symbol: None,
+                    start_line: 1,
+                    end_line: 1,
+                },
+            )
+            .unwrap();
+        let source = set
+            .evict(&mut store, admission.id)
+            .unwrap()
+            .expect("page out")
+            .ref_id;
+        let err = set
+            .rehydrate_ref(&mut store, &source, Some(99), Some(99))
+            .expect_err("owned-ref expand miss must not look like an unknown ref");
+        assert!(
+            err.to_string().contains("window-out-of-range")
+                || err.to_string().contains("rehydrate of owned ref"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rehydrate_fragment_window_wins_over_start_line_args() {
+        let dir = tempdir().unwrap();
+        let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+        let mut set = WorkingSet::new(8192);
+        let body = "line-one\nline-two\nline-three\n";
+        let admission = set
+            .admit(
+                &mut store,
+                body.into(),
+                SpanAnchor {
+                    path: PathBuf::from("src/win.rs"),
+                    symbol: None,
+                    start_line: 10,
+                    end_line: 12,
+                },
+            )
+            .unwrap();
+        let source = set
+            .evict(&mut store, admission.id)
+            .unwrap()
+            .expect("page out")
+            .ref_id;
+        let fault = set
+            .rehydrate_ref(&mut store, &format!("{source}#L1-1"), Some(2), Some(2))
+            .unwrap()
+            .expect("fragment window must rehydrate");
+        assert!(fault.partial);
+        assert_eq!(fault.anchor.start_line, 10);
+        assert_eq!(fault.anchor.end_line, 10);
+        assert_eq!(set.visible_lines().last().copied(), Some("line-one\n"));
     }
 }

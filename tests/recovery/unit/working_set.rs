@@ -369,8 +369,11 @@ fn link_refs_persists_store_alias_and_rehydrate_expands_canonical() {
     let source = evicted.ref_id;
     let alias = "tz://s/0123456789abcdef";
 
-    assert!(set.link_refs(&mut store, &source, alias));
-    assert_eq!(set.evicted_refs().get(&source), set.evicted_refs().get(alias));
+    assert!(set.link_refs(&mut store, &source, alias).unwrap());
+    assert_eq!(
+        set.evicted_refs().get(&source),
+        set.evicted_refs().get(alias)
+    );
     assert_eq!(store.alias_target(alias).as_deref(), Some(source.as_str()));
     let expanded = store.expand(alias, Some("raw"), None, None, None, None);
     assert!(expanded.found, "{}", expanded.reason);
@@ -398,7 +401,7 @@ fn replacing_evicted_span_drops_linked_alias_ids() {
         .unwrap();
     let source = admission.evicted[0].ref_id.clone();
     let alias = "tz://s/fedcba9876543210";
-    assert!(set.link_refs(&mut store, &source, alias));
+    assert!(set.link_refs(&mut store, &source, alias).unwrap());
 
     let replacement = large("replacement-link");
     set.admit(&mut store, replacement, anchor("src/replace.rs"))
