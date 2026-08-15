@@ -2423,3 +2423,4 @@ use audits::bench::*;
 use audits::os_reach::*;
 use audits::recovery::*;
 use audits::release::*;
+use audits::shared::*;

@@ -36,13 +36,6 @@ type FalseSuccessCaseDef = (
     Option<&'static str>,
 );
 type HarmCaseDef = (&'static str, &'static [&'static str], &'static str);
-type ProtectedAnchorCaseDef = (
-    &'static str,
-    &'static str,
-    &'static [&'static str],
-    &'static str,
-    &'static str,
-);
 
 macro_rules! case_table {
     ($type:ty, $name:ident, $($row:expr);+ $(;)?) => {
@@ -76,24 +69,6 @@ case_table! { HarmCaseDef, WINDOWS_HARM_CASES,
     ("hidden_error", &["powershell", "-NoProfile", "-Command", "for ($i = 0; $i -lt 100; $i++) { Write-Output 'noise' }; [Console]::Error.WriteLine('error: hidden'); exit 2"], "error");
     ("secret_masking", &["powershell", "-NoProfile", "-Command", "Write-Output 'token=abc123'; [Console]::Error.WriteLine('error: fail'); exit 2"], "token=[masked]");
     ("diff_hunk", &["powershell", "-NoProfile", "-Command", "Write-Output 'diff --git a/a b/a'; Write-Output '@@ -1 +1 @@'; Write-Output '-old'; Write-Output '+new'"], "@@ -1 +1 @@");
-}
-
-case_table! { ProtectedAnchorCaseDef, PROTECTED_ANCHOR_CASES_DEF,
-    ("failing_test_assertion",
-     "nonzero test output keeps exit code, failing test, path line, assertion, stderr ref, and combined ref",
-     &["tests::alpha", "src/lib.rs:42", "assertion failed", "left: 1", "right: 2", "status: command_failed", "exit_code: 101", "stderr_ref:", "combined_ref:"],
-     "echo 'running 1 test'; echo 'test tests::alpha ... FAILED'; echo 'src/lib.rs:42:9: assertion failed: left == right' >&2; echo 'left: 1' >&2; echo 'right: 2' >&2; echo 'error: test failed' >&2; exit 101",
-     "Write-Output 'running 1 test'; Write-Output 'test tests::alpha ... FAILED'; [Console]::Error.WriteLine('src/lib.rs:42:9: assertion failed: left == right'); [Console]::Error.WriteLine('left: 1'); [Console]::Error.WriteLine('right: 2'); [Console]::Error.WriteLine('error: test failed'); exit 101");
-    ("warning_changed_file",
-     "warning output keeps warning and changed-file anchors",
-     &["warning: unused import", "M src/main.rs", "modified: src/lib.rs", "combined_ref:"],
-     "echo 'warning: unused import'; echo 'M src/main.rs'; echo 'modified: src/lib.rs'",
-     "Write-Output 'warning: unused import'; Write-Output 'M src/main.rs'; Write-Output 'modified: src/lib.rs'");
-    ("diff_hunk",
-     "diff output keeps changed path, hunk, and added line anchors",
-     &["diff --git", "src/main.rs", "@@ -1 +1 @@", "+new", "combined_ref:"],
-     "printf 'diff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n'",
-     "Write-Output 'diff --git a/src/main.rs b/src/main.rs'; Write-Output '@@ -1 +1 @@'; Write-Output '-old'; Write-Output '+new'");
 }
 
 pub(crate) fn run_exact_recovery_shell(
@@ -388,7 +363,7 @@ pub(crate) fn protected_anchor_cases(root: &Path, cache: &Path) -> Vec<Protected
             |(id, desc, anchors, unix_cmd, win_cmd)| ProtectedAnchorCase {
                 id,
                 description: desc,
-                args: super::release::one_shot_shell_args(
+                args: one_shot_shell_args(
                     root,
                     cache,
                     if cfg!(windows) { win_cmd } else { unix_cmd },
@@ -463,10 +438,6 @@ pub(crate) fn run_json_command_lenient(exe: &Path, args: &[String]) -> Result<Js
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(serde_json::from_slice(&output.stdout)?)
-}
-
-pub(crate) fn run_json_args(root: &str, cache: &str) -> Vec<String> {
-    list! {"run".to_string(), "--json".to_string(), "--cache-path".to_string(),cache.to_string(), "--allowed-root".to_string(),root.to_string(), "--cwd".to_string(),root.to_string(),}
 }
 
 pub(crate) fn expand_ref_with_exe(exe: &Path, cache: &Path, ref_id: &str) -> Result<String> {

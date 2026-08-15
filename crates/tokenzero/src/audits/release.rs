@@ -81,7 +81,7 @@ pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>
 
     // Build shell case rows
     let shell_cases: Vec<(String, Vec<String>, Vec<&str>)> =
-        super::recovery::PROTECTED_ANCHOR_CASES_DEF
+        super::shared::PROTECTED_ANCHOR_CASES_DEF
             .iter()
             .take(3)
             .zip(ONE_SHOT_SHELL_CASES)
@@ -148,22 +148,6 @@ pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>
 pub(crate) fn anchors_present(visible: &str, anchors: &[&str]) -> bool {
     let vl = visible.to_ascii_lowercase();
     anchors.iter().all(|a| vl.contains(&a.to_ascii_lowercase()))
-}
-
-pub(crate) fn one_shot_shell_args(root: &Path, cache: &Path, command: &str) -> Vec<String> {
-    let mut args = run_json_args(&root.to_string_lossy(), &cache.to_string_lossy());
-    args.push("--".to_string());
-    if cfg!(windows) {
-        args.extend([
-            "powershell".to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            command.to_string(),
-        ]);
-    } else {
-        args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
-    }
-    args
 }
 
 pub(crate) fn run_source_currency_audit(
