@@ -4,17 +4,58 @@
 //! opening a stdio server. Domain execution remains shared with the raw worker.
 
 use std::env;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use tokenzero_core::McpToolSurface;
 use tokenzero_install::packaging::{
-    PackageSurface, assert_packaged_surface_features, assert_surface_compiled,
-    default_install_prefix, install_surface, package_identity, reject_non_stdio_args,
-    sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
+    assert_packaged_surface_features, assert_surface_compiled, default_install_prefix,
+    install_surface, package_identity, reject_non_stdio_args, sbom_document,
+    semantic_contract_digest, uninstall_report, uninstall_surface, PackageSurface,
 };
-use tokenzero_mcp_compat::{EngineConfig, run_fastmcp_stdio};
+use tokenzero_mcp_compat::{run_fastmcp_stdio, EngineConfig};
 
 const SURFACE: PackageSurface = PackageSurface::Mcp;
+
+fn is_broken_pipe(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::BrokenPipe
+}
+
+fn map_stdout_write(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if is_broken_pipe(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn write_stdout(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    map_stdout_write(
+        stdout
+            .write_all(text.as_bytes())
+            .and_then(|_| stdout.flush()),
+    )
+}
+
+fn writeln_stdout(text: impl AsRef<str>) -> io::Result<()> {
+    let text = text.as_ref();
+    if text.ends_with('\n') {
+        write_stdout(text)
+    } else {
+        write_stdout(&format!("{text}\n"))
+    }
+}
+
+/// Packaging verbs print to stdout, not the FastMCP JSON-RPC stream. Broken
+/// pipe is a clean CLI exit (same class as `tokenzero` after 6586c19); other
+/// write errors fail loud.
+fn emit_stdout(text: impl AsRef<str>) {
+    if let Err(error) = writeln_stdout(text) {
+        eprintln!("tokenzero-mcp: {error}");
+        process::exit(2);
+    }
+}
 
 fn main() {
     // SAFETY: single-threaded before any other TOKENZERO_PACKAGE_SURFACE readers.
@@ -42,7 +83,7 @@ fn main() {
         .any(|a| a == "help" || a == "--help" || a == "-h")
     {
         let id = package_identity(SURFACE);
-        println!(
+        emit_stdout(format!(
             "tokenzero-mcp — FastMCP per-operation surface (mutually exclusive with tokenzero-codemode)\n\
              semantic_contract_digest: {}\n\
              selection: native CodeMode clients install this package\n\
@@ -51,15 +92,12 @@ fn main() {
              identity: {}",
             semantic_contract_digest(),
             id
-        );
+        ));
         process::exit(0);
     }
 
     if verbs.iter().any(|a| a == "sbom") {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&sbom_document(SURFACE)).unwrap()
-        );
+        emit_stdout(serde_json::to_string_pretty(&sbom_document(SURFACE)).unwrap());
         process::exit(0);
     }
 
@@ -78,10 +116,10 @@ fn main() {
             process::exit(2);
         }
         let id = package_identity(SURFACE);
-        println!(
+        emit_stdout(format!(
             "package: artifact={} surface={} semantic_contract_digest={}",
             id["artifact"], id["surface"], id["semantic_contract_digest"]
-        );
+        ));
         process::exit(0);
     }
 
@@ -278,14 +316,14 @@ fn run_install(args: &[String]) {
         .unwrap_or_else(|| env::current_exe().unwrap_or_else(|_| PathBuf::from("tokenzero-mcp")));
     match install_surface(SURFACE, &prefix, &binary) {
         Ok(state) => {
-            println!(
+            emit_stdout(format!(
                 "install: ok surface={} artifact={} prefix={} semantic_contract_digest={} client_config={}",
                 state.surface.as_str(),
                 state.artifact,
                 state.prefix,
                 state.semantic_contract_digest,
                 state.client_config
-            );
+            ));
         }
         Err(e) => {
             eprintln!("install: FAIL {e}");
@@ -300,10 +338,7 @@ fn run_uninstall(args: &[String]) {
         .unwrap_or_else(default_install_prefix);
     match uninstall_surface(&prefix) {
         Ok(prev) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&uninstall_report(prev)).unwrap()
-            );
+            emit_stdout(serde_json::to_string_pretty(&uninstall_report(prev)).unwrap());
         }
         Err(e) => {
             eprintln!("uninstall: FAIL {e}");
@@ -315,9 +350,10 @@ fn run_uninstall(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        VALUE_FLAGS, argv_without_option_values, parse_flag, require_classic_surface_flags,
-        stdio_root_from_args,
+        argv_without_option_values, is_broken_pipe, map_stdout_write, parse_flag,
+        require_classic_surface_flags, stdio_root_from_args, VALUE_FLAGS,
     };
+    use std::io::{self, ErrorKind};
     use std::path::PathBuf;
     use tokenzero_install::packaging::reject_non_stdio_args;
 
@@ -418,11 +454,20 @@ mod tests {
             Some("-dash-dir")
         );
         let later_missing = parse_flag(
-            &args(&["tokenzero-mcp", "install", "--prefix", "/tmp/tz", "--prefix"]),
+            &args(&[
+                "tokenzero-mcp",
+                "install",
+                "--prefix",
+                "/tmp/tz",
+                "--prefix",
+            ]),
             "--prefix",
         )
         .expect_err("a later bare --prefix must fail even after an earlier valid value");
-        assert!(later_missing.contains("requires a value"), "{later_missing}");
+        assert!(
+            later_missing.contains("requires a value"),
+            "{later_missing}"
+        );
     }
 
     #[test]
@@ -619,5 +664,25 @@ mod tests {
                 "{flag} must fail as an unsupported option after stripping its value: {error}"
             );
         }
+    }
+
+    #[test]
+    fn broken_pipe_is_a_clean_write_not_a_panic() {
+        let err = io::Error::new(ErrorKind::BrokenPipe, "closed pipe");
+        assert!(is_broken_pipe(&err));
+        map_stdout_write(Err(err)).expect("broken pipe must not fail the MCP packaging CLI");
+    }
+
+    #[test]
+    fn other_stdout_errors_still_fail_loud() {
+        let err = io::Error::new(ErrorKind::PermissionDenied, "stdout");
+        assert!(!is_broken_pipe(&err));
+        let message = map_stdout_write(Err(err))
+            .expect_err("permission errors must stay visible")
+            .to_string();
+        assert!(
+            message.contains("stdout") || message.contains("Permission"),
+            "{message}"
+        );
     }
 }
