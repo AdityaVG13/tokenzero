@@ -794,6 +794,21 @@ mod expand_lock_tests {
     }
 
     #[test]
+    fn put_and_expand_zero_byte_payload() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut store = SegmentStore::create_shadow(cache, None).unwrap();
+        store.put("empty", b"", u64::MAX).expect("0-byte payload");
+        let got = store.expand("empty").expect("expand empty");
+        assert_eq!(got.as_deref(), Some(b"".as_slice()));
+        assert_eq!(
+            recover_payload_len(0, 8),
+            Some(0),
+            "zero-length segment records must recover as 0 bytes, not None"
+        );
+    }
+
+    #[test]
     fn put_refuses_empty_ref_and_unexpanded_tilde() {
         let dir = tempdir().unwrap();
         let cache = dir.path().join("recovery-cache.json");

@@ -3057,7 +3057,9 @@ fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
 }
 
 // Line count matching exact split-inclusive slicing.
-fn content_line_count(text: &str) -> usize {
+// Empty text is 0 lines: `split_inclusive` yields one empty segment, which
+// would make a 0-byte blob look like it has line 1 (tokenzero-ubs-p9).
+pub(crate) fn content_line_count(text: &str) -> usize {
     if text.is_empty() {
         0
     } else {
@@ -4831,6 +4833,26 @@ mod select_content_option_tests {
         assert_eq!(
             select_content(content, Some("around:5"), None, None, None, None),
             "2\n3\n4\n5\n6\n7\n8\n"
+        );
+    }
+
+    #[test]
+    fn empty_content_has_zero_lines_and_rejects_line_one() {
+        assert_eq!(content_line_count(""), 0);
+        let mut end = Some(1usize);
+        let err = clamp_line_window("", Some(1), &mut end).expect_err("L1 on empty");
+        assert!(
+            err.contains("line_count=0"),
+            "0-byte blob must not look like one empty line: {err}"
+        );
+    }
+
+    #[test]
+    fn around_zero_radius_is_the_named_line() {
+        let content = "1\n2\n3\n".to_string();
+        assert_eq!(
+            select_content(content, Some("around:2:0"), None, None, None, None),
+            "2\n"
         );
     }
 

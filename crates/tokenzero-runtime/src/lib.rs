@@ -473,6 +473,13 @@ where
     C: Fn() -> bool,
 {
     let output_policy = output_policy.normalized();
+    // `Instant + Duration::MAX` cannot be represented. Collapsing that to
+    // `Instant::now()` would spawn then immediately timeout; fail loud first.
+    if Instant::now().checked_add(timeout).is_none() {
+        return Err(invalid_runtime_input(
+            "timeout duration overflows Instant",
+        ));
+    }
     if output_policy.per_stream_capture_bytes > MAX_SHELL_CAPTURE_BYTES {
         return Err(invalid_runtime_input(format!(
             "per_stream_capture_bytes {} exceeds hard max {MAX_SHELL_CAPTURE_BYTES}",
@@ -1012,7 +1019,12 @@ fn poll_worker<T>(
 }
 
 fn deadline_from(start: Instant, timeout: Duration) -> Instant {
-    start.checked_add(timeout).unwrap_or_else(Instant::now)
+    start.checked_add(timeout).unwrap_or_else(|| {
+        // Unrepresentable timeout must not become "already expired".
+        Instant::now()
+            .checked_add(Duration::from_secs(24 * 60 * 60))
+            .unwrap_or_else(Instant::now)
+    })
 }
 
 const PROCESS_IO_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -1544,6 +1556,23 @@ mod input_validation_tests {
     fn plan_command_refuses_nul_in_argv() {
         let err = plan_command(&["echo".into(), "ok\0".into()], None, false).expect_err("nul argv");
         assert!(err.to_string().contains("NUL"), "{err}");
+    }
+
+    #[test]
+    fn overflowing_timeout_fails_loud_before_spawn() {
+        let err = run_command(
+            &["true".into()],
+            None,
+            None,
+            None,
+            Duration::MAX,
+            false,
+        )
+        .expect_err("Duration::MAX must not collapse to an immediate timeout");
+        assert!(
+            err.to_string().contains("overflows Instant"),
+            "{err}"
+        );
     }
 
     #[test]

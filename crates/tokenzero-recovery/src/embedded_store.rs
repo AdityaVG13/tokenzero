@@ -883,7 +883,9 @@ fn apply_fragment_to_bytes(
         ZeroRefFragment::Line { start, end } => {
             let text = std::str::from_utf8(bytes).map_err(|_| TokenZeroStoreError::NonUtf8Line)?;
             let segments: Vec<&str> = text.split_inclusive('\n').collect();
-            let line_count = segments.len();
+            // Must match RecoveryStore::content_line_count: empty/0-byte blobs
+            // have 0 lines, not one empty split_inclusive remainder.
+            let line_count = crate::content_line_count(text);
             if *start == 0 {
                 return Err(TokenZeroStoreError::Fragment(
                     "fragment-malformed".to_string(),
@@ -933,3 +935,42 @@ fn temp_cas_dir() -> PathBuf {
 #[cfg(test)]
 #[path = "../../../tests/recovery/unit/embedded_store.rs"]
 mod tests;
+
+#[cfg(test)]
+mod empty_blob_line_fragment_tests {
+    use super::*;
+
+    #[test]
+    fn zero_byte_blob_has_no_line_one() {
+        let err = apply_fragment_to_bytes(
+            b"",
+            &ZeroRefFragment::Line { start: 1, end: 1 },
+        )
+        .expect_err("empty blob has 0 lines");
+        assert!(
+            matches!(err, TokenZeroStoreError::Fragment(ref reason) if reason.contains("fragment-out-of-range")),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("lines=0"),
+            "must report line_count 0, not split_inclusive's empty remainder: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_byte_blob_allows_empty_exclusive_byte_range() {
+        let got = apply_fragment_to_bytes(b"", &ZeroRefFragment::Byte { start: 0, end: 0 })
+            .expect("B0-0 on empty is a valid empty exclusive range");
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn last_line_without_newline_is_inclusive() {
+        let got = apply_fragment_to_bytes(
+            b"a\nb",
+            &ZeroRefFragment::Line { start: 2, end: 2 },
+        )
+        .expect("last line without terminator");
+        assert_eq!(got, b"b");
+    }
+}

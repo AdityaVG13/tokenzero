@@ -813,7 +813,14 @@ impl WorkingSet {
 }
 
 fn split_exact_lines(text: &str) -> Vec<String> {
-    text.split_inclusive('\n').map(str::to_owned).collect()
+    // Match RecoveryStore::content_line_count: empty/0-byte text is 0 lines.
+    // `split_inclusive` yields one empty remainder, which made empty-to-empty
+    // deltas start at line 2 and treat a 0-byte body as line 1.
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split_inclusive('\n').map(str::to_owned).collect()
+    }
 }
 
 fn delta_between(old: &str, new: &str) -> WorkingSetDelta {
@@ -871,6 +878,55 @@ mod input_validation_tests {
     use super::*;
     use crate::RecoveryStore;
     use tempfile::tempdir;
+
+    #[test]
+    fn empty_bodies_are_zero_lines_not_a_phantom_line() {
+        assert_eq!(
+            delta_between("", ""),
+            WorkingSetDelta {
+                start_line: 1,
+                removed: Vec::new(),
+                inserted: Vec::new(),
+            },
+            "empty-to-empty must not start at line 2 from split_inclusive's remainder"
+        );
+        assert_eq!(
+            integrate_delta("", &delta_between("", "")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            integrate_delta("", &delta_between("", "a\n")).as_deref(),
+            Some("a\n")
+        );
+        assert_eq!(
+            integrate_delta("a", &delta_between("a", "")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            split_exact_lines(""),
+            Vec::<String>::new(),
+            "0-byte working-set body has 0 lines"
+        );
+        assert_eq!(split_exact_lines("a"), vec!["a".to_string()]);
+        assert_eq!(split_exact_lines("a\n"), vec!["a\n".to_string()]);
+        assert_eq!(
+            integrate_delta("a\nb", &delta_between("a\nb", "a\nc")).as_deref(),
+            Some("a\nc"),
+            "last line without terminator is an inclusive 1-based line"
+        );
+        assert_eq!(
+            integrate_delta(
+                "a",
+                &WorkingSetDelta {
+                    start_line: 0,
+                    removed: Vec::new(),
+                    inserted: Vec::new(),
+                }
+            ),
+            None,
+            "line 0 is not a valid inclusive window"
+        );
+    }
 
     #[test]
     fn admit_refuses_zero_start_line() {

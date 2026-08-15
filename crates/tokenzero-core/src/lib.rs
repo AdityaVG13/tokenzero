@@ -818,13 +818,15 @@ fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
 
 pub fn summarize_lines(text: &str, head: usize, tail: usize, prefix: &str) -> String {
     let lines: Vec<_> = text.lines().collect();
-    if lines.len() <= head + tail + 3 {
+    // Saturate: `head = usize::MAX` must keep the whole text, not wrap and panic
+    // on `lines[..head]`.
+    if lines.len() <= head.saturating_add(tail).saturating_add(3) {
         return format!("{prefix}{}", text.trim_end());
     }
     format!(
         "{prefix}{}\n\n... omitted {} lines; exact ref available ...\n\n{}",
         lines[..head].join("\n"),
-        lines.len().saturating_sub(head + tail),
+        lines.len().saturating_sub(head.saturating_add(tail)),
         lines[lines.len() - tail..].join("\n"),
     )
 }
@@ -1464,13 +1466,15 @@ pub fn dedupe_lines_impl(text: &str, context: usize, structural: bool) -> String
 }
 
 fn compact_head_tail(out: Vec<String>, context: usize) -> String {
-    if out.len() <= context * 2 + 20 {
+    // Saturate: `context = usize::MAX` must keep the whole buffer, not wrap
+    // `context * 2` and panic on `out[..context]`.
+    if out.len() <= context.saturating_mul(2).saturating_add(20) {
         return out.join("\n");
     }
     format!(
         "{}\n... omitted {} lines; exact ref available ...\n{}",
         out[..context].join("\n"),
-        out.len().saturating_sub(context * 2),
+        out.len().saturating_sub(context.saturating_mul(2)),
         out[out.len() - context..].join("\n")
     )
 }
@@ -1666,7 +1670,9 @@ fn keyword_window_view(text: &str, radius: usize, is_hit: impl Fn(&str) -> bool)
         if is_hit(line) {
             let (start, end) = (
                 idx.saturating_sub(radius),
-                (idx + radius + 1).min(lines.len()),
+                idx.saturating_add(radius)
+                    .saturating_add(1)
+                    .min(lines.len()),
             );
             keep[start..end].fill(true);
         }
@@ -1891,5 +1897,63 @@ mod secret_mask_security_tests {
             "AWS_SECRET_ACCESS_KEY=wJalc/not-a-real-secret"
         ));
         assert!(has_visible_secret_marker("github_pat_aaaaaaaa"));
+    }
+}
+
+#[cfg(test)]
+mod overflow_edge_tests {
+    use super::*;
+
+    #[test]
+    fn summarize_lines_usize_max_keeps_whole_text() {
+        let text = "a\nb\nc\nd\ne\nf\ng\nh";
+        assert_eq!(
+            summarize_lines(text, usize::MAX, 8, ""),
+            text,
+            "head=usize::MAX must not wrap and panic on lines[..head]"
+        );
+        assert_eq!(summarize_lines(text, 2, usize::MAX, ""), text);
+        assert_eq!(
+            summarize_lines(text, usize::MAX, usize::MAX, "p:"),
+            format!("p:{text}")
+        );
+    }
+
+    #[test]
+    fn critical_lines_max_radius_keeps_the_hit() {
+        let text = "ok\nerror boom\nok";
+        let kept = critical_lines(text, usize::MAX);
+        assert!(
+            kept.contains("error boom"),
+            "radius=usize::MAX must saturate to the whole file, not wrap the window empty: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn error_block_zero_radius_keeps_only_the_hit() {
+        let text = "ok\nerror boom\nok";
+        let kept = error_block(text, 0);
+        assert!(
+            kept.contains("error boom"),
+            "radius=0 must keep the named hit: {kept:?}"
+        );
+        assert!(
+            !kept.lines().any(|line| line == "ok"),
+            "radius=0 must omit neighbors, not wrap them in: {kept:?}"
+        );
+        assert!(
+            kept.contains("omitted 1 lines"),
+            "omitted neighbors must be marked, not silently dropped: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn dedupe_max_context_keeps_whole_buffer() {
+        let text = "a\nb\nc";
+        assert_eq!(
+            dedupe_lines_impl(text, usize::MAX, false),
+            text,
+            "context=usize::MAX must not wrap context*2 and panic"
+        );
     }
 }
