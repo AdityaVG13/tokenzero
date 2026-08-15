@@ -1852,3 +1852,7 @@ mod core_safety_regressions;
 #[cfg(test)]
 #[path = "../../../tests/core/inline/lib__capsule_omission_exact_ref.rs"]
 mod capsule_omission_exact_ref;
+
+#[cfg(test)]
+#[path = "../../../tests/core/inline/transform_family__tests.rs"]
+mod transform_family_tests;
