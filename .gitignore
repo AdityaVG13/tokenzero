@@ -15,10 +15,15 @@
 !/docs/
 !/.github/
 !/benchmarks/
+!/.bench-history/
 !/demo/
 !/package/
 !/packaging/
 !/fuzz/
+
+# .bench-history -- keep committed *.latest.json ratchet files only (F-010)
+/.bench-history/*
+!/.bench-history/*.latest.json
 
 # Public root files
 !/Cargo.toml
