@@ -9,12 +9,16 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("never_worse_gate.py")
 
 
-def receipt(*rows: str, unit_id: str = "estimator:bytes-ceil-div4/v1") -> str:
+def receipt(
+    *rows: str,
+    unit_id: str = "estimator:bytes-ceil-div4/v1",
+    surface_id: str = "captured-stdout-bytes/v1",
+) -> str:
     return "\n".join(
         [
             "schema_version\tnever-worse/v1",
             "suite\ttest-suite",
-            "surface_id\tcaptured-stdout-bytes/v1",
+            f"surface_id\t{surface_id}",
             f"unit_id\t{unit_id}",
             "task\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units",
             *rows,
@@ -54,6 +58,26 @@ class NeverWorseGateTests(unittest.TestCase):
         )
         self.assertEqual(wrong_unit.returncode, 2)
         self.assertIn("unit_id mismatch", wrong_unit.stderr)
+        q99 = self.run_gate(receipt("read\t8\t8\t2\t2", unit_id="Q99-Input"))
+        self.assertEqual(q99.returncode, 2)
+        self.assertIn("Q99-Input is not a TokenZero product unit", q99.stderr)
+
+    def test_visible_payload_surface_is_accepted(self) -> None:
+        result = self.run_gate(
+            receipt(
+                "grep_expand_edit_verify\t40\t80\t10\t20",
+                surface_id="visible-payload-bytes/v1",
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("visible-payload-bytes/v1", result.stdout)
+
+    def test_unknown_surface_fails_closed(self) -> None:
+        result = self.run_gate(
+            receipt("read\t4\t8\t1\t2", surface_id="envelope-inclusive-stdout/v0")
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not a never-worse denominator", result.stderr)
 
     def test_duplicate_or_missing_rows_fail_closed(self) -> None:
         duplicate = self.run_gate(receipt("read\t4\t8\t1\t2", "read\t4\t8\t1\t2"))

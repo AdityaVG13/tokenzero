@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA_VERSION = "never-worse/v1"
-SURFACE_ID = "captured-stdout-bytes/v1"
+# Envelope-inclusive captured stdout is not a never-worse denominator for
+# million-line edit/expand rows (tokenzero-4bhr / tokenzero-l1q6). Bakeoff
+# still uses captured-stdout-bytes/v1; million-line-nav uses visible payload.
+SURFACE_CAPTURED_STDOUT = "captured-stdout-bytes/v1"
+SURFACE_VISIBLE_PAYLOAD = "visible-payload-bytes/v1"
+ALLOWED_SURFACES = {SURFACE_CAPTURED_STDOUT, SURFACE_VISIBLE_PAYLOAD}
 UNIT_ID = "estimator:bytes-ceil-div4/v1"
 _TASK_RE = re.compile(r"[A-Za-z0-9_.:-]+")
 
@@ -38,7 +43,7 @@ def _nonnegative(raw: str, field: str, line: int) -> int:
     return value
 
 
-def parse_receipt(path: Path) -> tuple[str, list[Row]]:
+def parse_receipt(path: Path) -> tuple[str, str, list[Row]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
@@ -48,8 +53,8 @@ def parse_receipt(path: Path) -> tuple[str, list[Row]]:
     expected_metadata = [
         ("schema_version", SCHEMA_VERSION),
         ("suite", None),
-        ("surface_id", SURFACE_ID),
-        ("unit_id", UNIT_ID),
+        ("surface_id", None),
+        ("unit_id", None),
     ]
     metadata: dict[str, str] = {}
     for line_number, ((expected_key, expected_value), line) in enumerate(
@@ -63,6 +68,21 @@ def parse_receipt(path: Path) -> tuple[str, list[Row]]:
                 f"line {line_number}: {expected_key} mismatch: {fields[1]!r} != {expected_value!r}"
             )
         metadata[fields[0]] = fields[1]
+    surface = metadata["surface_id"]
+    if surface not in ALLOWED_SURFACES:
+        raise ReceiptError(
+            f"surface_id {surface!r} is not a never-worse denominator "
+            f"(allowed: {sorted(ALLOWED_SURFACES)})"
+        )
+    if "Q99" in metadata["unit_id"].upper():
+        raise ReceiptError(
+            "Q99-Input is not a TokenZero product unit; "
+            f"receipts must use {UNIT_ID} (tokenzero-5wfr)"
+        )
+    if metadata["unit_id"] != UNIT_ID:
+        raise ReceiptError(
+            f"unit_id mismatch: {metadata['unit_id']!r} != {UNIT_ID!r}"
+        )
     expected_header = "task\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units"
     if lines[4] != expected_header:
         raise ReceiptError(f"line 5: expected header {expected_header!r}")
@@ -89,20 +109,20 @@ def parse_receipt(path: Path) -> tuple[str, list[Row]]:
         expected_raw = (raw_bytes + 3) // 4
         if candidate_units != expected_candidate or raw_units != expected_raw:
             raise ReceiptError(
-                f"line {line_number}: {UNIT_ID} count mismatch for exact captured bytes"
+                f"line {line_number}: {UNIT_ID} count mismatch for measured bytes"
             )
         rows.append(Row(task, candidate_bytes, raw_bytes, candidate_units, raw_units))
     if not rows:
         raise ReceiptError("receipt has no task rows")
-    return metadata["suite"], rows
+    return metadata["suite"], metadata["surface_id"], rows
 
 
-def render(suite: str, rows: list[Row]) -> tuple[str, bool]:
+def render(suite: str, surface: str, rows: list[Row]) -> tuple[str, bool]:
     passed = all(row.candidate_units <= row.raw_units for row in rows)
     output = [
         "## Never-worse estimated-token budget assertion",
         "",
-        f"Suite: `{suite}`. Surface: `{SURFACE_ID}`. Unit: `{UNIT_ID}`. This is a heuristic estimate, not Q99.",
+        f"Suite: `{suite}`. Surface: `{surface}`. Unit: `{UNIT_ID}`. This is a heuristic estimate, not Q99.",
         "",
         "| task | TokenZero bytes | raw-cli bytes | TokenZero est_tokens | raw-cli est_tokens | delta | result |",
         "|---|---:|---:|---:|---:|---:|---|",
@@ -129,11 +149,11 @@ def main() -> int:
     parser.add_argument("receipt", type=Path)
     args = parser.parse_args()
     try:
-        suite, rows = parse_receipt(args.receipt)
+        suite, surface, rows = parse_receipt(args.receipt)
     except ReceiptError as error:
         print(f"never-worse gate: invalid receipt: {error}", file=sys.stderr)
         return 2
-    rendered, passed = render(suite, rows)
+    rendered, passed = render(suite, surface, rows)
     print(rendered)
     return 0 if passed else 1
 

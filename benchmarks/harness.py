@@ -321,6 +321,45 @@ def _durable_primary_ref(value):
     return value if isinstance(value, str) and _DURABLE_PRIMARY_REF.fullmatch(value) else ''
 
 
+class VisiblePayloadError(ValueError):
+    """JSON envelope present but no visible payload -- refuse stdout fallback."""
+
+
+def visible_payload_bytes(data) -> int:
+    """Count visible payload bytes only. Never the JSON envelope.
+
+    TokenZero CLI `--json` objects carry `visible` as a string or
+    `{text: ...}`. Envelope keys (refs, accounting, status) are excluded so
+    never-worse rows cannot be lost to required protocol JSON (tokenzero-4bhr).
+    """
+    data = _json(data)
+    if not isinstance(data, dict):
+        raise VisiblePayloadError(
+            "visible payload requires a JSON object; refusing envelope-inclusive fallback"
+        )
+    visible = data.get("visible")
+    if isinstance(visible, str):
+        return len(visible.encode())
+    if isinstance(visible, dict) and isinstance(visible.get("text"), str):
+        return len(visible["text"].encode())
+    raise VisiblePayloadError(
+        "missing visible.text; refusing to count captured stdout as the never-worse denominator"
+    )
+
+
+def expand_recovered_text(data) -> str:
+    """Exact recovered text from an expand JSON object (integrity, not budget)."""
+    data = _json(data)
+    if not isinstance(data, dict):
+        raise VisiblePayloadError("expand integrity requires a JSON object")
+    visible = data.get("visible")
+    if isinstance(visible, str):
+        return visible
+    if isinstance(visible, dict) and isinstance(visible.get("text"), str):
+        return visible["text"]
+    raise VisiblePayloadError("expand response missing visible text")
+
+
 def first_blob_ref(data):
     data = _json(data)
     if not isinstance(data, dict):
@@ -429,7 +468,7 @@ def main(argv=None):
     add('resolve_bin', (('--profile',), {'default': 'release'})); add('now_ms'); add('tok', (('--bytes',), {'type': int})); percentile = sub.add_parser('percentiles')
     group = percentile.add_mutually_exclusive_group(required=True); group.add_argument('--json'); group.add_argument('--times'); add('measure_cell', (('label',), {}), (('cmd',), {}), (('--cold',), {'action': 'store_true'}), (('--runs',), {'type': int, 'default': 50}), (('--warmup',), {'type': int, 'default': 3}))
     add('measure_median', (('label',), {}), (('cmd',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1}), (('--prepare',), {'default': 'true'})); add('mcp_schema_tokens', (('cap_file',), {}), (('tools',), {})); add('quality', (('task',), {})); add('clear_cache')
-    add('git_commit', (('--short',), {'action': 'store_true'})); add('accounting', (('--file',), {}), (('--key',), {'default': 'raw_tokens'})); add('first_blob_ref', (('file',), {})); add('glob_pick', (('file',), {}))
+    add('git_commit', (('--short',), {'action': 'store_true'})); add('accounting', (('--file',), {}), (('--key',), {'default': 'raw_tokens'})); add('first_blob_ref', (('file',), {})); add('visible_payload_bytes', (('file',), {})); add('expand_recovered_text', (('file',), {})); add('glob_pick', (('file',), {}))
     add('generate_million', (('root',), {}), (('--dirs',), {'type': int, 'default': 100}), (('--files',), {'type': int, 'default': 10}), (('--lines',), {'type': int, 'default': 1000}), (('--needle',), {'default': 'BENCH_NEEDLE_FN'})); add('tz_metrics', (('file',), {}), (('wall',), {})); args = parser.parse_args(argv); action = args.action
     if action == 'resolve_bin':
         result = bin_path(args.profile)
@@ -456,6 +495,18 @@ def main(argv=None):
         result = accounting_tokens(Path(args.file).read_text() if args.file else sys.stdin.read(), args.key)
     elif action == 'first_blob_ref':
         result = first_blob_ref(Path(args.file).read_text())
+    elif action == 'visible_payload_bytes':
+        try:
+            result = visible_payload_bytes(Path(args.file).read_text())
+        except VisiblePayloadError as error:
+            print(f'visible_payload_bytes failed: {error}', file=sys.stderr)
+            return 2
+    elif action == 'expand_recovered_text':
+        try:
+            result = expand_recovered_text(Path(args.file).read_text())
+        except VisiblePayloadError as error:
+            print(f'expand_recovered_text failed: {error}', file=sys.stderr)
+            return 2
     elif action == 'glob_pick':
         try:
             result = '\t'.join(glob_root_and_first(Path(args.file).read_text()))

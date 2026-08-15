@@ -69,7 +69,7 @@ log "binary: $BIN"
     bash "$ROOT/benchmarks/competitor-bakeoff.sh"
 
   run_section 'Large-repo navigation (million-line synthetic repo)' \
-    'Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle. TokenZero and raw CLI use exact captured stdout bytes and the same `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. The script exits nonzero on task failure, invalid gate evidence, or any TokenZero row worse than raw.' \
+    'Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle. Never-worse uses `visible-payload-bytes/v1` (JSON envelope excluded) and `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. Expand is integrity-only and is not summed into the gate. The script exits nonzero on task failure, invalid gate evidence, or any TokenZero row worse than raw.' \
     bash "$ROOT/benchmarks/million-line-nav.sh"
 
 } > "$OUT"

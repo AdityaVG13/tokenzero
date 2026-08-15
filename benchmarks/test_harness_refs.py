@@ -8,7 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from benchmarks.harness import first_blob_ref, measure_median
+from benchmarks.harness import (
+    VisiblePayloadError,
+    expand_recovered_text,
+    first_blob_ref,
+    glob_root_and_first,
+    measure_median,
+    visible_payload_bytes,
+)
 
 BLOB = "tz://blob/" + "a" * 64
 ORDINAL = "tz://o/2/1"
@@ -50,8 +57,6 @@ class FirstBlobRefTests(unittest.TestCase):
         self.assertEqual(first_blob_ref({"detail_ref": "tz://file/f123"}), "")
 
     def test_glob_parser_accepts_slim_and_full_visible_shapes(self) -> None:
-        from benchmarks.harness import glob_root_and_first
-
         text = "# root: /work\nsrc/lib.rs\nsrc/main.rs"
         self.assertEqual(
             glob_root_and_first({"visible": text}), ("/work", "src/lib.rs")
@@ -64,8 +69,6 @@ class FirstBlobRefTests(unittest.TestCase):
             glob_root_and_first({"visible": 7})
 
     def test_glob_parser_reconstructs_first_escaped_trie_file(self) -> None:
-        from benchmarks.harness import glob_root_and_first
-
         root = '/work space/µ\n"quoted"'
         directories = ["src space", 'β\n"branch"']
         file_name = "item [separator-like].rs"
@@ -84,8 +87,6 @@ class FirstBlobRefTests(unittest.TestCase):
         )
 
     def test_glob_parser_rejects_malformed_or_truncated_tries(self) -> None:
-        from benchmarks.harness import glob_root_and_first
-
         root = "/work"
         encoded_root = json.dumps(root)
         malformed = [
@@ -108,8 +109,6 @@ class FirstBlobRefTests(unittest.TestCase):
             glob_root_and_first({"visible": '# root: "unterminated\n"file.rs"'})
 
     def test_glob_parser_returns_empty_only_for_typed_valid_no_match(self) -> None:
-        from benchmarks.harness import glob_root_and_first
-
         response = {
             "status": "ok",
             "tool": "glob",
@@ -173,6 +172,37 @@ printf 'valid-no-match-fallback\n'
         )
         self.assertEqual(fallback.returncode, 0, fallback.stderr)
         self.assertEqual(fallback.stdout, "valid-no-match-fallback\n")
+
+
+class VisiblePayloadAccountingTests(unittest.TestCase):
+    def test_string_and_text_object_count_payload_not_envelope(self) -> None:
+        envelope = json.dumps(
+            {
+                "status": "ok",
+                "visible": "needle",
+                "refs": [BLOB],
+                "accounting": {"raw_tokens": 99},
+            }
+        )
+        self.assertEqual(visible_payload_bytes(envelope), len(b"needle"))
+        self.assertEqual(
+            visible_payload_bytes({"visible": {"text": "µ"}}),
+            len("µ".encode()),
+        )
+
+    def test_missing_visible_refuses_stdout_fallback(self) -> None:
+        with self.assertRaisesRegex(VisiblePayloadError, "refusing"):
+            visible_payload_bytes({"status": "ok", "refs": [BLOB]})
+        with self.assertRaisesRegex(VisiblePayloadError, "JSON object"):
+            visible_payload_bytes(["not", "an", "object"])
+
+    def test_expand_recovered_text_is_integrity_not_budget(self) -> None:
+        self.assertEqual(
+            expand_recovered_text({"visible": {"text": "BENCH_NEEDLE_FN"}}),
+            "BENCH_NEEDLE_FN",
+        )
+        with self.assertRaisesRegex(VisiblePayloadError, "missing visible text"):
+            expand_recovered_text({"status": "ok"})
 
 
 class MeasurementFailureTests(unittest.TestCase):
