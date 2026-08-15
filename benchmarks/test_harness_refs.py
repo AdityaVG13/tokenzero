@@ -195,13 +195,19 @@ class VisiblePayloadAccountingTests(unittest.TestCase):
             visible_payload_bytes({"status": "ok", "refs": [BLOB]})
         with self.assertRaisesRegex(VisiblePayloadError, "JSON object"):
             visible_payload_bytes(["not", "an", "object"])
+        with self.assertRaisesRegex(VisiblePayloadError, "empty visible"):
+            visible_payload_bytes({"status": "ok", "visible": ""})
+        with self.assertRaisesRegex(VisiblePayloadError, "not ok"):
+            visible_payload_bytes({"status": "error", "visible": "x"})
+        with self.assertRaisesRegex(VisiblePayloadError, "invalid JSON"):
+            visible_payload_bytes("{")
 
     def test_expand_recovered_text_is_integrity_not_budget(self) -> None:
         self.assertEqual(
             expand_recovered_text({"visible": {"text": "BENCH_NEEDLE_FN"}}),
             "BENCH_NEEDLE_FN",
         )
-        with self.assertRaisesRegex(VisiblePayloadError, "missing visible text"):
+        with self.assertRaisesRegex(VisiblePayloadError, "missing visible"):
             expand_recovered_text({"status": "ok"})
 
 

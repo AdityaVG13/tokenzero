@@ -40,7 +40,8 @@ log "binary: $BIN"; log "budget: $BUDGET estimated stdout tokens"; log "generati
 "${H[@]}" generate_million "$SYNTH" --dirs "$NUM_DIRS" --files "$FILES_PER_DIR" --lines "$LINES_PER_FILE" --needle "$NEEDLE"; log "repo generated: $(find "$SYNTH" -type f | wc -l | tr -d ' ') files, $(find "$SYNTH" -type f -exec cat {} + | wc -l | tr -d ' ') lines"
 
 TARGET_FILE="$SYNTH/mod_0050/file_0050_003.rs"; NEEDLE_FILE="$SYNTH/mod_0010/file_0010_000.rs"
-EDIT_FILE="$WORK_DIR/edit_target.rs"; cp "$NEEDLE_FILE" "$EDIT_FILE"; TOTAL_ESTIMATED=0
+EDIT_FILE="$WORK_DIR/edit_target.rs"; RAW_EDIT="$WORK_DIR/raw_edit_target.rs"
+cp "$NEEDLE_FILE" "$EDIT_FILE"; cp "$EDIT_FILE" "$RAW_EDIT"; TOTAL_ESTIMATED=0
 printf 'schema_version\tnever-worse/v1\nsuite\tmillion-line-nav\nsurface_id\tvisible-payload-bytes/v1\nunit_id\testimator:bytes-ceil-div4/v1\ntask\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units\n' > "$NEVER_WORSE_RECEIPT"
 emit_header
 
@@ -95,14 +96,15 @@ capture_tz "$BIN expand --json \"$D_BLOB_REF\"" || exit 1; read -r ms_d2 _ <<<"$
 D_RECOVERED=$("${H[@]}" expand_recovered_text "$TMP_JSON") || { log 'FAILED: edit expand integrity missing visible text'; exit 1; }
 if [[ "$D_RECOVERED" != *"$NEEDLE"* ]]; then log 'FAILED: edit expand did not recover needle'; exit 1; fi
 capture_tz "$BIN edit --json --edits-json '[{\"find\":\"$NEEDLE\",\"replace\":\"RENAMED_FN\"}]' \"$EDIT_FILE\" --allowed-root \"$WORK_DIR\"" || exit 1; read -r ms_d3 _ <<<"$TZ_RESULT"
-tz_vis_d3=$("${H[@]}" visible_payload_bytes "$TMP_JSON") || { log 'FAILED: edit visible payload missing'; exit 1; }
+# Non-dry-run edit clears visible.text (engine_edit). Mutation is integrity-only; budget is find+read-back.
 capture_tz "$BIN read --json --start-line 498 --end-line 502 \"$EDIT_FILE\" --allowed-root \"$WORK_DIR\"" || exit 1; read -r ms_d4 _ <<<"$TZ_RESULT"
 tz_vis_d4=$("${H[@]}" visible_payload_bytes "$TMP_JSON") || { log 'FAILED: edit read-back visible payload missing'; exit 1; }
 READBACK=$("${H[@]}" expand_recovered_text "$TMP_JSON") || { log 'FAILED: edit read-back missing visible text'; exit 1; }
 if [[ "$READBACK" != *RENAMED_FN* ]]; then log 'FAILED: edit integrity: read-back missing RENAMED_FN'; exit 1; fi
-tz_vis_d=$((tz_vis_d1+tz_vis_d3+tz_vis_d4))
-ms_d=$((ms_d1+ms_d2+ms_d3+ms_d4)); TOTAL_ESTIMATED=$((TOTAL_ESTIMATED + $(estimated_units "$tz_vis_d"))); emit_tz D grep_expand_edit_verify "$ms_d" "$tz_vis_d" "find+edit+read visible; expand integrity"
-capture_raw "grep -n \"$NEEDLE\" \"$EDIT_FILE\"; sed -i.bak 's/$NEEDLE/RENAMED_FN/g' \"$EDIT_FILE\"; rm -f \"$EDIT_FILE.bak\"; sed -n '498,502p' \"$EDIT_FILE\"" || exit 1; read -r bytes_d ms_raw_d <<<"$RAW_RESULT"
+if [[ "$READBACK" == *"$NEEDLE"* ]]; then log 'FAILED: edit integrity: read-back still contains original needle'; exit 1; fi
+tz_vis_d=$((tz_vis_d1+tz_vis_d4))
+ms_d=$((ms_d1+ms_d2+ms_d3+ms_d4)); TOTAL_ESTIMATED=$((TOTAL_ESTIMATED + $(estimated_units "$tz_vis_d"))); emit_tz D grep_expand_edit_verify "$ms_d" "$tz_vis_d" "find+read visible; expand+edit integrity"
+capture_raw "grep -n \"$NEEDLE\" \"$RAW_EDIT\"; sed -i.bak 's/$NEEDLE/RENAMED_FN/g' \"$RAW_EDIT\"; rm -f \"$RAW_EDIT.bak\"; sed -n '498,502p' \"$RAW_EDIT\"" || exit 1; read -r bytes_d ms_raw_d <<<"$RAW_RESULT"
 emit_raw D grep_expand_edit_verify "$bytes_d" "$ms_raw_d" "grep+sed+sed"; record_gate grep_expand_edit_verify "$tz_vis_d" "$bytes_d"
 
 log "task E: recall"
@@ -114,7 +116,7 @@ capture_raw "grep -rn \"$NEEDLE\" \"$SYNTH\" | sed -n '1,10p'" || exit 1; read -
 printf '\n'
 python3 "$ROOT/benchmarks/never_worse_gate.py" "$NEVER_WORSE_RECEIPT"
 printf '\n## Estimated-output budget assertion\n\n| Metric | Value |\n|--------|-------|\n'
-printf '| Total TokenZero stdout est_tokens (all 5 tasks) | %d |\n| Estimator | `estimator:bytes-ceil-div4/v1` |\n| Context budget | %d |\n| Remaining headroom | %d |\n| Utilization | %.1f%% |\n\n' \
+printf '| Total TokenZero visible-payload est_tokens (all 5 tasks) | %d |\n| Estimator | `estimator:bytes-ceil-div4/v1` |\n| Context budget | %d |\n| Remaining headroom | %d |\n| Utilization | %.1f%% |\n\n' \
   "$TOTAL_ESTIMATED" "$BUDGET" "$((BUDGET-TOTAL_ESTIMATED))" "$(python3 -c "print(f'{$TOTAL_ESTIMATED/$BUDGET*100:.1f}')")"
 printf '> This heuristic budget is not Q99. Denominator is `visible-payload-bytes/v1` (JSON envelope excluded). Expand is integrity-only and is not summed into the never-worse row.\n\n'
 if [[ "$TOTAL_ESTIMATED" -lt "$BUDGET" ]]; then

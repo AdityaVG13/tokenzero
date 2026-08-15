@@ -325,39 +325,58 @@ class VisiblePayloadError(ValueError):
     """JSON envelope present but no visible payload -- refuse stdout fallback."""
 
 
+def _parse_tool_json(data):
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError as error:
+            raise VisiblePayloadError(f"invalid JSON: {error}") from error
+    if not isinstance(data, dict):
+        raise VisiblePayloadError(
+            "visible payload requires a JSON object; refusing envelope-inclusive fallback"
+        )
+    status = data.get("status")
+    if status is not None and status != "ok":
+        raise VisiblePayloadError(
+            f"status {status!r} is not ok; refusing to count error payload as never-worse"
+        )
+    return data
+
+
+def _visible_text(data) -> str:
+    visible = data.get("visible")
+    if isinstance(visible, str):
+        return visible
+    if isinstance(visible, dict) and isinstance(visible.get("text"), str):
+        return visible["text"]
+    raise VisiblePayloadError(
+        "missing visible.text; refusing to count captured stdout as the never-worse denominator"
+    )
+
+
 def visible_payload_bytes(data) -> int:
     """Count visible payload bytes only. Never the JSON envelope.
 
     TokenZero CLI `--json` objects carry `visible` as a string or
     `{text: ...}`. Envelope keys (refs, accounting, status) are excluded so
     never-worse rows cannot be lost to required protocol JSON (tokenzero-4bhr).
+    Empty visible is refused: non-dry-run edit clears text, and a 0-byte
+    candidate would beat any raw baseline.
     """
-    data = _json(data)
-    if not isinstance(data, dict):
+    text = _visible_text(_parse_tool_json(data))
+    if text == "":
         raise VisiblePayloadError(
-            "visible payload requires a JSON object; refusing envelope-inclusive fallback"
+            "empty visible payload; refusing zero-byte never-worse denominator"
         )
-    visible = data.get("visible")
-    if isinstance(visible, str):
-        return len(visible.encode())
-    if isinstance(visible, dict) and isinstance(visible.get("text"), str):
-        return len(visible["text"].encode())
-    raise VisiblePayloadError(
-        "missing visible.text; refusing to count captured stdout as the never-worse denominator"
-    )
+    return len(text.encode())
 
 
 def expand_recovered_text(data) -> str:
     """Exact recovered text from an expand JSON object (integrity, not budget)."""
-    data = _json(data)
-    if not isinstance(data, dict):
-        raise VisiblePayloadError("expand integrity requires a JSON object")
-    visible = data.get("visible")
-    if isinstance(visible, str):
-        return visible
-    if isinstance(visible, dict) and isinstance(visible.get("text"), str):
-        return visible["text"]
-    raise VisiblePayloadError("expand response missing visible text")
+    text = _visible_text(_parse_tool_json(data))
+    if text == "":
+        raise VisiblePayloadError("expand response has empty visible text")
+    return text
 
 
 def first_blob_ref(data):

@@ -13,11 +13,12 @@ def receipt(
     *rows: str,
     unit_id: str = "estimator:bytes-ceil-div4/v1",
     surface_id: str = "captured-stdout-bytes/v1",
+    suite: str = "test-suite",
 ) -> str:
     return "\n".join(
         [
             "schema_version\tnever-worse/v1",
-            "suite\ttest-suite",
+            f"suite\t{suite}",
             f"surface_id\t{surface_id}",
             f"unit_id\t{unit_id}",
             "task\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units",
@@ -61,6 +62,14 @@ class NeverWorseGateTests(unittest.TestCase):
         q99 = self.run_gate(receipt("read\t8\t8\t2\t2", unit_id="Q99-Input"))
         self.assertEqual(q99.returncode, 2)
         self.assertIn("Q99-Input is not a TokenZero product unit", q99.stderr)
+        q99_suite = self.run_gate(
+            receipt("read\t8\t8\t2\t2", suite="Q99-Input-bakeoff")
+        )
+        self.assertEqual(q99_suite.returncode, 2)
+        self.assertIn("Q99-Input is not a TokenZero product unit", q99_suite.stderr)
+        empty = self.run_gate(receipt("read\t0\t8\t0\t2"))
+        self.assertEqual(empty.returncode, 2)
+        self.assertIn("empty candidate", empty.stderr)
 
     def test_visible_payload_surface_is_accepted(self) -> None:
         result = self.run_gate(
@@ -78,6 +87,15 @@ class NeverWorseGateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("not a never-worse denominator", result.stderr)
+        wrong_suite_surface = self.run_gate(
+            receipt(
+                "read_50_lines\t4\t8\t1\t2",
+                suite="million-line-nav",
+                surface_id="captured-stdout-bytes/v1",
+            )
+        )
+        self.assertEqual(wrong_suite_surface.returncode, 2)
+        self.assertIn("must use surface", wrong_suite_surface.stderr)
 
     def test_duplicate_or_missing_rows_fail_closed(self) -> None:
         duplicate = self.run_gate(receipt("read\t4\t8\t1\t2", "read\t4\t8\t1\t2"))

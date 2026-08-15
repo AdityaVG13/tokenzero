@@ -115,6 +115,33 @@ class KeepGateUnitTests(unittest.TestCase):
         self.assertTrue(any("PASS pass stable" in line for line in messages))
         self.assertFalse(any("pass noisy" in line for line in messages))
 
+    def test_omitted_history_group_fails_closed(self) -> None:
+        history = _doc(
+            [
+                {"name": "stable", "samples": [100.0, 100.0, 100.0]},
+                {"name": "render_shell", "samples": [200.0, 200.0, 200.0]},
+            ]
+        )
+        current = _doc(
+            [
+                {"name": "stable", "samples": [101.0, 101.0, 101.0]},
+            ]
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.compare_to_history(current, history)
+        self.assertIn("history groups missing from current", str(ctx.exception))
+        self.assertIn("render_shell", str(ctx.exception))
+
+    def test_benchmark_id_mismatch_fails_closed(self) -> None:
+        history = _doc([{"name": "stable", "samples": [100.0, 100.0, 100.0]}])
+        current = _doc(
+            [{"name": "stable", "samples": [100.0, 100.0, 100.0]}],
+            benchmark_id="other.bench",
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.compare_to_history(current, history)
+        self.assertIn("benchmark_id mismatch", str(ctx.exception))
+
     def test_detect_binary_os_magic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

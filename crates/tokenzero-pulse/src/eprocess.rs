@@ -1,9 +1,7 @@
 use serde::Serialize;
-use std::fs;
 use std::ops::Range;
-use std::path::Path;
 
-use crate::{PulseEvent, hex_sha256};
+use crate::PulseEvent;
 
 /// Typed failures for digest-before-fragment CAS serves.
 ///
@@ -50,15 +48,14 @@ pub fn serve_fragment_after_digest(
     hash: &str,
     byte_range: Range<usize>,
 ) -> Result<Vec<u8>, FragmentServeError> {
-    let path = store.object_path(hash);
-    let bytes = read_cas_blob(&path)?;
-    let actual = hex_sha256(&bytes);
-    if actual != hash {
-        return Err(FragmentServeError::DigestMismatch {
-            expected: hash.to_string(),
-            actual,
-        });
-    }
+    let bytes = match store.get_verified(hash) {
+        Ok(bytes) => bytes,
+        Err(zero_store::CasError::NotFound) => return Err(FragmentServeError::NotFound),
+        Err(zero_store::CasError::DigestMismatch { expected, actual }) => {
+            return Err(FragmentServeError::DigestMismatch { expected, actual });
+        }
+        Err(error) => return Err(FragmentServeError::Io(error.to_string())),
+    };
     if byte_range.end > bytes.len() || byte_range.start > byte_range.end {
         return Err(FragmentServeError::RangeOutOfBounds {
             len: bytes.len(),
@@ -67,16 +64,6 @@ pub fn serve_fragment_after_digest(
         });
     }
     Ok(bytes[byte_range].to_vec())
-}
-
-fn read_cas_blob(path: &Path) -> Result<Vec<u8>, FragmentServeError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(FragmentServeError::NotFound)
-        }
-        Err(error) => Err(FragmentServeError::Io(error.to_string())),
-    }
 }
 
 /// Anytime-valid Bernoulli e-process for the live Pulse failure stream.

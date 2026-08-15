@@ -17,6 +17,17 @@ SURFACE_CAPTURED_STDOUT = "captured-stdout-bytes/v1"
 SURFACE_VISIBLE_PAYLOAD = "visible-payload-bytes/v1"
 ALLOWED_SURFACES = {SURFACE_CAPTURED_STDOUT, SURFACE_VISIBLE_PAYLOAD}
 UNIT_ID = "estimator:bytes-ceil-div4/v1"
+SUITE_SURFACES = {
+    "million-line-nav": SURFACE_VISIBLE_PAYLOAD,
+    "competitor-bakeoff": SURFACE_CAPTURED_STDOUT,
+}
+MILLION_LINE_TASKS = (
+    "read_50_lines",
+    "grep_expand",
+    "tree_glob_read",
+    "grep_expand_edit_verify",
+    "recall",
+)
 _TASK_RE = re.compile(r"[A-Za-z0-9_.:-]+")
 
 
@@ -74,7 +85,7 @@ def parse_receipt(path: Path) -> tuple[str, str, list[Row]]:
             f"surface_id {surface!r} is not a never-worse denominator "
             f"(allowed: {sorted(ALLOWED_SURFACES)})"
         )
-    if "Q99" in metadata["unit_id"].upper():
+    if "Q99" in metadata["unit_id"].upper() or "Q99" in metadata["suite"].upper():
         raise ReceiptError(
             "Q99-Input is not a TokenZero product unit; "
             f"receipts must use {UNIT_ID} (tokenzero-5wfr)"
@@ -82,6 +93,12 @@ def parse_receipt(path: Path) -> tuple[str, str, list[Row]]:
     if metadata["unit_id"] != UNIT_ID:
         raise ReceiptError(
             f"unit_id mismatch: {metadata['unit_id']!r} != {UNIT_ID!r}"
+        )
+    required_surface = SUITE_SURFACES.get(metadata["suite"])
+    if required_surface is not None and surface != required_surface:
+        raise ReceiptError(
+            f"suite {metadata['suite']!r} must use surface {required_surface!r}, "
+            f"got {surface!r}"
         )
     expected_header = "task\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units"
     if lines[4] != expected_header:
@@ -111,9 +128,20 @@ def parse_receipt(path: Path) -> tuple[str, str, list[Row]]:
             raise ReceiptError(
                 f"line {line_number}: {UNIT_ID} count mismatch for measured bytes"
             )
+        if candidate_bytes == 0 and raw_bytes > 0:
+            raise ReceiptError(
+                f"line {line_number}: empty candidate with nonempty raw is not a never-worse measurement"
+            )
         rows.append(Row(task, candidate_bytes, raw_bytes, candidate_units, raw_units))
     if not rows:
         raise ReceiptError("receipt has no task rows")
+    if metadata["suite"] == "million-line-nav":
+        required = set(MILLION_LINE_TASKS)
+        if seen != required:
+            raise ReceiptError(
+                "million-line-nav receipt must contain exactly "
+                f"{list(MILLION_LINE_TASKS)}, got {sorted(seen)}"
+            )
     return metadata["suite"], metadata["surface_id"], rows
 
 

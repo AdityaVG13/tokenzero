@@ -176,6 +176,23 @@ def compare_to_history(
     if not isinstance(history_groups, list) or not history_groups:
         raise KeepGateError("history: groups must be a non-empty list")
 
+    current_id = current.get("benchmark_id")
+    history_id = history.get("benchmark_id")
+    if not isinstance(current_id, str) or not current_id:
+        raise KeepGateError("current: benchmark_id must be a non-empty string")
+    if current_id != history_id:
+        raise KeepGateError(
+            f"refuse: benchmark_id mismatch current={current_id!r} history={history_id!r}"
+        )
+
+    hist_names = _index_by_name(list(history_groups))
+    cur_names = _index_by_name(list(current_groups))
+    omitted = sorted(set(hist_names) - set(cur_names))
+    if omitted:
+        raise KeepGateError(
+            "refuse: history groups missing from current: " + ", ".join(omitted)
+        )
+
     kept_current, quarantined = quarantine_groups(current_groups)
     if quarantined:
         names = [str(g["name"]) for g in quarantined]
