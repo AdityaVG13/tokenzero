@@ -5,12 +5,18 @@
 //! older minor degrades. `shadow.jsonl` is a fixed ring. ActionCache writes
 //! use a commit marker so a torn temp is never promoted.
 
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Current TokenZero store schema (ZeroRef sibling contract).
 pub const STORE_SCHEMA_MAJOR: u16 = 1;
@@ -142,13 +148,16 @@ fn trim_shadow_ring(path: &Path) -> io::Result<()> {
     fs::write(path, out)
 }
 
-/// Crash-safe ActionCache segment write: temp + commit marker + rename.
+/// Crash-safe ActionCache segment write: unique temp + commit marker + rename.
+/// A per-key flock is held across write-commit-rename so concurrent puts of
+/// distinct payloads cannot interleave a shared sidecar pair.
 pub fn write_actioncache_segment(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = tmp_path(dest);
-    let commit = commit_path(dest);
+    let _lock = lock_exclusive(dest)?;
+    let tmp = unique_tmp_path(dest);
+    let commit = commit_for_tmp(&tmp);
     fs::write(&tmp, bytes)?;
     let digest = hex_sha256(bytes);
     fs::write(&commit, digest.as_bytes())?;
@@ -159,34 +168,167 @@ pub fn write_actioncache_segment(dest: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Recover a segment after crash: promote a committed temp, discard an uncommitted one.
 pub fn recover_actioncache_segment(dest: &Path) -> io::Result<Option<PathBuf>> {
-    let tmp = tmp_path(dest);
-    let commit = commit_path(dest);
     if dest.exists() {
-        // dest is the committed file. Do not unlink tmp/commit: a concurrent
-        // put writes those sidecars before rename, and deleting them makes
-        // rename fail with NotFound.
+        // dest is the committed file. Do not unlink sidecars: a concurrent
+        // put writes unique tmp/commit before rename.
         return Ok(Some(dest.to_path_buf()));
     }
-    if tmp.exists() && commit.exists() {
-        let expected = fs::read_to_string(&commit)?;
-        let bytes = fs::read(&tmp)?;
-        if hex_sha256(&bytes) == expected.trim() {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Ok(None);
+    }
+    let Some(_lock) = try_lock_key(dest)? else {
+        // Writer holds the lock: do not promote or delete its sidecars.
+        return Ok(dest.exists().then(|| dest.to_path_buf()));
+    };
+    if dest.exists() {
+        return Ok(Some(dest.to_path_buf()));
+    }
+    let mut pairs = unique_sidecar_pairs(dest)?;
+    pairs.push((legacy_tmp_path(dest), legacy_commit_path(dest)));
+    let mut promoted = false;
+    for (tmp, commit) in pairs {
+        if !promoted && pair_matches_digest(&tmp, &commit)? {
             fs::rename(&tmp, dest)?;
-            let _ = fs::remove_file(commit);
-            return Ok(Some(dest.to_path_buf()));
+            let _ = fs::remove_file(&commit);
+            promoted = true;
+        } else {
+            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&commit);
         }
     }
-    let _ = fs::remove_file(&tmp);
-    let _ = fs::remove_file(&commit);
-    Ok(None)
+    if dest.exists() {
+        Ok(Some(dest.to_path_buf()))
+    } else {
+        Ok(None)
+    }
 }
 
-fn tmp_path(dest: &Path) -> PathBuf {
+struct SegmentLock {
+    file: fs::File,
+}
+
+impl Drop for SegmentLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn lock_path(dest: &Path) -> PathBuf {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let mut file_name = dest
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("actioncache"));
+    file_name.push(".lock");
+    parent.join(file_name)
+}
+
+fn lock_exclusive(dest: &Path) -> io::Result<SegmentLock> {
+    let path = lock_path(dest);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    FileExt::lock(&file)?;
+    Ok(SegmentLock { file })
+}
+
+fn try_lock_key(dest: &Path) -> io::Result<Option<SegmentLock>> {
+    let path = lock_path(dest);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    match FileExt::try_lock(&file) {
+        Ok(()) => Ok(Some(SegmentLock { file })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(err),
+    }
+}
+
+fn unique_tmp_path(dest: &Path) -> PathBuf {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(
+        dest.file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("actioncache")),
+    );
+    let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    tmp_name.push(format!(".{}.{nonce}.tmp", std::process::id()));
+    parent.join(tmp_name)
+}
+
+fn commit_for_tmp(tmp: &Path) -> PathBuf {
+    let parent = tmp.parent().unwrap_or_else(|| Path::new("."));
+    let name = tmp.file_name().map(OsString::from).unwrap_or_default();
+    let lossy = name.to_string_lossy();
+    if let Some(stem) = lossy.strip_suffix(".tmp") {
+        parent.join(format!("{stem}.commit"))
+    } else {
+        let mut commit_name = name;
+        commit_name.push(".commit");
+        parent.join(commit_name)
+    }
+}
+
+fn unique_sidecar_pairs(dest: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let Some(filename) = dest.file_name().and_then(|name| name.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!(".{filename}.");
+    let mut stems = BTreeSet::new();
+    let rd = match fs::read_dir(parent) {
+        Ok(rd) => rd,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    for entry in rd {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        if let Some(stem) = name.strip_suffix(".tmp") {
+            stems.insert(stem.to_string());
+        } else if let Some(stem) = name.strip_suffix(".commit") {
+            stems.insert(stem.to_string());
+        }
+    }
+    Ok(stems
+        .into_iter()
+        .map(|stem| {
+            (
+                parent.join(format!("{stem}.tmp")),
+                parent.join(format!("{stem}.commit")),
+            )
+        })
+        .collect())
+}
+
+fn legacy_tmp_path(dest: &Path) -> PathBuf {
     dest.with_extension("tmp")
 }
 
-fn commit_path(dest: &Path) -> PathBuf {
+fn legacy_commit_path(dest: &Path) -> PathBuf {
     dest.with_extension("commit")
+}
+
+fn pair_matches_digest(tmp: &Path, commit: &Path) -> io::Result<bool> {
+    if !tmp.exists() || !commit.exists() {
+        return Ok(false);
+    }
+    let expected = fs::read_to_string(commit)?;
+    let bytes = fs::read(tmp)?;
+    Ok(hex_sha256(&bytes) == expected.trim())
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

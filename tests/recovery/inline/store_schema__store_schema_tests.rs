@@ -77,18 +77,21 @@ fn tzgd0b_torn_actioncache_write_is_not_promoted() {
     write_actioncache_segment(&dest, payload).unwrap();
     assert_eq!(fs::read(&dest).unwrap(), payload);
 
-    // Crash before commit: leftover tmp without marker is discarded.
-    let tmp = dest.with_extension("tmp");
+    // Crash before commit: leftover unique tmp without marker is discarded.
+    let tmp = unique_tmp_path(&dest);
     fs::remove_file(&dest).unwrap();
     fs::write(&tmp, b"torn-partial").unwrap();
     assert!(recover_actioncache_segment(&dest).unwrap().is_none());
     assert!(!tmp.exists());
     assert!(!dest.exists());
 
-    // Commit marker present: temp is promoted.
+    // Commit marker present: unique temp is promoted.
+    let tmp = unique_tmp_path(&dest);
+    let commit = commit_for_tmp(&tmp);
     fs::write(&tmp, payload).unwrap();
-    fs::write(dest.with_extension("commit"), hex_sha256(payload)).unwrap();
+    fs::write(&commit, hex_sha256(payload)).unwrap();
     let recovered = recover_actioncache_segment(&dest).unwrap().unwrap();
     assert_eq!(recovered, dest);
     assert_eq!(fs::read(&dest).unwrap(), payload);
+    assert!(!commit.exists());
 }
