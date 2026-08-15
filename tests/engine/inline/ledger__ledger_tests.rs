@@ -1,6 +1,23 @@
 use super::*;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
+
+struct AppendPause {
+    entered: Barrier,
+    release: Barrier,
+}
+
+static APPEND_PAUSE: Mutex<Option<Arc<AppendPause>>> = Mutex::new(None);
+
+pub(super) fn pause_during_append() {
+    let pause = APPEND_PAUSE.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(pause) = pause {
+        pause.entered.wait();
+        pause.release.wait();
+    }
+}
 
 fn test_writer(cache_path: &Path) -> LedgerWriter {
     LedgerWriter::with_max_bytes(
@@ -555,4 +572,38 @@ fn ledger_rotation_caps_generations_and_total_bytes() {
         .map(|metadata| metadata.len())
         .sum::<u64>();
     assert!(total <= DEFAULT_MAX_LEDGER_TOTAL_BYTES);
+}
+
+#[test]
+fn record_response_drops_cumulative_before_append_io() {
+    let directory = tempdir().unwrap();
+    let cache_path = directory.path().join("cache.json");
+    let writer = Arc::new(test_writer(&cache_path));
+    let pause = Arc::new(AppendPause {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+    });
+    *APPEND_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
+
+    let mut response = ToolResponse::default();
+    response.accounting = Some(Accounting {
+        raw_tokens: 200,
+        visible_tokens: 50,
+        recovery_tokens: 0,
+        billed_tokens: 50,
+        ..Accounting::default()
+    });
+    let serving = Arc::clone(&writer);
+    let worker = thread::spawn(move || serving.record_response("read", &response));
+    pause.entered.wait();
+    let cumulative_free = writer
+        .cumulative_visible_tokens
+        .try_lock()
+        .is_ok();
+    pause.release.wait();
+    worker.join().unwrap();
+    assert!(
+        cumulative_free,
+        "cumulative_visible_tokens must not stay held across append_record I/O"
+    );
 }

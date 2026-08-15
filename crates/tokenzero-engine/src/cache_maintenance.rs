@@ -32,6 +32,8 @@ fn engine_store_dir(cache_path: &Path) -> &Path {
 }
 
 fn marker_fresh(path: &Path, interval: Duration) -> bool {
+    #[cfg(test)]
+    tests::pause_during_fs();
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .and_then(|modified| modified.elapsed().map_err(io::Error::other))
@@ -241,18 +243,24 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
 }
 
 pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
-    let Ok(mut guard) = auto_maintenance_state().lock() else {
-        return json!({"coalesced": true, "skipped": "lock_poisoned"});
-    };
-    if let Some((prev_path, at)) = guard.as_ref()
-        && prev_path == cache_path
-        && at.elapsed() < AUTO_MAINTENANCE_COALESCE
     {
-        return json!({
-            "coalesced": true,
-            "skipped": "recent",
-            "cache_path": cache_path.display().to_string(),
-        });
+        let Ok(guard) = auto_maintenance_state().lock() else {
+            return json!({"coalesced": true, "skipped": "lock_poisoned"});
+        };
+        if let Some((prev_path, at)) = guard.as_ref()
+            && prev_path == cache_path
+            && at.elapsed() < AUTO_MAINTENANCE_COALESCE
+        {
+            return json!({
+                "coalesced": true,
+                "skipped": "recent",
+                "cache_path": cache_path.display().to_string(),
+            });
+        }
+        // SAFETY: STATE is an in-process coalesce cache, not the persist gate.
+        // Cross-process serialization is maintenance.lock (flock). Drop before
+        // marker_fresh/open/try_lock/GC so a hung metadata/open cannot stall
+        // other constructors on STATE.
     }
     let marker = engine_store_dir(cache_path).join("maintenance.last");
     if !dry_run && marker_fresh(&marker, AUTO_MAINTENANCE_COALESCE) {
@@ -275,7 +283,6 @@ pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
     if !dry_run && marker_fresh(&marker, AUTO_MAINTENANCE_COALESCE) {
         return json!({"coalesced": true, "skipped": "recent_cross_process"});
     }
-    drop(guard);
     let report = cache_maintenance(cache_path, dry_run);
     if !dry_run {
         let _ = atomic_touch(&marker);

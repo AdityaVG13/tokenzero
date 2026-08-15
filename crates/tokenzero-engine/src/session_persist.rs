@@ -120,13 +120,15 @@ impl SessionPersistence {
             session_hwm: snapshot.session_hwm,
         };
         let delta_body = serde_json::to_string(&delta)?;
-        if self
+        let last = self
             .last_persisted
             .lock()
             .ok()
-            .as_deref()
-            .and_then(Option::as_deref)
-            == Some(delta_body.as_str())
+            .and_then(|guard| guard.clone());
+        // SAFETY: `last_persisted` is a skip-cache, not the persist gate
+        // (`SessionPersistLock` flock). Copy-out so the in-process mutex is
+        // not live across `last_complete_journal_line` journal I/O.
+        if last.as_deref() == Some(delta_body.as_str())
             && last_complete_journal_line(&self.path).as_deref() == Some(delta_body.as_str())
         {
             return Ok(false);

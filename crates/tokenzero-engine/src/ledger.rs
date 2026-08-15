@@ -363,6 +363,12 @@ impl LedgerWriter {
             return;
         };
         *cumulative = cumulative.saturating_add(visible_tokens);
+        let cumulative_session_cost_tokens = *cumulative;
+        // SAFETY: `cumulative_visible_tokens` is an in-memory counter, not the
+        // persist gate (`io` / `LedgerIo.state`). Copy the snapshot and drop
+        // before `append_record` so a hung create_dir/write_all cannot stall
+        // other `record_response` threads on the counter.
+        drop(cumulative);
         let get_bool = |pointer: &str| {
             telemetry
                 .and_then(|value| value.pointer(pointer))
@@ -415,7 +421,7 @@ impl LedgerWriter {
             eviction_amortization: telemetry
                 .and_then(|value| value.pointer("/working_set_eviction/amortized"))
                 .cloned(),
-            cumulative_session_cost_tokens: *cumulative,
+            cumulative_session_cost_tokens,
             optimization_tags: self.optimization_tags.clone(),
             recovery_costs,
             racc_charge,
@@ -426,6 +432,8 @@ impl LedgerWriter {
     fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
         let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
         line.push(b'\n');
+        #[cfg(test)]
+        ledger_tests::pause_during_append();
         let mut mode = self
             .io
             .lock()
@@ -471,11 +479,20 @@ impl LedgerWriter {
 
     /// Drain buffered records during an orderly lifecycle shutdown. Fail-open.
     pub(crate) fn flush(&self) {
-        let mode = self
-            .io
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let LedgerMode::Buffered(io) = &*mode {
+        let buffered = {
+            let mode = self
+                .io
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &*mode {
+                LedgerMode::Buffered(io) => Some(Arc::clone(io)),
+                LedgerMode::Direct { .. } => None,
+            }
+        };
+        // SAFETY: `io` only selects Direct vs Buffered. Buffered persist is
+        // serialized by `LedgerIo.state`. Drop `io` before disk flush so a
+        // hung write cannot stall `append_record`'s mode switch.
+        if let Some(io) = buffered {
             let _ = io.flush();
         }
     }
