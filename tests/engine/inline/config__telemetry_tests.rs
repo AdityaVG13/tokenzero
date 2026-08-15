@@ -110,4 +110,6 @@ fn ratc_and_corridor_parse_known_keys_and_reject_unknown() {
         unknown_corridor.contains("unknown key"),
         "{unknown_corridor}"
     );
+    let negative = parse_ratc_weights(r#"{"rho_fail":-1}"#).unwrap_err();
+    assert!(negative.contains(">= 0"), "{negative}");
 }

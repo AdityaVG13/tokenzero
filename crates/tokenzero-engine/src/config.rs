@@ -209,12 +209,17 @@ fn json_f64(
     let Some(value) = object.get(key) else {
         return Ok(None);
     };
-    value
+    let Some(n) = value
         .as_f64()
         .or_else(|| value.as_u64().map(|n| n as f64))
         .or_else(|| value.as_i64().map(|n| n as f64))
-        .map(Some)
-        .ok_or_else(|| format!("{key} must be a number"))
+    else {
+        return Err(format!("{key} must be a number"));
+    };
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("{key} must be a finite number >= 0"));
+    }
+    Ok(Some(n))
 }
 
 /// Parse `{"rho_fail":..,"lambda_fail":..}`. Unknown keys fail loud.

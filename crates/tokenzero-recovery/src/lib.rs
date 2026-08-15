@@ -3303,19 +3303,24 @@ fn compact_ref_index_if_needed(shard: &Path) {
     if meta.len() <= REF_INDEX_MAX_BYTES {
         return;
     }
-    let Some(text) = ref_index_text(shard) else {
-        return;
-    };
-    let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
-    if lines == 0 {
-        return;
-    }
-    let live = newest_ref_index_entries(&text, None).len();
-    let stale = lines.saturating_sub(live);
-    // Append-only until most of the shard is superseded. Rewrite-compaction
-    // at the 1MiB threshold is what a kill mid-rename used to risk.
-    if (stale as f64) / (lines as f64) < REF_INDEX_RECLAIM_STALE_RATIO {
-        return;
+    // Below the stale-ratio gate a shard can still grow toward the read
+    // ceiling, after which ref_index_text returns None and the shard vanishes.
+    let near_unread = meta.len() >= (REF_INDEX_READ_MAX_BYTES as u64 / 2);
+    if !near_unread {
+        let Some(text) = ref_index_text(shard) else {
+            return;
+        };
+        let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+        if lines == 0 {
+            return;
+        }
+        let live = newest_ref_index_entries(&text, None).len();
+        let stale = lines.saturating_sub(live);
+        // Append-only until most of the shard is superseded. Rewrite-compaction
+        // at the 1MiB threshold is what a kill mid-rename used to risk.
+        if (stale as f64) / (lines as f64) < REF_INDEX_RECLAIM_STALE_RATIO {
+            return;
+        }
     }
     let _ = compact_ref_index_shard(shard);
 }
