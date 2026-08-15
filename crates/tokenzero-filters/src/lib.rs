@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,23 +81,37 @@ const CLASS_RULES: &[(&str, Words, Words)] = &[
 pub fn supported_filters() -> Vec<FilterInfo> {
     FILTER_SPECS
         .iter()
-        .map(|&(family, commands)| FilterInfo {
-            family: family.to_string(),
-            commands: commands.split('|').map(str::to_string).collect(),
-            supported: true,
-            exact_refs: true,
+        .map(|&(family, commands)| {
+            let listed: Vec<String> = commands.split('|').map(str::to_string).collect();
+            let rewrites: Vec<Option<String>> = listed
+                .iter()
+                .map(|command| rewrite_for_spec(family, command))
+                .collect();
+            FilterInfo {
+                family: family.to_string(),
+                commands: listed,
+                supported: rewrites.iter().any(Option::is_some),
+                exact_refs: rewrites.iter().flatten().any(|rewritten| {
+                    split_words(rewritten)
+                        .first()
+                        .is_some_and(|word| executable_name(word) == "tokenzero")
+                }),
+            }
         })
         .collect()
 }
 pub fn discover() -> DiscoverReport {
+    let install_ready = probe_install();
+    let mcp_ready = probe_mcp();
+    let shell_ready = probe_shell();
     DiscoverReport {
         schema_version: "tokenzero.discover.v1".to_string(),
         status: "ok".to_string(),
         supported_filters: supported_filters(),
-        unsupported_commands: Vec::new(),
-        install_ready: true,
-        mcp_ready: true,
-        shell_ready: true,
+        unsupported_commands: unsupported_commands(),
+        install_ready,
+        mcp_ready,
+        shell_ready,
         os_warnings: os_warnings(),
     }
 }
@@ -105,6 +121,135 @@ pub fn os_warnings() -> Vec<String> {
         .then(|| "verify PowerShell and cmd quoting with the OS matrix before launch".to_string())
         .into_iter()
         .collect()
+}
+
+/// Env names match tokenzero-engine config. This crate cannot import engine
+/// (engine depends on filters).
+const TOKENZERO_BIN_ENV: &str = "TOKENZERO_BIN";
+const TOKENZERO_RG_PATH_ENV: &str = "TOKENZERO_RG_PATH";
+const TOKENZERO_MCP_TOOL_SURFACE_ENV: &str = "TOKENZERO_MCP_TOOL_SURFACE";
+const TOKENZERO_MCP_IDLE_TIMEOUT_ENV: &str = "TOKENZERO_MCP_IDLE_TIMEOUT_SECS";
+const TOKENZERO_SHELL_TIMEOUT_ENVS: &[&str] = &[
+    "TOKENZERO_SHELL_TIMEOUT_SECS",
+    "TOKENZERO_SHELL_TIMEOUT",
+];
+
+fn unsupported_commands() -> Vec<String> {
+    FILTER_SPECS
+        .iter()
+        .flat_map(|&(family, commands)| {
+            commands
+                .split('|')
+                .filter(move |command| rewrite_for_spec(family, command).is_none())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Probe a FILTER_SPECS command against classify + apply_rewrite.
+/// Single-word specs get a dummy operand so arg-requiring rewrites (`cat`) count.
+fn rewrite_for_spec(family: &str, spec: &str) -> Option<String> {
+    let command = if split_words(spec).len() == 1 {
+        format!("{spec} _")
+    } else {
+        spec.to_string()
+    };
+    let parts = split_words(&command);
+    if classify_words(&parts) != family {
+        return None;
+    }
+    apply_rewrite(family, &command, &parts).map(|rewritten| rewritten.into_owned())
+}
+
+fn probe_install() -> bool {
+    let tokenzero = match std::env::var_os(TOKENZERO_BIN_ENV) {
+        Some(path) if !path.is_empty() => is_executable_file(Path::new(&path)),
+        _ => find_on_path("tokenzero").is_some(),
+    };
+    let rg_override = match std::env::var_os(TOKENZERO_RG_PATH_ENV) {
+        Some(path) if !path.is_empty() => is_executable_file(Path::new(&path)),
+        _ => true,
+    };
+    tokenzero && rg_override
+}
+
+fn probe_mcp() -> bool {
+    let surface_ok = match std::env::var(TOKENZERO_MCP_TOOL_SURFACE_ENV) {
+        Err(_) => true,
+        Ok(value) => mcp_surface_ok(&value),
+    };
+    let idle_ok = match std::env::var(TOKENZERO_MCP_IDLE_TIMEOUT_ENV) {
+        Err(_) => true,
+        Ok(value) => value.parse::<u64>().is_ok(),
+    };
+    surface_ok && idle_ok
+}
+
+fn mcp_surface_ok(value: &str) -> bool {
+    matches!(
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', ' '], "-")
+            .as_str(),
+        "" | "mcp" | "classic" | "aliases" | "full" | "codemode" | "code-mode"
+    )
+}
+
+fn probe_shell() -> bool {
+    shell_timeout_ok() && shell_binary_present()
+}
+
+fn shell_timeout_ok() -> bool {
+    TOKENZERO_SHELL_TIMEOUT_ENVS.iter().all(|name| match std::env::var(name) {
+        Err(_) => true,
+        Ok(value) => value.parse::<u64>().ok().is_some_and(|seconds| seconds >= 1),
+    })
+}
+
+fn shell_binary_present() -> bool {
+    let names: &[&str] = if cfg!(windows) {
+        &["cmd", "powershell", "pwsh"]
+    } else {
+        &["sh", "bash", "zsh"]
+    };
+    names.iter().any(|name| find_on_path(name).is_some())
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let names = path_binary_names(name);
+    std::env::split_paths(&path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| names.iter().map(move |candidate| dir.join(candidate)))
+        .find(|path| is_executable_file(path))
+}
+
+fn path_binary_names(name: &str) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if cfg!(windows) && Path::new(name).extension().is_none() {
+        names.extend(
+            [".exe", ".cmd", ".bat", ".com"].map(|ext| format!("{name}{ext}")),
+        );
+    }
+    names
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn classify_words(parts: &[String]) -> &'static str {
