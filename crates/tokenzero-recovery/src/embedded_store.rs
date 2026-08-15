@@ -370,9 +370,7 @@ impl TokenZeroStore {
             .shared_cas
             .as_ref()
             .ok_or(TokenZeroStoreError::NoSharedCas)?;
-        let _publication_guard = CAS_PUBLICATION_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _publication_guard = cas_publication_guard()?;
         validate_publication_target(cas, bytes)?;
         let hash = cas.publish(bytes).map_err(classify_publish_error)?;
         Ok(format!("tz://blob/{hash}"))
@@ -819,10 +817,16 @@ fn redact_path_identity(path: &Path) -> String {
 
 /// Establish actual CAS writability by attempting a tiny create/write/delete
 /// probe under the CAS root. Attachment is not sufficient.
-fn probe_cas_writable(cas: &SharedCas) -> bool {
-    let _publication_guard = CAS_PUBLICATION_LOCK
+fn cas_publication_guard() -> Result<std::sync::MutexGuard<'static, ()>, TokenZeroStoreError> {
+    CAS_PUBLICATION_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .map_err(|_| TokenZeroStoreError::Io("CAS publication lock poisoned".into()))
+}
+
+fn probe_cas_writable(cas: &SharedCas) -> bool {
+    let Ok(_publication_guard) = cas_publication_guard() else {
+        return false;
+    };
     let prefix_seed = unique_probe_name("cas-prefix");
     let hash = crate::shared_cas::content_sha256_hex(prefix_seed.as_bytes());
     let Ok((prefix, existed)) = prepare_canonical_prefix(cas, &hash[..2]) else {

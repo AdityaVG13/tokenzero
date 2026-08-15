@@ -44,6 +44,12 @@ pub fn sweep_stale_tmp_files(
         dry_run,
         ..TmpSweepReport::default()
     };
+    // Persist writes a unique tmp then renames under PersistLock. Sweeping
+    // without that lock can unlink a live writer's tmp (TOCTOU). Lock timeout
+    // skips the sweep: fail closed for deletes.
+    let Ok(_lock) = PersistLock::acquire(recovery_lock_path(cache_path)) else {
+        return report;
+    };
     let Some((parent, cache_name)) = cache_path
         .parent()
         .zip(cache_path.file_name().and_then(|name| name.to_str()))
@@ -454,5 +460,24 @@ mod prune_option_tests {
             cache.is_file(),
             "missing snapshot persist must create the file"
         );
+    }
+
+    #[test]
+    fn sweep_stale_tmp_removes_expired_under_lock() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        fs::write(&cache, b"{}\n").unwrap();
+        let tmp = dir.path().join(".recovery-cache.json.1.0.tmp");
+        fs::write(&tmp, b"stale").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(60 * 60 * 2);
+        filetime_set_mtime(&tmp, old);
+        let report = sweep_stale_tmp_files(&cache, STALE_TMP_MAX_AGE, false);
+        assert_eq!(report.removed, 1);
+        assert!(!tmp.exists(), "expired tmp must be unlinked after lock");
+    }
+
+    fn filetime_set_mtime(path: &std::path::Path, at: SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(at).unwrap();
     }
 }

@@ -127,6 +127,9 @@ pub fn append_shadow_jsonl(path: &Path, line: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Append plus ring trim is a read-modify-write. Without a lock two
+    // writers can each trim a stale snapshot and drop the other's lines.
+    let _lock = lock_exclusive(path)?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{line}")?;
     drop(file);
@@ -339,3 +342,37 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "../../../tests/recovery/inline/store_schema__store_schema_tests.rs"]
 mod store_schema_tests;
+
+#[cfg(test)]
+mod shadow_lock_tests {
+    use super::*;
+    use std::thread;
+    use tempfile::tempdir;
+
+    #[test]
+    fn concurrent_shadow_appends_keep_every_line() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shadow.jsonl");
+        let workers = 4;
+        let per_worker = 32;
+        let mut handles = Vec::new();
+        for worker in 0..workers {
+            let path = path.clone();
+            handles.push(thread::spawn(move || {
+                for idx in 0..per_worker {
+                    append_shadow_jsonl(&path, &format!("{worker}:{idx}")).unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        let lines = text.lines().filter(|line| !line.is_empty()).count();
+        assert_eq!(
+            lines,
+            workers * per_worker,
+            "ring trim under lock must not drop concurrent appends"
+        );
+    }
+}

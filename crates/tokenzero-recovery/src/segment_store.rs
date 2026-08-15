@@ -108,6 +108,9 @@ impl SegmentStore {
         let cache = cache.into();
         let root = cache.parent().unwrap_or(Path::new(".")).to_path_buf();
         fs::create_dir_all(&root)?;
+        // Hold the store lock across create+publish so a concurrent open()
+        // cannot treat the new hot segment as an orphan and unlink it.
+        let _lock = Lock::get(lock_path(&cache))?;
         let mut s = Self {
             cache_path: cache,
             root,
@@ -334,6 +337,11 @@ impl SegmentStore {
         self.publish()
     }
     pub fn expand(&mut self, r: &str) -> Result<Option<Vec<u8>>, SegmentStoreError> {
+        // Recovery truncates the hot segment and eviction unlinks cold files
+        // under this lock; a lockless read can observe a truncated or unlinked
+        // payload. Reload so this handle cannot expand from a stale index.
+        let _l = Lock::get(lock_path(&self.cache_path))?;
+        self.reload()?;
         if let Some(e) = self.hot_index.entries.get(r) {
             return read_entry(&self.root.join(&self.manifest.hot.data_file), e).map(Some);
         }
@@ -702,5 +710,39 @@ impl Lock {
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod expand_lock_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn expand_survives_concurrent_seal_and_evict() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut store = SegmentStore::create_shadow(cache.clone(), None).unwrap();
+        store.set_segment_bytes(180);
+        store.put("keep", b"live-bytes-xxxx", u64::MAX).unwrap();
+        store.put("cold", b"cold-bytes-xxxx", 1).unwrap();
+        store.seal().unwrap();
+
+        let reader = cache.clone();
+        let expander = std::thread::spawn(move || {
+            let mut handle = SegmentStore::open(reader, None).unwrap();
+            for _ in 0..32 {
+                let got = handle.expand("keep").unwrap();
+                assert_eq!(got.as_deref(), Some(b"live-bytes-xxxx".as_slice()));
+            }
+        });
+        let mut evictor = SegmentStore::open(cache.clone(), None).unwrap();
+        evictor.evict_expired(10).unwrap();
+        expander.join().unwrap();
+        let mut check = SegmentStore::open(cache, None).unwrap();
+        assert_eq!(
+            check.expand("keep").unwrap().as_deref(),
+            Some(b"live-bytes-xxxx".as_slice())
+        );
     }
 }

@@ -1418,10 +1418,17 @@ impl RecoveryStore {
     /// retirement. `SyncPolicy::Required` is tried first; mounts that cannot
     /// fsync fall back to `TolerateUnsupported`.
     pub fn persist_pending_durable(&mut self) -> Result<(), RecoveryError> {
-        self.persist()?;
         let Some(path) = self.persistence_path.clone() else {
-            return Ok(());
+            return self.persist();
         };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // Hold PersistLock across merge/write and the durability republish.
+        // Dropping it after persist() let prune/GC observe a snapshot that
+        // this method then overwrote without a lock.
+        let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
+        self.persist_assuming_locked()?;
         let bytes = snapshot_bytes(&self.state)?;
         let mut cfg = SessionWalConfig {
             max_replay_bytes: self.config.max_load_bytes as u64,
@@ -1496,16 +1503,40 @@ impl RecoveryStore {
         let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
             .into_iter()
             .collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let path = self.persistence_path.clone();
+        // PersistLock first so prune cannot rewrite the snapshot between CAS
+        // publication and marker commit. Leased publish then covers the GC
+        // window until the snapshot names the object.
+        let _lock = match path.as_ref() {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                Some(PersistLock::acquire(recovery_lock_path(path))?)
+            }
+            None => None,
+        };
+        let project = crate::shared_cas::project_id(cas.root()).map_err(|err| {
+            io::Error::other(format!("CAS project id for leased publish: {err}"))
+        })?;
         let mut failed = 0usize;
         let mut shrunk = false;
+        let mut leased_ops: Vec<String> = Vec::new();
         for hash in hashes {
             let ref_id = format!("tz://blob/{hash}");
             let published_len = match self.state.blobs.get(&ref_id) {
                 Some(BlobEntry::Inline(text)) if !text.starts_with(BLOB_MARKER_PREFIX) => {
-                    match cas.publish(text.as_bytes()) {
-                        Ok(_) => Some(text.len()),
+                    match cas.publish_leased(text.as_bytes(), &project, &hash, 300) {
+                        Ok(_) => {
+                            leased_ops.push(hash.clone());
+                            Some(text.len())
+                        }
                         Err(_) => {
                             failed = failed.saturating_add(1);
+                            self.pending_cas_hashes.insert(hash.clone());
                             None
                         }
                     }
@@ -1520,11 +1551,17 @@ impl RecoveryStore {
                 .insert(ref_id, BlobEntry::Inline(blob_cas_marker(&hash, len)));
             shrunk = true;
         }
-        if shrunk && let Some(path) = self.persistence_path.clone() {
+        if shrunk && let Some(path) = path.as_ref() {
             // persist() can journal-append an empty session delta and leave
             // the snapshot carrying the old inline bodies. Rewrite the root.
-            let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-            self.publish_snapshot(&path)?;
+            self.publish_snapshot(path)?;
+        }
+        if path.is_some() {
+            for op in &leased_ops {
+                cas.release_lease(&project, op).map_err(|err| {
+                    io::Error::other(format!("release CAS publish lease {op}: {err}"))
+                })?;
+            }
         }
         if failed > 0 {
             return Err(io::Error::other(format!(

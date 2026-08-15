@@ -246,11 +246,16 @@ impl ActionCacheIndex {
             fs::create_dir_all(parent)?;
         }
         fs::write(&path, b"1")?;
-        if self.get(key)?.is_none() {
-            let _ = fs::remove_file(&path);
-            return Ok(None);
+        // Recheck after the pin is visible so a concurrent eviction that
+        // marked L3-cold (or tombstoned) between the first get and the pin
+        // cannot hand out a dangling artifact_ref.
+        match self.get(key)? {
+            Some(fresh) if !fresh.l3_cold => Ok(Some((fresh, ServedArtifact { path }))),
+            _ => {
+                let _ = fs::remove_file(&path);
+                Ok(None)
+            }
         }
-        Ok(Some((entry, ServedArtifact { path })))
     }
 
     pub fn get(&self, key: &str) -> Result<Option<ActionCacheEntry>, ActionCacheError> {
@@ -607,3 +612,42 @@ fn validate_key(key: &str) -> Result<(), ActionCacheError> {
 #[cfg(test)]
 #[path = "../../../tests/recovery/inline/action_cache__action_cache_tests.rs"]
 mod action_cache_tests;
+
+#[cfg(test)]
+mod serve_l3_recheck_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn key(n: u8) -> String {
+        format!("{n:064x}")
+    }
+
+    fn live_entry(n: u8) -> ActionCacheEntry {
+        ActionCacheEntry {
+            key: key(n),
+            artifact_ref: format!("tz://blob/{}", key(n)),
+            fszero_bookmark: None,
+            dep_closure_ref: None,
+            class: "must_block_revalidate".into(),
+            verified: true,
+            world_id: Some("w1".into()),
+            tombstone: false,
+            tombstoned_at_unix: None,
+            l3_cold: false,
+            cold_since_unix: None,
+        }
+    }
+
+    #[test]
+    fn serve_refuses_after_l3_loss() {
+        let dir = tempdir().unwrap();
+        let index = ActionCacheIndex::open(dir.path());
+        let item = live_entry(7);
+        index.put(item.clone()).unwrap();
+        assert!(index.mark_l3_loss(&item.key, 1_000).unwrap());
+        assert!(
+            index.serve(&item.key).unwrap().is_none(),
+            "serve must not return an L3-cold artifact_ref"
+        );
+    }
+}
