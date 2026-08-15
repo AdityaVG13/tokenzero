@@ -23,6 +23,8 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().collect();
+    // Flag values (`--prefix sbom`, `--mode mcp`) must not be scanned as verbs.
+    let verbs = argv_without_option_values(&args);
 
     // Private raw worker (tokenzero-irx9.4): OMP/router composition path.
     // Framing + handshake + NDJSON exec loop; not a second user catalog.
@@ -35,7 +37,7 @@ fn main() {
         }
     }
 
-    if args
+    if verbs
         .iter()
         .any(|a| a == "help" || a == "--help" || a == "-h")
     {
@@ -53,7 +55,7 @@ fn main() {
         process::exit(0);
     }
 
-    if args.iter().any(|a| a == "sbom") {
+    if verbs.iter().any(|a| a == "sbom") {
         println!(
             "{}",
             serde_json::to_string_pretty(&sbom_document(SURFACE)).unwrap()
@@ -61,16 +63,16 @@ fn main() {
         process::exit(0);
     }
 
-    if args.iter().any(|a| a == "install") {
+    if verbs.iter().any(|a| a == "install") {
         run_install(&args);
         process::exit(0);
     }
-    if args.iter().any(|a| a == "uninstall") {
+    if verbs.iter().any(|a| a == "uninstall") {
         run_uninstall(&args);
         process::exit(0);
     }
 
-    if args.iter().any(|a| a == "doctor" || a == "--doctor") {
+    if verbs.iter().any(|a| a == "doctor" || a == "--doctor") {
         if let Err(e) = assert_surface_compiled(SURFACE) {
             eprintln!("{e}");
             process::exit(2);
@@ -98,7 +100,7 @@ Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only 
     // Every supported subcommand has already exited above, so anything left on
     // argv is a caller mistake. Reject it instead of serving stdio, which would
     // read EOF and exit 0 with no output (tokenzero-j0cn).
-    if let Err(e) = reject_non_stdio_args("tokenzero-mcp", &args) {
+    if let Err(e) = reject_non_stdio_args("tokenzero-mcp", &verbs) {
         eprintln!("{e}");
         process::exit(2);
     }
@@ -123,8 +125,44 @@ Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only 
     run_fastmcp_stdio(config);
 }
 
+/// Flags whose following argv token is a value, not a packaging verb.
+const VALUE_FLAGS: &[&str] = &[
+    "--prefix",
+    "--binary",
+    "--surface",
+    "--mode",
+    "--tool-surface",
+    "--root",
+    "--repo",
+    "--log-level",
+    "--cache-path",
+    "--once",
+];
+
+/// Drop option values so `--prefix sbom` / `--mode mcp` cannot be scanned as
+/// subcommands. Flags themselves stay so unknown options still fail loud.
+fn argv_without_option_values(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if i > 0 && VALUE_FLAGS.contains(&arg.as_str()) {
+            out.push(arg.clone());
+            i += 1;
+            if i < args.len() && !args[i].starts_with('-') {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(arg.clone());
+        i += 1;
+    }
+    out
+}
+
 /// Parse `--name VALUE` or `--name=VALUE`. Missing or flag-shaped values fail
 /// loud so `install --prefix --binary …` cannot treat `--binary` as a path.
+/// Dash-leading paths must use the equals form (`--prefix=-`).
 fn parse_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
     let mut i = 0;
     while i < args.len() {
@@ -209,7 +247,7 @@ fn run_uninstall(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_flag;
+    use super::{argv_without_option_values, parse_flag};
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
@@ -251,8 +289,11 @@ mod tests {
             .expect_err("bare --prefix must fail loud");
         assert!(missing.contains("requires a value"), "{missing}");
 
-        let empty = parse_flag(&args(&["tokenzero-mcp", "install", "--prefix="]), "--prefix")
-            .expect_err("empty --prefix= must fail loud");
+        let empty = parse_flag(
+            &args(&["tokenzero-mcp", "install", "--prefix="]),
+            "--prefix",
+        )
+        .expect_err("empty --prefix= must fail loud");
         assert!(empty.contains("requires a value"), "{empty}");
 
         let stolen = parse_flag(
@@ -283,5 +324,56 @@ mod tests {
             Some("/tmp/bin")
         );
     }
-}
 
+    #[test]
+    fn parse_flag_equals_form_keeps_dash_leading_values() {
+        assert_eq!(
+            parse_flag(
+                &args(&["tokenzero-mcp", "install", "--prefix=-"]),
+                "--prefix"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("-")
+        );
+        assert_eq!(
+            parse_flag(
+                &args(&["tokenzero-mcp", "uninstall", "--prefix=-dash-dir"]),
+                "--prefix"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("-dash-dir")
+        );
+    }
+
+    #[test]
+    fn argv_without_option_values_does_not_treat_flag_values_as_verbs() {
+        let stripped = argv_without_option_values(&args(&[
+            "tokenzero-mcp",
+            "install",
+            "--prefix",
+            "sbom",
+            "--binary",
+            "help",
+        ]));
+        assert!(
+            stripped.iter().any(|a| a == "install"),
+            "install verb must remain: {stripped:?}"
+        );
+        assert!(
+            !stripped.iter().any(|a| a == "sbom" || a == "help"),
+            "option values must not look like verbs: {stripped:?}"
+        );
+
+        let mode = argv_without_option_values(&args(&["tokenzero-mcp", "--mode", "mcp"]));
+        assert!(
+            mode.iter().any(|a| a == "--mode"),
+            "flag must remain so unknown options still fail loud: {mode:?}"
+        );
+        assert!(
+            !mode.iter().any(|a| a == "mcp"),
+            "--mode mcp must not be an unknown subcommand: {mode:?}"
+        );
+    }
+}

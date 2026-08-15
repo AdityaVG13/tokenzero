@@ -135,7 +135,16 @@ fn follow_job_lifecycle(engine: &TokenZeroEngine, job_id: &str) {
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                job_progress::observe(
+                    session,
+                    job_progress::JobEvent::Completed {
+                        job_id: job_id.to_string(),
+                        status: "failed".to_string(),
+                    },
+                );
+                break;
+            }
         }
     }
 }
@@ -265,8 +274,8 @@ fn validate_request(parsed: &Value) -> Result<ValidatedRequest<'_>, Value> {
     if object.contains_key("id") && valid_id.is_none() {
         return Err(request_error(
             Value::Null,
-            "id must be string, number, or null",
-            "Use a string, number, or null id so the response can be correlated.",
+            "id must be string, integer, or null",
+            "Use a string, integer, or null id so the response can be correlated.",
         ));
     }
     if object
@@ -401,26 +410,26 @@ pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) ->
     Some(wire_json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
+fn lock_lifecycle(engine: &TokenZeroEngine) -> std::sync::MutexGuard<'_, InitializeState> {
+    engine
+        .lifecycle
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 fn set_lifecycle_negotiated(engine: &TokenZeroEngine) {
-    if let Ok(mut state) = engine.lifecycle.lock() {
-        *state = InitializeState::Negotiated;
-    }
+    *lock_lifecycle(engine) = InitializeState::Negotiated;
 }
 
 fn advance_lifecycle_initialized(engine: &TokenZeroEngine) {
-    if let Ok(mut state) = engine.lifecycle.lock() {
-        if matches!(*state, InitializeState::Negotiated | InitializeState::Ready) {
-            *state = InitializeState::Ready;
-        }
+    let mut state = lock_lifecycle(engine);
+    if matches!(*state, InitializeState::Negotiated | InitializeState::Ready) {
+        *state = InitializeState::Ready;
     }
 }
 
 fn ensure_lifecycle_ready(engine: &TokenZeroEngine, id: &Value) -> RpcResult<()> {
-    let ready = engine
-        .lifecycle
-        .lock()
-        .map(|state| *state == InitializeState::Ready)
-        .unwrap_or(false);
+    let ready = *lock_lifecycle(engine) == InitializeState::Ready;
     if ready {
         return Ok(());
     }
@@ -625,7 +634,11 @@ fn tool_arguments(params: &Object, id: &Value) -> RpcResult<Value> {
 }
 
 fn is_valid_jsonrpc_id(value: &Value) -> bool {
-    value.is_string() || value.is_number() || value.is_null()
+    match value {
+        Value::Null | Value::String(_) => true,
+        Value::Number(number) => number.is_i64() || number.is_u64(),
+        _ => false,
+    }
 }
 
 fn supported_protocol_version(value: &str) -> bool {
@@ -1004,4 +1017,107 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
         }
     }
     costs[right_chars.len()]
+}
+
+#[cfg(test)]
+mod deep_pass_tests {
+    use super::{follow_job_lifecycle, handle_jsonrpc};
+    use crate::job_progress;
+    use crate::{EngineConfig, TokenZeroEngine};
+    use serde_json::Value;
+    use std::panic::AssertUnwindSafe;
+
+    fn test_engine() -> (tempfile::TempDir, TokenZeroEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        (dir, engine)
+    }
+
+    fn error_reason(response: &str) -> String {
+        let parsed: Value = serde_json::from_str(response).unwrap();
+        parsed["error"]["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn fractional_jsonrpc_id_is_rejected() {
+        let (_dir, engine) = test_engine();
+        let response = handle_jsonrpc(&engine, r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#)
+            .expect("invalid id must still produce a JSON-RPC error");
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], -32600, "{parsed:#}");
+        assert_eq!(parsed["id"], Value::Null, "{parsed:#}");
+        assert!(error_reason(&response).contains("integer"), "{response}");
+    }
+
+    #[test]
+    fn integer_and_string_jsonrpc_ids_are_accepted() {
+        let (_dir, engine) = test_engine();
+        for request in [
+            r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":"ping-1","method":"ping"}"#,
+        ] {
+            let response = handle_jsonrpc(&engine, request).unwrap();
+            let parsed: Value = serde_json::from_str(&response).unwrap();
+            assert!(parsed.get("result").is_some(), "{parsed:#}");
+        }
+    }
+
+    #[test]
+    fn follow_job_lifecycle_wait_error_emits_terminal() {
+        let (_dir, engine) = test_engine();
+        let session = engine.session_id().to_string();
+        job_progress::remember_progress_token(&session, Some("pt-missing".into()));
+        follow_job_lifecycle(&engine, "no-such-job");
+        let notes = job_progress::take_notifications(&session);
+        assert!(
+            notes.iter().any(|note| {
+                note["method"] == "notifications/progress"
+                    && note["params"]["message"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("failed"))
+            }),
+            "wait errors must still emit a terminal progress frame: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn initialize_recovers_poisoned_lifecycle_lock() {
+        let (_dir, engine) = test_engine();
+        let poisoned = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _guard = engine.lifecycle.lock().unwrap();
+            panic!("poison lifecycle");
+        }));
+        assert!(poisoned.is_err());
+        assert!(engine.lifecycle.lock().is_err(), "mutex must be poisoned");
+
+        let init = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"poison","version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let init: Value = serde_json::from_str(&init).unwrap();
+        assert!(init.get("result").is_some(), "{init:#}");
+
+        assert!(
+            handle_jsonrpc(
+                &engine,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            )
+            .is_none()
+        );
+
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let listed: Value = serde_json::from_str(&listed).unwrap();
+        assert!(
+            listed.get("result").is_some(),
+            "poisoned initialize must still reach Ready: {listed:#}"
+        );
+    }
 }

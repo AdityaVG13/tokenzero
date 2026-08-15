@@ -21,6 +21,21 @@ fn core_surface_row(
     json!({"surface":surface,"ok":ok,"daemon_required":false,"global_writes":false,"evidence":evidence,"details":details})
 }
 
+fn posix_shell_matrix_command(exe: &Path, cache: &Path) -> String {
+    quote_for(
+        "posix",
+        &[
+            exe.to_string_lossy().into_owned(),
+            "run".into(),
+            "--cache-path".into(),
+            cache.to_string_lossy().into_owned(),
+            "--".into(),
+            "echo".into(),
+            "ok".into(),
+        ],
+    )
+}
+
 pub(crate) fn run_shell_matrix(
     output_json: PathBuf,
     output_md: Option<PathBuf>,
@@ -44,11 +59,7 @@ pub(crate) fn run_shell_matrix(
             .arg(&cache)
             .args(["--", "echo", "ok"]);
         rows.push(run_matrix_row("env-i", &mut env_cmd));
-        let inv = format!(
-            "{} run --cache-path {} -- echo ok",
-            exe.display(),
-            cache.display()
-        );
+        let inv = posix_shell_matrix_command(&exe, &cache);
         for clean in [false, true] {
             for sh in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
                 if !Path::new(sh).exists() {
@@ -256,4 +267,30 @@ pub(crate) fn load_os_release_artifacts(paths: &[PathBuf]) -> Result<Vec<serde_j
             Ok(a)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::posix_shell_matrix_command;
+    use std::path::Path;
+
+    #[test]
+    fn posix_shell_matrix_command_quotes_paths_with_spaces() {
+        let cmd = posix_shell_matrix_command(
+            Path::new("/tmp/Token Zero/tokenzero"),
+            Path::new("/tmp/cache dir.json"),
+        );
+        assert!(
+            cmd.contains("'/tmp/Token Zero/tokenzero'"),
+            "exe path with spaces must be POSIX-quoted: {cmd}"
+        );
+        assert!(
+            cmd.contains("'/tmp/cache dir.json'"),
+            "cache path with spaces must be POSIX-quoted: {cmd}"
+        );
+        assert!(
+            !cmd.contains("Zero/tokenzero run"),
+            "unquoted space must not split the exe token: {cmd}"
+        );
+    }
 }
