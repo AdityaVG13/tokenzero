@@ -3313,13 +3313,28 @@ fn ref_index_id_part(ref_id: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-fn ref_index_shard_path_with_prefix(root: &Path, ref_id: &str, prefix_len: usize) -> PathBuf {
+fn ref_index_shard_prefix(ref_id: &str, prefix_len: usize) -> String {
     let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
     let mut prefix: String = id.chars().take(prefix_len).collect();
     while prefix.chars().count() < prefix_len {
         prefix.push('x');
     }
-    root.join(format!("{prefix}.ndjson"))
+    if prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return prefix;
+    }
+    // Untrusted ref ids are used as shard filenames. Non-alphanumeric
+    // prefixes (`../`, `/`, `\`) must not join outside the index root.
+    crate::shared_cas::content_sha256_hex(id.as_bytes())
+        .chars()
+        .take(prefix_len)
+        .collect()
+}
+
+fn ref_index_shard_path_with_prefix(root: &Path, ref_id: &str, prefix_len: usize) -> PathBuf {
+    root.join(format!(
+        "{}.ndjson",
+        ref_index_shard_prefix(ref_id, prefix_len)
+    ))
 }
 
 fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
@@ -4888,5 +4903,45 @@ mod input_validation_boundary_tests {
         assert!(!unexpanded_tilde_path(Path::new(
             "/tmp/recovery-cache.json"
         )));
+    }
+
+    #[test]
+    fn ref_index_shard_paths_stay_under_root() {
+        let root = Path::new("/var/tokenzero/ref-index");
+        for id in [
+            "../",
+            "..",
+            "/",
+            "//",
+            "/etc/passwd",
+            r"..\",
+            r"..\..\windows",
+            "tz://blob/../",
+            "tz://blob/..\\evil",
+        ] {
+            let path = ref_index_shard_path(root, id);
+            let rel = path.strip_prefix(root).unwrap_or_else(|_| {
+                panic!(
+                    "ref-index shard escaped root for {id:?}: {}",
+                    path.display()
+                )
+            });
+            assert!(
+                rel.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "unsafe relative shard for {id:?}: {}",
+                rel.display()
+            );
+            let name = rel.file_name().and_then(|n| n.to_str()).unwrap();
+            assert!(name.ends_with(".ndjson"), "{name}");
+            assert!(
+                name.trim_end_matches(".ndjson")
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric()),
+                "shard file {name} is not a safe prefix"
+            );
+        }
+        let hex = ref_index_shard_path(root, "tz://blob/abcdef0123456789");
+        assert_eq!(hex.file_name().and_then(|n| n.to_str()), Some("abc.ndjson"));
     }
 }

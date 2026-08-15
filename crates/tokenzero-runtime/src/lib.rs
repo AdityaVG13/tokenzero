@@ -279,10 +279,7 @@ fn shell_command_string_from_argv(argv: &[String], shell_platform: &str) -> Stri
             if is_shell_operator_token(arg) {
                 arg.clone()
             } else {
-                shell_display_command_from_argv_for_platform(
-                    std::slice::from_ref(arg),
-                    shell_platform,
-                )
+                quote_for(shell_platform, std::slice::from_ref(arg))
             }
         })
         .collect::<Vec<_>>()
@@ -542,6 +539,9 @@ where
     scrub_inherited_orchestration_env(&mut command);
     if let Some(env) = env_overrides {
         command.envs(env);
+    }
+    if plan.execution_mode == ExecutionMode::Shell {
+        scrub_shell_injection_env(&mut command);
     }
     command.stdin(if stdin.is_some() {
         Stdio::piped()
@@ -1270,7 +1270,25 @@ fn scrub_inherited_orchestration_env(command: &mut Command) {
             ORCHESTRATION_ENV_PREFIXES
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
+                || is_shell_injection_env_key(name)
         }) {
+            command.env_remove(key);
+        }
+    }
+}
+
+fn scrub_shell_injection_env(command: &mut Command) {
+    // bash -c sources BASH_ENV/ENV even non-interactively; PS4 interpolates
+    // under xtrace. Strip after overrides so neither inheritance nor --env
+    // can inject a startup script into the wrapper shell.
+    for key in ["BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "PS4"] {
+        command.env_remove(key);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|name| name.starts_with("BASH_FUNC_"))
+        {
             command.env_remove(key);
         }
     }
@@ -1382,14 +1400,16 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
     let mut out = BTreeMap::new();
     for pair in pairs {
         let Some((key, value)) = pair.split_once('=') else {
-            return Err(invalid_runtime_input(format!(
-                "--env requires KEY=VALUE, got {pair}"
-            )));
+            return Err(invalid_runtime_input("--env requires KEY=VALUE"));
         };
         validate_env_pair(key, value)?;
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+fn is_shell_injection_env_key(key: &str) -> bool {
+    matches!(key, "BASH_ENV" | "BASHOPTS" | "SHELLOPTS") || key.starts_with("BASH_FUNC_")
 }
 
 fn validate_env_pair(key: &str, value: &str) -> Result<(), RuntimeError> {
@@ -1402,6 +1422,16 @@ fn validate_env_pair(key: &str, value: &str) -> Result<(), RuntimeError> {
         return Err(invalid_runtime_input(
             "environment variable names and values must not contain NUL",
         ));
+    }
+    if key.contains('=') || key.contains('\n') || key.contains('\r') {
+        return Err(invalid_runtime_input(
+            "environment variable names must not contain '=', CR, or LF",
+        ));
+    }
+    if is_shell_injection_env_key(key) {
+        return Err(invalid_runtime_input(format!(
+            "environment variable {key} is not allowed"
+        )));
     }
     Ok(())
 }
@@ -1447,6 +1477,50 @@ mod input_validation_tests {
         assert!(err.to_string().contains("NUL"), "{err}");
         let ok = env_map(&["KEY=value".into()]).unwrap();
         assert_eq!(ok.get("KEY").map(String::as_str), Some("value"));
+        let err = env_map(&["not-a-pair".into()]).expect_err("missing equals");
+        assert!(err.to_string().contains("KEY=VALUE"), "{err}");
+        assert!(
+            !err.to_string().contains("not-a-pair"),
+            "env parse errors must not echo the raw pair: {err}"
+        );
+        let err = env_map(&["BASH_ENV=/tmp/evil".into()]).expect_err("bash env");
+        assert!(err.to_string().contains("not allowed"), "{err}");
+        let err = validate_env_pair("FOO=BAR", "1").expect_err("equals in key");
+        assert!(err.to_string().contains("'='"), "{err}");
+    }
+
+    #[test]
+    fn plan_command_quotes_argv_for_shell_execution() {
+        let posix = plan_command_for_platform(
+            &["echo".into(), "$(id)".into(), "|".into(), "cat".into()],
+            None,
+            false,
+            "posix",
+        )
+        .unwrap();
+        assert_eq!(posix.execution_mode, ExecutionMode::Shell);
+        assert_eq!(
+            posix.argv.last().map(String::as_str),
+            Some("echo '$(id)' | cat")
+        );
+
+        let windows = plan_command_for_platform(
+            &["echo".into(), "%PATH%".into(), "|".into(), "more".into()],
+            None,
+            false,
+            "windows",
+        )
+        .unwrap();
+        assert_eq!(windows.execution_mode, ExecutionMode::Shell);
+        let cmd = windows.argv.last().expect("cmd string");
+        assert!(
+            cmd.contains("%%PATH%%"),
+            "cmd wrap must disable % expansion: {cmd}"
+        );
+        assert!(
+            !cmd.contains("\"%PATH%\""),
+            "display quoting must not be used for execution: {cmd}"
+        );
     }
 
     #[test]

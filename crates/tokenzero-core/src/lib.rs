@@ -1557,7 +1557,8 @@ const SHELL_DIAG_BOILERPLATE_PREFIXES: &str =
     "+ CategoryInfo|+ FullyQualifiedErrorId|At line:|+ ~|~~~~";
 const FAILURE_ANCHOR_NEEDLES: &str =
     "error|failure|failed|panic|traceback|exception|assertion|not ok";
-const SECRET_MARKERS: &str = "token=|password=|secret=|api_key=|authorization:|bearer ";
+const SECRET_MARKERS: &str = "aws_secret_access_key=|aws_access_key_id=|token=|password=|secret=|api_key=|apikey=|x-api-key:|api-key:|authorization:|bearer ";
+const SECRET_TOKEN_PREFIXES: &str = "sk-|sk-proj-|ghp_|github_pat_|AKIA|glpat-|xoxb-|xoxp-";
 
 fn is_shell_diagnostic_boilerplate(line: &str) -> bool {
     starts_with_any(line.trim_start(), SHELL_DIAG_BOILERPLATE_PREFIXES)
@@ -1572,6 +1573,9 @@ fn looks_failure_anchor_line(line: &str) -> bool {
 
 fn has_visible_secret_marker(text: &str) -> bool {
     contains_any(&text.to_ascii_lowercase(), SECRET_MARKERS)
+        || text
+            .split_whitespace()
+            .any(|word| starts_with_any(word, SECRET_TOKEN_PREFIXES))
 }
 
 fn has_protected_failure_context(text: &str) -> bool {
@@ -1609,14 +1613,20 @@ pub fn mask_visible_secrets(text: &str) -> String {
 
 fn mask_secret_line(line: &str) -> String {
     let low = line.to_ascii_lowercase();
-    // Keep trailing space on "bearer " so the marker matches SECRET_MARKERS and
-    // the mask lands after the separator (not glued as "bearer[masked]").
+    // Longer keys first so aws_secret_access_key= is not missed because
+    // secret= does not match secret_access. Keep trailing space on "bearer "
+    // so the marker matches SECRET_MARKERS and the mask lands after the
+    // separator (not glued as "bearer[masked]").
     if let Some((key, pos)) = [
+        "aws_secret_access_key=",
+        "aws_access_key_id=",
         "token=",
         "password=",
         "secret=",
         "api_key=",
         "apikey=",
+        "x-api-key:",
+        "api-key:",
         "authorization:",
         "bearer ",
     ]
@@ -1627,7 +1637,7 @@ fn mask_secret_line(line: &str) -> String {
     }
     line.split_whitespace()
         .map(|word| {
-            if starts_with_any(word, "sk-|sk-proj-|ghp_|AKIA") {
+            if starts_with_any(word, SECRET_TOKEN_PREFIXES) {
                 "[masked]"
             } else {
                 word
@@ -1856,3 +1866,30 @@ mod capsule_omission_exact_ref;
 #[cfg(test)]
 #[path = "../../../tests/core/inline/transform_family__tests.rs"]
 mod transform_family_tests;
+
+#[cfg(test)]
+mod secret_mask_security_tests {
+    use super::*;
+
+    #[test]
+    fn mask_visible_secrets_covers_cloud_and_token_prefixes() {
+        let aws = mask_visible_secrets("AWS_SECRET_ACCESS_KEY=wJalc/not-a-real-secret");
+        assert!(aws.contains("AWS_SECRET_ACCESS_KEY=[masked]"), "{aws}");
+        assert!(!aws.contains("wJalc"), "{aws}");
+        let header = mask_visible_secrets("X-Api-Key: abcd1234secret");
+        assert!(
+            header
+                .to_ascii_lowercase()
+                .starts_with("x-api-key:[masked]"),
+            "{header}"
+        );
+        assert!(!header.contains("abcd1234secret"), "{header}");
+        let pat = mask_visible_secrets("token github_pat_aaaaaaaa and glpat-bbbbbbbb");
+        assert!(!pat.contains("github_pat_aaaaaaaa"), "{pat}");
+        assert!(!pat.contains("glpat-bbbbbbbb"), "{pat}");
+        assert!(has_visible_secret_marker(
+            "AWS_SECRET_ACCESS_KEY=wJalc/not-a-real-secret"
+        ));
+        assert!(has_visible_secret_marker("github_pat_aaaaaaaa"));
+    }
+}
