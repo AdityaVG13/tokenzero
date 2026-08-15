@@ -1,6 +1,7 @@
 use tokenzero_engine::{
-    CachePricing, CacheProvider, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane,
-    schedule_rewarms, simulate_warmkeeper,
+    CachePricing, CacheProvider, ResumeRewarmKind, WARM_PING_OUTPUT_TOKENS, WarmDecisionKind,
+    WarmLane, WarmLaneTier, WarmReplayLane, resume_rewarm_kind, schedule_rewarms,
+    simulate_warmkeeper,
 };
 fn pricing() -> CachePricing {
     CachePricing {
@@ -54,8 +55,9 @@ fn scheduler_is_ttl_aware_ev_gated_and_paid_first() {
             .as_ref()
             .unwrap()
             .max_output_tokens,
-        0
+        WARM_PING_OUTPUT_TOKENS
     );
+    assert_eq!(WARM_PING_OUTPUT_TOKENS, 1);
     assert_eq!(
         at_daily_boundary[1].kind,
         WarmDecisionKind::NegativeExpectedValue
@@ -136,4 +138,22 @@ fn prefetch_mismatched_scores_fail_loud() {
         last_touch_at_seconds: None,
     };
     let _ = tokenzero_engine::select_prefetch_targets(&[lane], &[], 100, 1);
+}
+
+#[test]
+fn resume_rewarm_keepalive_inside_ttl_and_rewrite_at_or_past_ttl() {
+    assert_eq!(resume_rewarm_kind(1, 86_400), ResumeRewarmKind::KeepaliveTouch);
+    assert_eq!(
+        resume_rewarm_kind(86_399, 86_400),
+        ResumeRewarmKind::KeepaliveTouch
+    );
+    assert_eq!(
+        resume_rewarm_kind(86_400, 86_400),
+        ResumeRewarmKind::FullRewrite
+    );
+    assert_eq!(
+        resume_rewarm_kind(200_000, 86_400),
+        ResumeRewarmKind::FullRewrite
+    );
+    assert_eq!(resume_rewarm_kind(0, 0), ResumeRewarmKind::FullRewrite);
 }

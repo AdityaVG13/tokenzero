@@ -227,9 +227,10 @@ pub use usage_telemetry::{
     usage_telemetry_path_for_cache,
 };
 pub use warmkeeper::{
-    HotPlacement, PrefetchTarget, WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier,
-    WarmReplayLane, WarmSimulationReport, ZeroOutputTouch, schedule_rewarms,
-    select_prefetch_targets, simulate_warmkeeper,
+    HotPlacement, PrefetchTarget, ResumeRewarmKind, WARM_PING_OUTPUT_TOKENS, WarmDecision,
+    WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane, WarmSimulationReport,
+    ZeroOutputTouch, resume_rewarm_kind, schedule_rewarms, select_prefetch_targets,
+    simulate_warmkeeper,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

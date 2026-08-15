@@ -48,6 +48,32 @@ pub struct ZeroOutputTouch {
     pub max_output_tokens: u64,
 }
 
+/// Output cap for a background cache rewarm ping. One token is enough to land
+/// a write on the provider cache; it is never counted as a provider hit.
+pub const WARM_PING_OUTPUT_TOKENS: u64 = 1;
+
+/// Keepalive-vs-rewrite choice on session resume after a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeRewarmKind {
+    /// Gap is inside TTL: a 1-token touch refreshes the prefix without a rewrite.
+    KeepaliveTouch,
+    /// Gap met or passed TTL: reconstruct the byte-identical prefix and rewrite.
+    FullRewrite,
+}
+
+/// Keepalive vs rewrite crossover for session resume.
+///
+/// Short gaps refresh TTL by touch. Long gaps take one clean rewrite.
+/// `ttl_seconds == 0` is not a keepalive window, so it rewrites.
+pub fn resume_rewarm_kind(gap_seconds: u64, ttl_seconds: u64) -> ResumeRewarmKind {
+    if ttl_seconds == 0 || gap_seconds >= ttl_seconds {
+        ResumeRewarmKind::FullRewrite
+    } else {
+        ResumeRewarmKind::KeepaliveTouch
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarmDecisionKind {
@@ -99,7 +125,7 @@ pub fn schedule_rewarms(now_seconds: u64, lanes: &[WarmLane]) -> Vec<WarmDecisio
                 touch: (kind == WarmDecisionKind::Touch).then(|| ZeroOutputTouch {
                     provider: lane.provider,
                     model: lane.model.clone(),
-                    max_output_tokens: 0,
+                    max_output_tokens: WARM_PING_OUTPUT_TOKENS,
                 }),
             }
         })
