@@ -37,6 +37,144 @@ pub struct HotPathProfileSnapshot {
     pub capsule: u64,
 }
 
+/// Named hot path for MT8 attribution cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HotPathName {
+    Expand,
+    Read,
+    Capsule,
+}
+
+impl HotPathName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Expand => "expand",
+            Self::Read => "read",
+            Self::Capsule => "capsule",
+        }
+    }
+}
+
+/// Fail-closed refusal when no hot-path samples exist (no silent 0% claims).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotPathEmptyTotal;
+
+impl std::fmt::Display for HotPathEmptyTotal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("hot-path attribution refused: total count is 0")
+    }
+}
+
+impl std::error::Error for HotPathEmptyTotal {}
+
+/// MT8 floor: a named path that actually ran must be showable at ≥0.1% of total.
+pub const MT8_MIN_ATTRIBUTION_PCT: f64 = 0.1;
+
+/// MT8 attribution: `100.0 * path / total`. Fail closed when `total == 0`.
+pub fn attribution_pct(path: u64, total: u64) -> Result<f64, HotPathEmptyTotal> {
+    if total == 0 {
+        return Err(HotPathEmptyTotal);
+    }
+    Ok(100.0 * (path as f64) / (total as f64))
+}
+
+impl HotPathProfileSnapshot {
+    /// Sum of expand + read + capsule enter counts.
+    pub fn total(self) -> u64 {
+        self.expand + self.read + self.capsule
+    }
+
+    pub fn count_for(self, path: HotPathName) -> u64 {
+        match path {
+            HotPathName::Expand => self.expand,
+            HotPathName::Read => self.read,
+            HotPathName::Capsule => self.capsule,
+        }
+    }
+
+    /// Delta counts since `earlier` (typically a prior `hot_path_snapshot()`).
+    pub fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            expand: self.expand.saturating_sub(earlier.expand),
+            read: self.read.saturating_sub(earlier.read),
+            capsule: self.capsule.saturating_sub(earlier.capsule),
+        }
+    }
+
+    /// Named-path MT8 percentage against this snapshot's total. Fail closed if total == 0.
+    pub fn attribution_pct(self, path: HotPathName) -> Result<f64, HotPathEmptyTotal> {
+        attribution_pct(self.count_for(path), self.total())
+    }
+
+    /// Machine-readable expand/read/capsule/total counts for profile cards / benches.
+    /// Not stderr-gated; independent of `TOKENZERO_PERF_PROFILE`.
+    pub fn to_export_json(self) -> String {
+        format!(
+            r#"{{"expand":{},"read":{},"capsule":{},"total":{}}}"#,
+            self.expand,
+            self.read,
+            self.capsule,
+            self.total()
+        )
+    }
+}
+
+/// Profile card: MT8 attribution percentages derived from HotPathProfileSnapshot counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HotPathProfileCard {
+    pub snapshot: HotPathProfileSnapshot,
+    pub total: u64,
+    pub expand_pct: f64,
+    pub read_pct: f64,
+    pub capsule_pct: f64,
+}
+
+impl HotPathProfileCard {
+    /// Build a card from snapshot counts (use a delta after N calls). Fail closed if total == 0.
+    pub fn try_from_snapshot(snapshot: HotPathProfileSnapshot) -> Result<Self, HotPathEmptyTotal> {
+        let total = snapshot.total();
+        if total == 0 {
+            return Err(HotPathEmptyTotal);
+        }
+        Ok(Self {
+            expand_pct: attribution_pct(snapshot.expand, total)?,
+            read_pct: attribution_pct(snapshot.read, total)?,
+            capsule_pct: attribution_pct(snapshot.capsule, total)?,
+            snapshot,
+            total,
+        })
+    }
+
+    /// Named-path percentage already computed on this card.
+    pub fn attribution_pct(&self, path: HotPathName) -> f64 {
+        match path {
+            HotPathName::Expand => self.expand_pct,
+            HotPathName::Read => self.read_pct,
+            HotPathName::Capsule => self.capsule_pct,
+        }
+    }
+
+    /// True when the named path's share meets the MT8 ≥0.1% floor.
+    pub fn meets_mt8_floor(&self, path: HotPathName) -> bool {
+        self.attribution_pct(path) >= MT8_MIN_ATTRIBUTION_PCT
+    }
+
+    /// Export JSON including counts and attribution percentages for harness consumers.
+    pub fn to_export_json(&self) -> String {
+        format!(
+            r#"{{"expand":{},"read":{},"capsule":{},"total":{},"expand_pct":{:.6},"read_pct":{:.6},"capsule_pct":{:.6},"mt8_min_pct":{}}}"#,
+            self.snapshot.expand,
+            self.snapshot.read,
+            self.snapshot.capsule,
+            self.total,
+            self.expand_pct,
+            self.read_pct,
+            self.capsule_pct,
+            MT8_MIN_ATTRIBUTION_PCT
+        )
+    }
+}
+
 pub fn hot_path_snapshot() -> HotPathProfileSnapshot {
     HotPathProfileSnapshot {
         expand: HOT_EXPAND.load(Ordering::Relaxed),
