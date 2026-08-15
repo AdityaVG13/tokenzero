@@ -11,7 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 ENGINE_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_HUB_REV = "8188fb08698a5ed29bff6b339657bdd1933de3cc"
+EXPECTED_HUB_REV = "be8867ee99a14fc78a75db220358096bf3874c76"
 
 
 def hub_root() -> Path:

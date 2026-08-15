@@ -8,8 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from benchmarks.bench_common import portable_path
 from benchmarks.harness import (
+    REPO,
     VisiblePayloadError,
+    capture_environment,
     expand_recovered_text,
     first_blob_ref,
     glob_root_and_first,
@@ -315,6 +318,40 @@ class MeasurementFailureTests(unittest.TestCase):
         self.assertIn("[... stderr truncated ...]", message)
         self.assertIn("-TAIL-SENTINEL", message)
         self.assertLess(len(message), 4300)
+
+
+class PortablePathTests(unittest.TestCase):
+    def test_portable_paths_hide_host_components(self) -> None:
+        crate = REPO / "crates" / "tokenzero-engine" / "src" / "lib.rs"
+        self.assertEqual(
+            portable_path(crate, REPO),
+            "crates/tokenzero-engine/src/lib.rs",
+        )
+        home_secret = Path.home() / "secret-file"
+        rendered_home = portable_path(home_secret, REPO)
+        self.assertTrue(
+            rendered_home.startswith("<home>"),
+            rendered_home,
+        )
+        self.assertNotIn(str(Path.home()), rendered_home)
+        tmp = Path("/tmp") / "tokenzero-portable-check" / "x"
+        rendered_tmp = portable_path(tmp, REPO)
+        self.assertTrue(rendered_tmp.startswith("<tmp>"), rendered_tmp)
+        self.assertNotIn(str(Path.home()), rendered_tmp)
+
+    def test_capture_environment_records_no_host_path(self) -> None:
+        fake_bin = REPO / "target" / "release" / "tokenzero"
+        captured = capture_environment(fake_bin, "python3 benchmarks/harness.py")
+        home = str(Path.home())
+        for key in ("cwd", "binary"):
+            value = captured[key]
+            self.assertNotIn(home, value, key)
+            self.assertFalse(
+                str(value).startswith("/Users/") or str(value).startswith("/home/"),
+                f"{key} leaked a host path: {value}",
+            )
+        self.assertEqual(captured["cwd"], ".")
+        self.assertEqual(captured["binary"], "target/release/tokenzero")
 
 
 if __name__ == "__main__":
