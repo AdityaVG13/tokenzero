@@ -1114,6 +1114,47 @@ mod deep_pass_tests {
     }
 
     #[test]
+    fn json_null_progress_token_falls_back_to_job_id() {
+        let note = job_progress::plan_notification(
+            job_progress::NotifyMode::Progress,
+            Some(&Value::Null),
+            &job_progress::JobEvent::Started {
+                job_id: "job-null".into(),
+            },
+            false,
+        )
+        .expect("progress mode must still emit a frame");
+        assert_eq!(
+            note["params"]["progressToken"], "job-null",
+            "JSON null is absence, not a literal progressToken: {note:?}"
+        );
+    }
+
+    #[test]
+    fn json_null_progress_token_does_not_arm_poll_only_clients() {
+        let session = "pt-null-observe";
+        job_progress::remember_client(session, "opencode", &serde_json::json!({}));
+        job_progress::remember_progress_token_value(session, Some(Value::Null));
+        job_progress::observe(
+            session,
+            job_progress::JobEvent::Started {
+                job_id: "job-null".into(),
+            },
+        );
+        let notes = job_progress::take_notifications(session);
+        assert!(
+            notes.is_empty(),
+            "null token must not arm notifications/progress for poll-only clients: {notes:?}"
+        );
+        assert_eq!(
+            job_progress::progress_token_from_params(&serde_json::json!({
+                "_meta": { "progressToken": null }
+            })),
+            None
+        );
+    }
+
+    #[test]
     fn initialize_recovers_poisoned_lifecycle_lock() {
         let (_dir, engine) = test_engine();
         let poisoned = std::panic::catch_unwind(AssertUnwindSafe(|| {

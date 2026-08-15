@@ -4,7 +4,7 @@
 //! opening a stdio server. Domain execution remains shared with the raw worker.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use tokenzero_core::McpToolSurface;
 use tokenzero_install::packaging::{
@@ -209,7 +209,7 @@ fn stdio_root_from_args(args: &[String], cwd: PathBuf) -> Result<PathBuf, String
     let root = parse_flag(args, "--root")?;
     let repo = parse_flag(args, "--repo")?;
     match (root, repo) {
-        (Some(root), Some(repo)) if root != repo => {
+        (Some(root), Some(repo)) if Path::new(&root) != Path::new(&repo) => {
             Err(format!("--root ({root:?}) and --repo ({repo:?}) disagree"))
         }
         (Some(root), _) | (None, Some(root)) => Ok(PathBuf::from(root)),
@@ -486,5 +486,41 @@ mod tests {
         .expect_err("disagreeing --root/--repo must fail loud");
         assert!(disagree.contains("/tmp/a"), "{disagree}");
         assert!(disagree.contains("/tmp/b"), "{disagree}");
+
+        assert_eq!(
+            stdio_root_from_args(
+                &args(&["tokenzero-mcp", "--root", "/tmp/ws", "--repo", "/tmp/ws/"]),
+                PathBuf::from("/cwd")
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/ws"),
+            "trailing slash is the same path, not a disagreement"
+        );
+    }
+
+    #[test]
+    fn argv_without_option_values_strips_every_stdio_and_install_value_flag() {
+        for flag in [
+            "--prefix",
+            "--binary",
+            "--surface",
+            "--mode",
+            "--tool-surface",
+            "--root",
+            "--repo",
+            "--log-level",
+            "--cache-path",
+            "--once",
+        ] {
+            let stripped = argv_without_option_values(&args(&["tokenzero-mcp", flag, "help"]));
+            assert!(
+                !stripped.iter().any(|a| a == "help"),
+                "{flag} value must not be scanned as a verb: {stripped:?}"
+            );
+            assert!(
+                stripped.iter().any(|a| a == flag),
+                "{flag} itself must remain so unknown options still fail loud: {stripped:?}"
+            );
+        }
     }
 }

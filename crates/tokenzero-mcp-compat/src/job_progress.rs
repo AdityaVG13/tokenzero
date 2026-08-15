@@ -113,8 +113,16 @@ fn bound_message(text: &str) -> String {
     out
 }
 
+fn usable_progress_token(token: Option<&Value>) -> Option<&Value> {
+    token.filter(|value| match value {
+        Value::String(_) => true,
+        Value::Number(number) if number.is_i64() || number.is_u64() => true,
+        _ => false,
+    })
+}
+
 fn progress_token_or_job_id(token: Option<&Value>, job_id: &str) -> Value {
-    token
+    usable_progress_token(token)
         .cloned()
         .unwrap_or_else(|| Value::String(job_id.to_string()))
 }
@@ -209,12 +217,13 @@ pub fn remember_progress_token(session_id: &str, token: Option<String>) {
 }
 
 pub fn remember_progress_token_value(session_id: &str, token: Option<Value>) {
-    if let Some(token) = token {
-        lock_sessions()
-            .entry(session_id.to_string())
-            .or_default()
-            .progress_token = Some(token);
-    }
+    let Some(token) = usable_progress_token(token.as_ref()).cloned() else {
+        return;
+    };
+    lock_sessions()
+        .entry(session_id.to_string())
+        .or_default()
+        .progress_token = Some(token);
 }
 
 pub fn observe(session_id: &str, event: JobEvent) {
@@ -226,13 +235,13 @@ pub fn observe(session_id: &str, event: JobEvent) {
         | JobEvent::Completed { job_id, .. } => job_id.clone(),
     };
     let already = session.terminals.contains(&job_id);
-    let token_present = session.progress_token.is_some();
-    let mode = notify_mode(
-        session.family,
-        session.logging_enabled,
-        token_present.then_some(""),
-    );
-    if let Some(note) = plan_notification(mode, session.progress_token.as_ref(), &event, already) {
+    let token = usable_progress_token(session.progress_token.as_ref());
+    let mode = if token.is_some() {
+        NotifyMode::Progress
+    } else {
+        notify_mode(session.family, session.logging_enabled, None)
+    };
+    if let Some(note) = plan_notification(mode, token, &event, already) {
         session.pending.push(note);
     }
     if matches!(event, JobEvent::Completed { .. }) {
@@ -248,12 +257,7 @@ pub fn take_notifications(session_id: &str) -> Vec<Value> {
 }
 
 pub fn progress_token_from_params(params: &Value) -> Option<Value> {
-    let token = params.get("_meta")?.get("progressToken")?;
-    match token {
-        Value::String(_) => Some(token.clone()),
-        Value::Number(number) if number.is_i64() || number.is_u64() => Some(token.clone()),
-        _ => None,
-    }
+    usable_progress_token(params.get("_meta")?.get("progressToken")).cloned()
 }
 
 pub fn job_id_from_tool_result(result: &Value) -> Option<String> {
