@@ -98,3 +98,33 @@ fn instructions_refuse_non_utf8_agents_without_mutation() {
         original
     );
 }
+
+#[test]
+fn apply_verification_hashes_match_bytes_on_disk() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let applied = apply(root.path(), false, &["mcp".to_string()]).expect("apply");
+    assert!(
+        !applied.verification.is_empty(),
+        "apply must record verification rows"
+    );
+    for row in &applied.verification {
+        assert!(
+            row.verified,
+            "successful apply must only keep verified writes: {row:?}"
+        );
+        let observed = fs::read(&row.path).expect("read installed path");
+        assert_eq!(row.byte_count, observed.len());
+        assert_eq!(row.observed_sha256, sha256_bytes(&observed));
+    }
+}
+
+#[test]
+fn verify_install_write_fails_loud_on_byte_mismatch() {
+    let err = verify_install_write("probe.txt", b"expected", b"observed".to_vec())
+        .expect_err("mismatch must fail closed");
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(
+        err.to_string().contains("install verification failed"),
+        "unexpected error: {err}"
+    );
+}

@@ -95,8 +95,9 @@ pub(crate) fn build_resource_payload(
         _ => unreachable!("resource was already resolved"),
     };
 
-    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
-    Ok(text)
+    serde_json::to_string_pretty(&payload).map_err(|err| {
+        JsonRpcErrorData::internal_error(format!("serialize resource {uri}: {err}"))
+    })
 }
 
 pub(crate) fn read_resource(

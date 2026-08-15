@@ -49,7 +49,8 @@ pub(crate) fn fastmcp_content_texts_from_tool_result(
         if let Some(folded) = scalar_folded_codemode_v2(primary_text, structured) {
             return Ok(vec![folded]);
         }
-        let metadata = serde_json::to_string(structured).unwrap_or_default();
+        let metadata =
+            serde_json::to_string(structured).expect("structuredContent is serializable");
         if metadata != "null" {
             return Ok(vec![primary_text.to_owned(), metadata]);
         }
@@ -66,7 +67,8 @@ pub(crate) fn fastmcp_content_texts_from_tool_result(
     if let Some(recovery) = result.get("recovery") {
         metadata.insert("recovery".into(), recovery.clone());
     }
-    let metadata = serde_json::to_string(&Value::Object(metadata)).unwrap_or_default();
+    let metadata =
+        serde_json::to_string(&Value::Object(metadata)).expect("metadata object is serializable");
     if metadata != "{}" {
         contents.push(metadata);
     }

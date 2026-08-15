@@ -511,12 +511,7 @@ pub fn apply_for_agents(
             make_executable_if_needed(row, path)?;
             fs::read(path)?
         };
-        verification.push(VerificationRow {
-            path: row.path.clone(),
-            observed_sha256: sha256_bytes(&observed),
-            byte_count: observed.len(),
-            verified: true,
-        });
+        verification.push(verify_install_write(&row.path, content, observed)?);
         written.push(row.path.clone());
     }
     written.push(manifest_path.display().to_string());
@@ -780,6 +775,31 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn verify_install_write(
+    path: &str,
+    expected: &[u8],
+    observed: Vec<u8>,
+) -> std::io::Result<VerificationRow> {
+    let verified = observed.as_slice() == expected;
+    let row = VerificationRow {
+        path: path.to_string(),
+        observed_sha256: sha256_bytes(&observed),
+        byte_count: observed.len(),
+        verified,
+    };
+    if verified {
+        return Ok(row);
+    }
+    Err(Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "install verification failed for {path}: observed sha256 {} != expected {}",
+            row.observed_sha256,
+            sha256_bytes(expected)
+        ),
+    ))
 }
 
 fn sha256(text: &str) -> String {

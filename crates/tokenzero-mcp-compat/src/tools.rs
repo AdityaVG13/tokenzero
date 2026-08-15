@@ -307,7 +307,7 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
             EnvelopeMode::None => {}
             EnvelopeMode::Compact | EnvelopeMode::Full => {
                 let cli = if matches!(envelope_mode(), EnvelopeMode::Full) {
-                    serde_json::to_value(&response).unwrap_or(Value::Null)
+                    serde_json::to_value(&response).expect("ToolResponse is serializable")
                 } else {
                     compact_cli_envelope(&response)
                 };
@@ -405,7 +405,7 @@ const PRUNED_TELEMETRY_FIELDS: &[&str] = &[
 /// full envelope remains available via `TOKENZERO_MCP_ENVELOPE=full` and the
 /// CLI `--json` surface.
 pub(crate) fn compact_cli_envelope(response: &ToolResponse) -> Value {
-    let mut value = serde_json::to_value(response).unwrap_or(Value::Null);
+    let mut value = serde_json::to_value(response).expect("ToolResponse is serializable");
     if let Some(object) = value.as_object_mut() {
         // The capsule text already ships as content[0].text; repeating it
         // here doubles the cost of every call.

@@ -124,7 +124,7 @@ impl CapabilityDescriptor {
 
     /// Serialize the descriptor to a JSON value.
     pub fn to_json(&self) -> Value {
-        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
+        serde_json::to_value(self).expect("CapabilityDescriptor is serializable")
     }
 }
 
