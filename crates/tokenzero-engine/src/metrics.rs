@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,10 @@ pub(crate) struct ToolMetrics {
     /// Pending one-call deltas not yet merged to the on-disk sidecar.
     dirty: Mutex<BTreeMap<String, ToolStat>>,
     last_disk_flush: Mutex<Instant>,
+    /// Serializes take-dirty → load → merge → atomic write so concurrent
+    /// in-process flushes cannot clobber the same tmp file or drop a family.
+    persist: Mutex<()>,
+    tmp_nonce: AtomicU64,
 }
 
 impl ToolMetrics {
@@ -110,6 +115,8 @@ impl ToolMetrics {
             last_attribution_us: Mutex::new(BTreeMap::new()),
             dirty: Mutex::new(BTreeMap::new()),
             last_disk_flush: Mutex::new(Instant::now() - PERSIST_COALESCE),
+            persist: Mutex::new(()),
+            tmp_nonce: AtomicU64::new(0),
         }
     }
 
@@ -153,6 +160,10 @@ impl ToolMetrics {
 
     /// Merge dirty deltas into the on-disk sidecar (fail-open).
     pub(crate) fn flush_persisted(&self) {
+        let _persist = match self.persist.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
         let dirty = match self.dirty.lock() {
             Ok(mut guard) => {
                 if guard.is_empty() {
@@ -264,10 +275,11 @@ impl ToolMetrics {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Atomic-ish write: temp file in the same dir, then rename.
+        // Atomic-ish write: unique temp (pid + monotonic nonce) then rename.
+        let nonce = self.tmp_nonce.fetch_add(1, Ordering::Relaxed);
         let tmp = self
             .path
-            .with_extension(format!("tmp-{}", std::process::id()));
+            .with_extension(format!("tmp-{}-{}", std::process::id(), nonce));
         std::fs::write(&tmp, body.as_bytes())?;
         match std::fs::rename(&tmp, &self.path) {
             Ok(()) => Ok(()),
