@@ -759,6 +759,33 @@ impl ShellVisibleChoice {
     }
 }
 
+/// Prefix visible shell text with cwd only when the command ran off call_root
+/// and the chosen visible text does not already carry a cwd line.
+fn apply_shell_cwd_prefix(
+    call_root: &Path,
+    resolved_cwd: &Path,
+    effective_cwd: &str,
+    visible_text: String,
+) -> String {
+    if resolved_cwd == call_root
+        || visible_text.contains("\ncwd: ")
+        || visible_text.starts_with("cwd: ")
+    {
+        visible_text
+    } else if visible_text.starts_with("# shell") {
+        let mut lines = visible_text.lines();
+        let first = lines.next().unwrap_or("# shell");
+        let rest: Vec<&str> = lines.collect();
+        if rest.is_empty() {
+            format!("{first}\ncwd: {effective_cwd}")
+        } else {
+            format!("{first}\ncwd: {effective_cwd}\n{}", rest.join("\n"))
+        }
+    } else {
+        format!("cwd: {effective_cwd}\n{visible_text}")
+    }
+}
+
 impl TokenZeroEngine {
     /// Resolve shell cwd: explicit wins; otherwise default to `call_root` (plan/server
     /// root), never silent process-cwd inheritance without an echoed path.
@@ -1044,23 +1071,12 @@ impl TokenZeroEngine {
         };
         // The plan root is already part of the zero_execute request. Surface cwd only
         // when the command deliberately runs somewhere else.
-        let visible_text = if resolved_cwd == self.config.call_root
-            || choice.visible_text.contains("\ncwd: ")
-            || choice.visible_text.starts_with("cwd: ")
-        {
-            choice.visible_text
-        } else if choice.visible_text.starts_with("# shell") {
-            let mut lines = choice.visible_text.lines();
-            let first = lines.next().unwrap_or("# shell");
-            let rest: Vec<&str> = lines.collect();
-            if rest.is_empty() {
-                format!("{first}\ncwd: {effective_cwd}")
-            } else {
-                format!("{first}\ncwd: {effective_cwd}\n{}", rest.join("\n"))
-            }
-        } else {
-            format!("cwd: {effective_cwd}\n{}", choice.visible_text)
-        };
+        let visible_text = apply_shell_cwd_prefix(
+            &self.config.call_root,
+            &resolved_cwd,
+            &effective_cwd,
+            choice.visible_text,
+        );
         // Presentation masking never changes bytes persisted above. Explicit
         // exact/passthrough modes remain deliberate escapes; auto and all
         // compact policies mask recognized secrets before agent exposure.
