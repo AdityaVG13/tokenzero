@@ -21,6 +21,10 @@ fn doctor_reports_missing_root_as_finding() {
         findings.iter().any(|f| f["id"] == "tz-root-missing"),
         "missing root must produce tz-root-missing: {report}"
     );
+    assert_eq!(
+        report["mcp"]["ready"], false,
+        "missing root must not claim MCP ready: {report}"
+    );
 }
 
 #[test]
@@ -33,6 +37,10 @@ fn doctor_on_healthy_root_has_no_missing_root_finding() {
     assert!(
         !findings.iter().any(|f| f["id"] == "tz-root-missing"),
         "healthy root must not report tz-root-missing: {report}"
+    );
+    assert_eq!(
+        report["mcp"]["ready"], true,
+        "healthy root with default launch config must report MCP ready: {report}"
     );
 }
 

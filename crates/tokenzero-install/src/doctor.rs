@@ -1,4 +1,5 @@
 use crate::*;
+use tokenzero_core::McpToolSurface;
 
 macro_rules! doctor_status_report {
     ($schema:literal, $status:expr, $ok:expr, $exit_code:expr; $($key:literal => $value:expr),* $(,)?) => {
@@ -109,6 +110,7 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
     let exit_code = if has_blocking_finding { 1 } else { 0 };
     let blocking_findings = findings.iter().filter(|f| finding_is_error(f)).count();
     let informational_findings = findings.len().saturating_sub(blocking_findings);
+    let mcp_ready = mcp_surface_ready(!has_blocking_finding);
     serde_json::json!({
         "schema_version": "tokenzero.doctor.v1",
         "status": if has_blocking_finding { "blocked" } else { "ok" },
@@ -161,7 +163,7 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
             "parent": cache_parent.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| String::from("")),
             "parent_exists": cache_parent_exists
         },
-        "mcp": { "ready": true, "server": "tokenzero mcp-server" },
+        "mcp": { "ready": mcp_ready, "server": "tokenzero mcp-server" },
         "runtime": { "required_for_core": true }
     })
 }
@@ -969,6 +971,34 @@ fn doctor_check(id: &str, ok: bool, severity: &str, evidence: impl Into<String>)
     serde_json::json!({ "id": id, "ok": ok, "severity": severity, "evidence": evidence.into() })
 }
 
+/// MCP `ready` is a probe of this workspace plus launch config, not a synonym
+/// for "this binary declares an mcp-server entrypoint".
+fn mcp_surface_ready(workspace_ok: bool) -> bool {
+    workspace_ok && mcp_tool_surface_env_ok() && mcp_idle_timeout_env_ok()
+}
+
+fn mcp_tool_surface_env_ok() -> bool {
+    match std::env::var(McpToolSurface::ENV) {
+        Err(_) => true,
+        Ok(value) => mcp_tool_surface_value_ok(&value),
+    }
+}
+
+fn mcp_idle_timeout_env_ok() -> bool {
+    match std::env::var("TOKENZERO_MCP_IDLE_TIMEOUT_SECS") {
+        Err(_) => true,
+        Ok(value) => mcp_idle_timeout_value_ok(&value),
+    }
+}
+
+fn mcp_tool_surface_value_ok(value: &str) -> bool {
+    value.parse::<McpToolSurface>().is_ok()
+}
+
+fn mcp_idle_timeout_value_ok(value: &str) -> bool {
+    value.parse::<u64>().is_ok()
+}
+
 fn doctor_next_step(action: &str, command: &str, reason: &str) -> Value {
     serde_json::json!({ "priority": 1, "action": action, "command": command, "reason": reason })
 }
@@ -1058,4 +1088,27 @@ pub(crate) fn doctor_run_id(root: &Path, cache: &Path) -> String {
     let unix = now_unix();
     let hash = sha256(&format!("{}:{}:{unix}", root.display(), cache.display()));
     format!("{unix}__{}", &hash[..6])
+}
+
+#[cfg(test)]
+mod mcp_ready_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_workspace_is_never_mcp_ready() {
+        assert!(!mcp_surface_ready(false));
+    }
+
+    #[test]
+    fn mcp_surface_value_rejects_unknown_launch_mode() {
+        assert!(mcp_tool_surface_value_ok("mcp"));
+        assert!(mcp_tool_surface_value_ok(""));
+        assert!(!mcp_tool_surface_value_ok("not-a-surface"));
+    }
+
+    #[test]
+    fn mcp_idle_timeout_value_rejects_non_integers() {
+        assert!(mcp_idle_timeout_value_ok("30"));
+        assert!(!mcp_idle_timeout_value_ok("nope"));
+    }
 }

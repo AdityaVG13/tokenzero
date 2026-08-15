@@ -219,6 +219,7 @@ fn aggregates_recovery_adjusted_savings() {
     assert_eq!(report.visible_tokens, 50);
     assert_eq!(report.recovery_tokens, 30);
     assert_eq!(report.event_count, 2);
+    assert_eq!(report.status, "ok");
     // visible_savings = (200 - 50) / 200 = 0.75
     assert_eq!(report.visible_savings, 0.75);
     // recovery_adjusted_savings = (200 - (50 + 30)) / 200 = 0.60
@@ -297,7 +298,13 @@ fn load_counts_corrupt_lines() {
     assert_eq!(scan.skipped_lines, 1);
     let report = report_for_path(&path).unwrap();
     assert_eq!(report.skipped_lines, 1);
-    assert!(render_text(&report).contains("corrupt ledger line"));
+    assert_eq!(report.status, "degraded");
+    let rendered = render_text(&report);
+    assert!(
+        rendered.starts_with("pulse degraded:"),
+        "corrupt ledger must not render as pulse ok: {rendered}"
+    );
+    assert!(rendered.contains("corrupt ledger line"));
 }
 
 /// Mutation killed: scan_jsonl counting wrong-schema lines as valid events

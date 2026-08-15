@@ -420,7 +420,8 @@ pub fn doctor_jsonl_sqlite(path: &Path) -> IoResult<PulseDoctorReport> {
 
 pub fn render_text(report: &PulseReport) -> String {
     let mut out = format!(
-        "pulse ok: events={} visible_savings={:.2}% recovery_adjusted_savings={:.2}% failures={}\n",
+        "pulse {}: events={} visible_savings={:.2}% recovery_adjusted_savings={:.2}% failures={}\n",
+        report.status,
         report.event_count,
         report.visible_savings * 100.0,
         report.recovery_adjusted_savings * 100.0,
@@ -1047,6 +1048,9 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
     })?;
     report.event_count = scan.event_count;
     report.skipped_lines = scan.skipped_lines;
+    if report.skipped_lines > 0 {
+        report.status = "degraded".to_string();
+    }
     report.visible_savings = savings_ratio(report.raw_tokens, report.visible_tokens);
     report.recovery_adjusted_savings = savings_ratio(
         report.raw_tokens,
