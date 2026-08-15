@@ -303,7 +303,7 @@ impl TokenZeroEngine {
         acc: &mut ReadPathAcc<'_>,
     ) -> Result<(), ToolResponse> {
         if !self.path_allowed(path) {
-            return Err(path_not_allowed("read", path));
+            return Err(path_not_allowed("read", path, &self.config.allowed_roots));
         }
         let source_start = start_line;
         let source_end = end_line;

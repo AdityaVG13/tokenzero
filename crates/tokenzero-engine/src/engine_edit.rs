@@ -18,7 +18,7 @@ impl TokenZeroEngine {
         // arguments target `call_root`, never the process working directory.
         let path = self.resolve_call_path(path);
         if !self.path_allowed(&path) {
-            return path_not_allowed("edit", &path);
+            return path_not_allowed("edit", &path, &self.config.allowed_roots);
         }
         if edits.is_empty() {
             return failure_response(

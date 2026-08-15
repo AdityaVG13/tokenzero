@@ -145,7 +145,7 @@ impl TokenZeroEngine {
     ) -> ToolResponse {
         for root in roots {
             if !self.path_allowed(root) {
-                return path_not_allowed(tool, root);
+                return path_not_allowed(tool, root, &self.config.allowed_roots);
             }
         }
         // Single-flight identical searches so a second pipelined call dedups
@@ -394,7 +394,7 @@ impl TokenZeroEngine {
         let mut paths: Vec<PathBuf> = Vec::new();
         for root in roots {
             if !self.path_allowed(root) {
-                return path_not_allowed("glob", root);
+                return path_not_allowed("glob", root, &self.config.allowed_roots);
             }
             collect_glob(
                 root,
@@ -480,7 +480,7 @@ impl TokenZeroEngine {
         let mut spans: Vec<(String, usize)> = Vec::new();
         for root in roots {
             if !self.path_allowed(root) {
-                return path_not_allowed("tree", root);
+                return path_not_allowed("tree", root, &self.config.allowed_roots);
             }
             spans.push((root.display().to_string(), entries.len()));
             collect_tree(

@@ -629,6 +629,8 @@ const ERROR_KIND_RULES: &[ErrorKindRule] = &[
         any_starts_with: &[],
         any_contains: &[
             "outside allowed roots",
+            "absolute path rejected",
+            "bad path",
             "not found",
             "no such",
             "missing target",

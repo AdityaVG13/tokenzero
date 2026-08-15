@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tempfile::tempdir;
@@ -9,7 +10,7 @@ use tokenzero_recovery::{ExpansionResult, RecoveryStore};
 
 use super::{
     EngineConfig, LocalPayloadPolicy, RecoveryStoreLease, TokenZeroEngine, expansion_response,
-    local_payload_policy, preview, render_text, render_text_with_complete_read,
+    local_payload_policy, path_not_allowed, preview, render_text, render_text_with_complete_read,
     rewrite_full_refs_if_strictly_cheaper,
 };
 
@@ -561,4 +562,33 @@ fn multiline_preview_is_bounded_and_reports_omitted_lines() {
     assert!(rendered.chars().count() <= 320);
     assert!(rendered.ends_with("+3 more lines"), "{rendered}");
     assert!(rendered.contains('\n'));
+}
+
+#[test]
+fn path_not_allowed_names_active_root_and_relative_repair() {
+    let root = PathBuf::from("/workspace/project");
+    let rejected = PathBuf::from("/tmp/secret.txt");
+    let response = path_not_allowed("read", &rejected, std::slice::from_ref(&root));
+    let error = response.error.expect("path_not_allowed must be an error");
+    assert_eq!(error.code, "path_not_allowed");
+    assert!(
+        error.message.contains("outside allowed roots"),
+        "classifier substring lost: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("/workspace/project"),
+        "must echo the active root: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("re-root") && error.message.contains("relative"),
+        "must tell the caller how to self-correct: {}",
+        error.message
+    );
+    let repair = error.repair.expect("repair must be present");
+    assert!(
+        repair.contains("secret.txt") && repair.contains("re-root"),
+        "repair must suggest a relative path or re-root: {repair}"
+    );
 }

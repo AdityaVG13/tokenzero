@@ -55,6 +55,8 @@ fn classify_error_kind_maps_needles_overlaps_and_unknowns() {
         ("requires a steps array", "validation"),
         ("missing required argument", "validation"),
         ("outside allowed roots", "substrate"),
+        ("absolute path rejected", "substrate"),
+        ("bad path: absolute path rejected", "substrate"),
         ("file not found", "substrate"),
         ("no such file", "substrate"),
         ("missing target", "substrate"),

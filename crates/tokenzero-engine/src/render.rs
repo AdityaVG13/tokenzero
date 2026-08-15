@@ -396,12 +396,51 @@ pub fn failure_response(
     ToolResponse::error(tool, code, message.into(), repair.map(str::to_string))
 }
 
-pub fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
+fn format_allowed_roots(allowed_roots: &[PathBuf]) -> String {
+    if allowed_roots.is_empty() {
+        return "<none>".to_string();
+    }
+    allowed_roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn suggested_relative_path(path: &Path, allowed_roots: &[PathBuf]) -> String {
+    for root in allowed_roots {
+        if let Ok(rel) = path.strip_prefix(root) {
+            let text = rel.to_string_lossy();
+            if text.is_empty() {
+                return ".".to_string();
+            }
+            return text.into_owned();
+        }
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty() && name != "." && name != "..")
+        .unwrap_or_else(|| ".".to_string())
+}
+
+pub(crate) fn path_outside_roots_repair(path: &Path, allowed_roots: &[PathBuf]) -> String {
+    let relative = suggested_relative_path(path, allowed_roots);
+    format!(
+        "use a path relative to the active root (e.g. '{relative}'), or re-root via allowed_roots / CodeMode root param"
+    )
+}
+
+pub fn path_not_allowed(tool: &str, path: &Path, allowed_roots: &[PathBuf]) -> ToolResponse {
+    let roots = format_allowed_roots(allowed_roots);
+    let repair = path_outside_roots_repair(path, allowed_roots);
     failure_response(
         tool,
         "path_not_allowed",
-        format!("path is outside allowed roots: {}", path.display()),
-        None,
+        format!(
+            "path is outside allowed roots: {}. active root(s): {roots}. {repair}",
+            path.display()
+        ),
+        Some(&repair),
     )
 }
 

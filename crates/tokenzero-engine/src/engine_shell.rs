@@ -793,7 +793,17 @@ impl TokenZeroEngine {
         match cwd {
             Some(path) => {
                 if !self.path_allowed(path) {
-                    return Err(format!("cwd is outside allowed roots: {}", path.display()));
+                    return Err(format!(
+                        "cwd is outside allowed roots: {}. active root(s): {}. {}",
+                        path.display(),
+                        self.config
+                            .allowed_roots
+                            .iter()
+                            .map(|root| root.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        path_outside_roots_repair(path, &self.config.allowed_roots)
+                    ));
                 }
                 Ok((path.to_path_buf(), "explicit"))
             }
@@ -801,8 +811,15 @@ impl TokenZeroEngine {
                 let root = self.config.call_root.clone();
                 if !self.path_allowed(&root) {
                     return Err(format!(
-                        "call_root is outside allowed roots: {}",
-                        root.display()
+                        "call_root is outside allowed roots: {}. active root(s): {}. {}",
+                        root.display(),
+                        self.config
+                            .allowed_roots
+                            .iter()
+                            .map(|allowed| allowed.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        path_outside_roots_repair(&root, &self.config.allowed_roots)
                     ));
                 }
                 Ok((root, "call_root"))
@@ -868,11 +885,12 @@ impl TokenZeroEngine {
         let (resolved_cwd, cwd_source) = match self.resolve_shell_cwd(cwd) {
             Ok(resolved) => resolved,
             Err(message) => {
+                let repair = message.clone();
                 return ToolResponse::error(
                     "shell",
                     "path_outside_allowed_roots",
                     message,
-                    Some("set cwd under an allowed root".to_string()),
+                    Some(repair),
                 );
             }
         };
