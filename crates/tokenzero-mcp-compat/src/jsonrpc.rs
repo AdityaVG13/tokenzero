@@ -714,7 +714,7 @@ fn mcp_discover_instructions(surface: McpToolSurface) -> &'static str {
             "Use tools/list for JSON Schema input contracts, resources/list for discovery resources, and tool text output (refs: footers, shell command_success) after tools/call."
         }
         McpToolSurface::CodeMode => {
-            "Use tz_codemode_describe name=capabilities, tz_codemode_search for methods, then tz_execute_code for recipe/json/js plans."
+            "Use tz_codemode_describe name=capabilities, tz_codemode_search for methods, tz_execute_code for recipe/json/js plans, and tz_report_tool_issue for field failures."
         }
     }
 }
@@ -1342,6 +1342,18 @@ mod deep_pass_tests {
         assert!(
             !instructions.contains("exactly tz_execute_code"),
             "CodeMode initialize must not use exclusive 'exactly' language that omits report: {instructions}"
+        );
+
+        let discovered = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":4,"method":"server/discover","params":{}}"#,
+        )
+        .unwrap();
+        let discovered: Value = serde_json::from_str(&discovered).unwrap();
+        let discover_instructions = discovered["result"]["instructions"].as_str().unwrap_or("");
+        assert!(
+            discover_instructions.contains("tz_report_tool_issue"),
+            "CodeMode server/discover must list the advertised report tool: {discover_instructions}"
         );
 
         assert!(handle_jsonrpc(

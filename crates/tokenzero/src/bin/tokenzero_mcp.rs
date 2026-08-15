@@ -167,34 +167,61 @@ fn argv_without_option_values(args: &[String]) -> Vec<String> {
     out
 }
 
-/// Parse `--name VALUE` or `--name=VALUE`. Missing or flag-shaped values fail
-/// loud so `install --prefix --binary …` cannot treat `--binary` as a path.
-/// Dash-leading paths must use the equals form (`--prefix=-`).
-fn parse_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
+/// Parse every `--name VALUE` / `--name=VALUE` occurrence. Missing or
+/// flag-shaped values fail loud so `install --prefix --binary …` cannot treat
+/// `--binary` as a path. Dash-leading paths must use the equals form
+/// (`--prefix=-`). Later duplicates are not ignored: `--mode mcp --mode=codemode`
+/// must still refuse CodeMode.
+fn parse_flag_values(args: &[String], name: &str) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
     let mut i = 0;
     while i < args.len() {
         if args[i] == name {
-            return match args.get(i + 1) {
-                Some(value) if !value.starts_with('-') => Ok(Some(value.clone())),
-                Some(value) => Err(format!("{name} requires a value (got {value:?})")),
-                None => Err(format!("{name} requires a value")),
-            };
+            match args.get(i + 1) {
+                Some(value) if !value.starts_with('-') => {
+                    values.push(value.clone());
+                    i += 2;
+                    continue;
+                }
+                Some(value) => return Err(format!("{name} requires a value (got {value:?})")),
+                None => return Err(format!("{name} requires a value")),
+            }
         }
         if let Some(rest) = args[i].strip_prefix(&format!("{name}=")) {
             if rest.is_empty() {
                 return Err(format!("{name} requires a value"));
             }
-            return Ok(Some(rest.to_string()));
+            values.push(rest.to_string());
         }
         i += 1;
     }
-    Ok(None)
+    Ok(values)
+}
+
+fn parse_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
+    Ok(parse_flag_values(args, name)?.into_iter().next())
+}
+
+fn agreed_path_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
+    let mut chosen: Option<String> = None;
+    for value in parse_flag_values(args, name)? {
+        if let Some(existing) = &chosen {
+            if Path::new(existing) != Path::new(&value) {
+                return Err(format!(
+                    "{name} specified more than once ({existing:?} vs {value:?})"
+                ));
+            }
+        } else {
+            chosen = Some(value);
+        }
+    }
+    Ok(chosen)
 }
 
 fn require_classic_surface_flags(args: &[String]) -> Result<(), String> {
     for name in ["--mode", "--tool-surface", "--surface"] {
-        if let Some(value) =
-            parse_flag(args, name).map_err(|error| format!("tokenzero-mcp: {error}"))?
+        for value in
+            parse_flag_values(args, name).map_err(|error| format!("tokenzero-mcp: {error}"))?
         {
             match value.parse::<McpToolSurface>() {
                 Ok(McpToolSurface::Classic) => {}
@@ -213,8 +240,8 @@ Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only 
 }
 
 fn stdio_root_from_args(args: &[String], cwd: PathBuf) -> Result<PathBuf, String> {
-    let root = parse_flag(args, "--root")?;
-    let repo = parse_flag(args, "--repo")?;
+    let root = agreed_path_flag(args, "--root")?;
+    let repo = agreed_path_flag(args, "--repo")?;
     match (root, repo) {
         (Some(root), Some(repo)) if Path::new(&root) != Path::new(&repo) => {
             Err(format!("--root ({root:?}) and --repo ({repo:?}) disagree"))
@@ -390,6 +417,12 @@ mod tests {
             .as_deref(),
             Some("-dash-dir")
         );
+        let later_missing = parse_flag(
+            &args(&["tokenzero-mcp", "install", "--prefix", "/tmp/tz", "--prefix"]),
+            "--prefix",
+        )
+        .expect_err("a later bare --prefix must fail even after an earlier valid value");
+        assert!(later_missing.contains("requires a value"), "{later_missing}");
     }
 
     #[test]
@@ -462,6 +495,26 @@ mod tests {
             stolen.contains("--root") || stolen.contains("requires a value"),
             "{stolen}"
         );
+
+        let shadowed = require_classic_surface_flags(&args(&[
+            "tokenzero-mcp",
+            "--mode",
+            "mcp",
+            "--mode=codemode",
+        ]))
+        .expect_err("later --mode=codemode must not be shadowed by an earlier --mode mcp");
+        assert!(shadowed.contains("codemode"), "{shadowed}");
+
+        let later_space = require_classic_surface_flags(&args(&[
+            "tokenzero-mcp",
+            "--mode=mcp",
+            "--tool-surface",
+            "mcp",
+            "--mode",
+            "codemode",
+        ]))
+        .expect_err("later space-form --mode codemode must still refuse");
+        assert!(later_space.contains("codemode"), "{later_space}");
     }
 
     #[test]
@@ -503,6 +556,24 @@ mod tests {
             .unwrap(),
             PathBuf::from("/tmp/ws"),
             "trailing slash is the same path, not a disagreement"
+        );
+
+        let duplicate_root = stdio_root_from_args(
+            &args(&["tokenzero-mcp", "--root", "/tmp/a", "--root=/tmp/b"]),
+            PathBuf::from("/cwd"),
+        )
+        .expect_err("duplicate disagreeing --root must not keep the first value");
+        assert!(duplicate_root.contains("/tmp/a"), "{duplicate_root}");
+        assert!(duplicate_root.contains("/tmp/b"), "{duplicate_root}");
+
+        assert_eq!(
+            stdio_root_from_args(
+                &args(&["tokenzero-mcp", "--root", "/tmp/ws", "--root=/tmp/ws/"]),
+                PathBuf::from("/cwd")
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/ws"),
+            "duplicate --root with a trailing slash is the same path"
         );
     }
 
