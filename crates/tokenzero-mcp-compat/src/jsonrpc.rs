@@ -156,7 +156,10 @@ fn handle_jsonrpc_value_with(
 ) -> Option<Value> {
     match parsed {
         Value::Array(batch) => handle_jsonrpc_batch_with(engine, batch, &mut dispatch),
-        value => dispatch(engine, value),
+        // Same panic isolation as batch items: a single tools/call (or any
+        // method) must not unwind the stdio process. FastMCP wraps its
+        // dispatcher separately; this path is the classic JSON-RPC adapter.
+        value => handle_jsonrpc_batch_item_with(engine, value, &mut dispatch),
     }
 }
 
@@ -194,15 +197,25 @@ fn handle_jsonrpc_batch_item_with(
     item: Value,
     dispatch: &mut impl FnMut(&TokenZeroEngine, Value) -> Option<Value>,
 ) -> Option<Value> {
+    let had_id = item
+        .as_object()
+        .is_some_and(|object| object.contains_key("id"));
     let panic_id = batch_item_response_id(&item);
     match catch_unwind(AssertUnwindSafe(|| dispatch(engine, item))) {
         Ok(response) => response,
-        Err(panic) => Some(jsonrpc_error(
-            panic_id,
-            -32603,
-            "Internal error",
-            JsonRpcErrorData::internal_error(panic_payload_text(panic.as_ref())),
-        )),
+        Err(panic) => {
+            // Notifications have no id and must not grow a response, even when
+            // the handler panics. Requests keep a correlatable -32603.
+            if !had_id {
+                return None;
+            }
+            Some(jsonrpc_error(
+                panic_id,
+                -32603,
+                "Internal error",
+                JsonRpcErrorData::internal_error(panic_payload_text(panic.as_ref())),
+            ))
+        }
     }
 }
 
@@ -1021,7 +1034,9 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod deep_pass_tests {
-    use super::{follow_job_lifecycle, handle_jsonrpc};
+    use super::{
+        follow_job_lifecycle, handle_jsonrpc, handle_jsonrpc_dispatching, handle_jsonrpc_request,
+    };
     use crate::job_progress;
     use crate::{EngineConfig, TokenZeroEngine};
     use serde_json::Value;
@@ -1235,6 +1250,56 @@ mod deep_pass_tests {
         assert!(
             !available.iter().any(|cluster| cluster == "codemode"),
             "unknown_tool_cluster must not advertise the rejected cluster as available: {available:?}"
+        );
+    }
+
+    fn handle_jsonrpc_with_induced_panic(engine: &TokenZeroEngine, line: &str) -> Option<String> {
+        handle_jsonrpc_dispatching(engine, line, |engine, item| {
+            if item.get("method").and_then(Value::as_str) == Some("tokenzero/internal/test-panic") {
+                panic!("test-induced tool panic");
+            }
+            handle_jsonrpc_request(engine, item)
+        })
+    }
+
+    #[test]
+    fn single_request_panic_returns_internal_error_without_unwinding() {
+        let (_dir, engine) = test_engine();
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            handle_jsonrpc_with_induced_panic(
+                &engine,
+                r#"{"jsonrpc":"2.0","id":9,"method":"tokenzero/internal/test-panic","params":{}}"#,
+            )
+        }));
+        let response = caught
+            .expect("single-request handler panic must not unwind the JSON-RPC adapter")
+            .expect("panicking request with id must still emit a JSON-RPC error");
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["id"], 9, "{parsed:#}");
+        assert_eq!(parsed["error"]["code"], -32603, "{parsed:#}");
+        assert_eq!(parsed["error"]["data"]["error_type"], "INTERNAL", "{parsed:#}");
+        assert!(
+            parsed["error"]["data"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("test-induced tool panic")),
+            "{parsed:#}"
+        );
+    }
+
+    #[test]
+    fn panicking_notification_stays_suppressed() {
+        let (_dir, engine) = test_engine();
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            handle_jsonrpc_with_induced_panic(
+                &engine,
+                r#"{"jsonrpc":"2.0","method":"tokenzero/internal/test-panic","params":{}}"#,
+            )
+        }));
+        let response = caught
+            .expect("notification handler panic must not unwind the JSON-RPC adapter");
+        assert!(
+            response.is_none(),
+            "JSON-RPC notifications must not grow a response after a handler panic: {response:?}"
         );
     }
 }
