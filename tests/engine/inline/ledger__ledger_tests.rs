@@ -294,6 +294,60 @@ fn task_cost_report_matches_hand_computed_json_and_csv_golden() {
 }
 
 #[test]
+fn task_cost_report_kill_before_rename_keeps_previous_complete_files() {
+    let directory = tempdir().unwrap();
+    let ledger = directory.path().join("ledger.jsonl");
+    let json_output = directory.path().join("reports/tasks.json");
+    let csv_output = directory.path().join("reports/tasks.csv");
+    let record = task_record("task-a", 10, 4, 1, 0, Some(true), 1, 1);
+    fs::write(
+        &ledger,
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .unwrap();
+    write_task_cost_report(&ledger, &json_output, &csv_output).unwrap();
+    let previous_json = fs::read(&json_output).unwrap();
+    let previous_csv = fs::read(&csv_output).unwrap();
+    serde_json::from_slice::<TaskCostReport>(&previous_json).expect("live json must parse");
+
+    // Kill point: P1 wrote new report bytes to tmp and died before rename.
+    // A later reader of tasks.json / tasks.csv must still see the previous
+    // complete report, not an empty/partial file from truncate-in-place.
+    let torn_json = json_output.with_file_name(".tasks.json.kill-mid-rename.tmp");
+    let torn_csv = csv_output.with_file_name(".tasks.csv.kill-mid-rename.tmp");
+    fs::write(&torn_json, b"{\"schema\":").unwrap();
+    fs::write(&torn_csv, b"task_id,").unwrap();
+    assert_eq!(fs::read(&json_output).unwrap(), previous_json);
+    assert_eq!(fs::read(&csv_output).unwrap(), previous_csv);
+    serde_json::from_slice::<TaskCostReport>(&fs::read(&json_output).unwrap()).unwrap();
+
+    // Contrast: the old `fs::write` kill window truncates dest first.
+    let truncated = directory.path().join("reports/truncated.json");
+    fs::write(&truncated, &previous_json).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&truncated)
+        .unwrap();
+    assert!(
+        serde_json::from_slice::<TaskCostReport>(&fs::read(&truncated).unwrap()).is_err(),
+        "truncate(true) on the live report is the torn-file kill window"
+    );
+
+    write_task_cost_report(&ledger, &json_output, &csv_output).unwrap();
+    serde_json::from_slice::<TaskCostReport>(&fs::read(&json_output).unwrap()).unwrap();
+    let temps: Vec<_> = fs::read_dir(json_output.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp-"))
+        .collect();
+    assert!(
+        temps.is_empty(),
+        "successful publish must not leave zero_store temps: {temps:?}"
+    );
+}
+
+#[test]
 fn tz_evict_amortized_charge_round_trips_through_ledger() {
     let charge = test_record()
         .eviction_amortization

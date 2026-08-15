@@ -991,14 +991,16 @@ pub fn write_task_cost_report(
     csv_path: &Path,
 ) -> io::Result<TaskCostReport> {
     let report = task_cost_report(ledger_path)?;
-    for output in [json_path, csv_path] {
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-    }
     let json = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
-    fs::write(json_path, json)?;
-    fs::write(csv_path, render_task_cost_csv(&report))?;
+    let csv = render_task_cost_csv(&report);
+    // SAFETY: dest is never truncated. `std::fs::write` opens with
+    // truncate(true) then write_all; kill after that open leaves
+    // tasks.json / tasks.csv empty or a JSON/CSV prefix. tmp+rename
+    // (zero_store) keeps the previous complete report visible until
+    // the new bytes replace the directory entry. Kill after tmp write
+    // and before rename: leftover tmp (Class 9), dest unchanged.
+    zero_store::atomic_write_file(json_path, &json)?;
+    zero_store::atomic_write_file(csv_path, csv.as_bytes())?;
     Ok(report)
 }
 
