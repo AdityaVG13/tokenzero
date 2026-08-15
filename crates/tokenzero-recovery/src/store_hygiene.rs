@@ -186,6 +186,7 @@ pub fn prune_recovery_blobs(
     max_age: Duration,
     dry_run: bool,
 ) -> Result<RecoveryBlobPruneReport, RecoveryError> {
+    let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
     let directory = blob_sidecar_dir(cache_path);
     let mut store = RecoveryStore::new(Some(cache_path.to_path_buf()));
     let mut files = Vec::new();
@@ -263,7 +264,18 @@ pub fn prune_recovery_blobs(
                 store.remove_blob(ref_id);
             }
         }
-        store.persist_pending()?;
+        store.persist_assuming_locked()?;
+        let published = load_state(cache_path, &store.config)?
+            .unwrap_or_else(|| RecoveryState::empty(&store.config));
+        for (_, ref_id, _, _) in &victims {
+            if published.blobs.contains_key(ref_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("snapshot still names {ref_id}; refusing unlink"),
+                )
+                .into());
+            }
+        }
         for (path, _, _, _) in &victims {
             match fs::remove_file(path) {
                 Ok(()) => {}

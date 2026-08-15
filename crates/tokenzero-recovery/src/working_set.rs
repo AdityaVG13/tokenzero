@@ -363,8 +363,8 @@ impl WorkingSet {
             // A changed evicted span or a non-beneficial delta becomes the new
             // baseline; remove the stale anchor before normal admission.
             let stale = self.spans.remove(index);
-            if let SpanBody::Evicted { ref_id, .. } = stale.body {
-                self.remove_evicted_ref(&ref_id, stale.id);
+            if let SpanBody::Evicted { .. } = stale.body {
+                self.remove_evicted_ref(store, stale.id);
             }
         }
 
@@ -436,7 +436,28 @@ impl WorkingSet {
         let effective_start = start_line.or(fragment_window.map(|window| window.0));
         let effective_end = end_line.or(fragment_window.map(|window| window.1));
         let partial = effective_start.is_some() || effective_end.is_some();
-        let result = store.expand(ref_id, Some("raw"), start_line, end_line, None, None);
+        // Expand the span's canonical blob ref. `lookup_ref` may be a
+        // link_refs alias; portable expand rejects many alias spellings
+        // before the store alias table is consulted.
+        let (source_anchor, canonical_ref, expand_ref) = {
+            let span = self
+                .spans
+                .iter()
+                .find(|span| span.id == id)
+                .expect("evicted ref index must point at a span");
+            let SpanBody::Evicted {
+                ref_id: canonical, ..
+            } = &span.body
+            else {
+                panic!("evicted ref index must point at an evicted span");
+            };
+            let expand_ref = match ref_id.split_once('#') {
+                Some((_, fragment)) => format!("{canonical}#{fragment}"),
+                None => canonical.clone(),
+            };
+            (span.anchor.clone(), canonical.clone(), expand_ref)
+        };
+        let result = store.expand(&expand_ref, Some("raw"), start_line, end_line, None, None);
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         self.record_rehydration_latency(elapsed_us);
         self.refresh_rates();
@@ -445,12 +466,6 @@ impl WorkingSet {
         }
         let rehydrated_tokens = count_tokens(&result.content) as u64;
 
-        let source_anchor = self
-            .spans
-            .iter()
-            .find(|span| span.id == id)
-            .map(|span| span.anchor.clone())
-            .expect("evicted ref index must point at a span");
         let (resident_id, resident_anchor) = if partial {
             let relative_start = effective_start.unwrap_or(1).max(1);
             let returned_lines = result.content.lines().count().max(1);
@@ -482,7 +497,7 @@ impl WorkingSet {
                 .expect("evicted ref index must point at a span");
             span.body = SpanBody::Resident(result.content);
             span.last_touched = self.sequence;
-            self.remove_evicted_ref(lookup_ref, id);
+            self.remove_evicted_ref(store, id);
             self.note_admission();
             (id, source_anchor)
         };
@@ -494,7 +509,7 @@ impl WorkingSet {
             .actual_rehydration_tokens
             .saturating_add(rehydrated_tokens);
         self.refresh_rates();
-        self.queue_prefetch_hints(&resident_anchor, resident_id, lookup_ref);
+        self.queue_prefetch_hints(&resident_anchor, resident_id, &canonical_ref);
         let evicted = self.enforce_budget(store)?;
         Ok(Some(Rehydration {
             id: resident_id,
@@ -540,8 +555,9 @@ impl WorkingSet {
     }
 
     /// Record that `alias` recovers the same spans as `source`.
+    /// Persists `alias -> source` so `RecoveryStore::expand` can resolve it.
     /// Returns false when `source` is unknown, equal to `alias`, or the map is unchanged.
-    pub fn link_refs(&mut self, source: &str, alias: &str) -> bool {
+    pub fn link_refs(&mut self, store: &mut RecoveryStore, source: &str, alias: &str) -> bool {
         if source == alias {
             return false;
         }
@@ -558,7 +574,11 @@ impl WorkingSet {
                 entry.push(id);
             }
         }
-        entry.len() > before
+        if entry.len() <= before {
+            return false;
+        }
+        store.store_alias_deferred(alias, source);
+        true
     }
 
     pub fn used_tokens(&self) -> usize {
@@ -651,12 +671,19 @@ impl WorkingSet {
         );
     }
 
-    fn remove_evicted_ref(&mut self, ref_id: &str, id: u64) {
-        if self.evicted_refs.get_mut(ref_id).is_some_and(|ids| {
+    fn remove_evicted_ref(&mut self, store: &mut RecoveryStore, id: u64) {
+        let mut empty_keys = Vec::new();
+        for (key, ids) in &mut self.evicted_refs {
             ids.retain(|candidate| *candidate != id);
-            ids.is_empty()
-        }) {
-            self.evicted_refs.remove(ref_id);
+            if ids.is_empty() {
+                empty_keys.push(key.clone());
+            }
+        }
+        for key in empty_keys {
+            self.evicted_refs.remove(&key);
+            if store.alias_target(&key).is_some() {
+                store.remove_alias(&key);
+            }
         }
     }
 

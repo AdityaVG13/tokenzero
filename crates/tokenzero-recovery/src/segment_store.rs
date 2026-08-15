@@ -75,6 +75,8 @@ pub enum SegmentStoreError {
         entry_bytes: u64,
         segment_bytes: u64,
     },
+    #[error("overflow")]
+    Overflow,
     #[error("lock timeout")]
     LockTimeout,
 }
@@ -218,7 +220,7 @@ impl SegmentStore {
                     .values()
                     .map(|entry| entry.lease_deadline_epoch_ms)
                     .min();
-                self.manifest.generation += 1;
+                self.manifest.generation = next_generation(self.manifest.generation)?;
                 self.publish()?;
             }
             return Ok(());
@@ -255,7 +257,7 @@ impl SegmentStore {
                     .values()
                     .map(|entry| entry.lease_deadline_epoch_ms)
                     .min();
-                self.manifest.generation += 1;
+                self.manifest.generation = next_generation(self.manifest.generation)?;
                 self.publish()?;
             }
             return Ok(());
@@ -266,25 +268,47 @@ impl SegmentStore {
             lease_deadline_epoch_ms: lease,
         };
         let mb = serde_json::to_vec(&m)?;
-        let size = 12 + mb.len() as u64 + b.len() as u64;
-        if size + MAGIC.len() as u64 > self.manifest.segment_bytes {
+        let segment_bytes = self.manifest.segment_bytes;
+        let size = 12u64
+            .checked_add(mb.len() as u64)
+            .and_then(|n| n.checked_add(b.len() as u64))
+            .ok_or(SegmentStoreError::EntryTooLarge {
+                entry_bytes: u64::MAX,
+                segment_bytes,
+            })?;
+        let entry_bytes = size
+            .checked_add(MAGIC.len() as u64)
+            .ok_or(SegmentStoreError::EntryTooLarge {
+                entry_bytes: u64::MAX,
+                segment_bytes,
+            })?;
+        if entry_bytes > segment_bytes {
             return Err(SegmentStoreError::EntryTooLarge {
-                entry_bytes: size + MAGIC.len() as u64,
-                segment_bytes: self.manifest.segment_bytes,
+                entry_bytes,
+                segment_bytes,
             });
         }
         if self.manifest.hot.written_bytes > 8
-            && self.manifest.hot.written_bytes + size > self.manifest.segment_bytes
+            && self
+                .manifest
+                .hot
+                .written_bytes
+                .checked_add(size)
+                .is_none_or(|next_hot| next_hot > segment_bytes)
         {
             self.seal_inner()?
         }
+        let next_manifest = next_generation(self.manifest.generation)?;
         let p = self.root.join(&self.manifest.hot.data_file);
         let mut f = OpenOptions::new().append(true).read(true).open(p)?;
         let start = f.seek(SeekFrom::End(0))?;
         f.write_all(&(mb.len() as u32).to_le_bytes())?;
         f.write_all(&(b.len() as u64).to_le_bytes())?;
         f.write_all(&mb)?;
-        let offset = start + 12 + mb.len() as u64;
+        let offset = start
+            .checked_add(12)
+            .and_then(|n| n.checked_add(mb.len() as u64))
+            .ok_or(SegmentStoreError::Overflow)?;
         f.write_all(b)?;
         f.sync_all()?;
         self.hot_index.entries.insert(
@@ -306,7 +330,7 @@ impl SegmentStore {
             .values()
             .map(|e| e.lease_deadline_epoch_ms)
             .min();
-        self.manifest.generation += 1;
+        self.manifest.generation = next_manifest;
         self.publish()
     }
     pub fn expand(&mut self, r: &str) -> Result<Option<Vec<u8>>, SegmentStoreError> {
@@ -358,7 +382,7 @@ impl SegmentStore {
         }
         self.manifest.cold = keep;
         if n > 0 {
-            self.manifest.generation += 1;
+            self.manifest.generation = next_generation(self.manifest.generation)?;
             // Both durable manifests must stop naming a segment before either
             // file is unlinked. A crash before unlink leaves harmless orphans.
             self.publish()?;
@@ -397,14 +421,15 @@ impl SegmentStore {
         if self.hot_index.entries.is_empty() {
             return Ok(());
         }
+        let next_segment = next_generation(self.manifest.hot.generation)?;
+        let next_manifest = next_generation(self.manifest.generation)?;
         let mut d = self.manifest.hot.clone();
         d.sealed_at_epoch_ms = Some(now_ms());
         self.manifest.cold.push(d);
-        let g = self.manifest.cold.last().unwrap().generation + 1;
-        self.manifest.hot = desc(g);
+        self.manifest.hot = desc(next_segment);
         self.hot_index = SegmentIndex::default();
         self.init_hot()?;
-        self.manifest.generation += 1;
+        self.manifest.generation = next_manifest;
         Ok(())
     }
     fn refresh_manifest_backup(&self) -> Result<(), SegmentStoreError> {
@@ -453,6 +478,11 @@ fn desc(g: u64) -> SegmentDescriptor {
         sealed_at_epoch_ms: None,
         min_lease_deadline_epoch_ms: None,
     }
+}
+fn next_generation(generation: u64) -> Result<u64, SegmentStoreError> {
+    generation
+        .checked_add(1)
+        .ok_or(SegmentStoreError::Overflow)
 }
 fn hash(b: &[u8]) -> String {
     crate::migration::full_sha256_hex(b)
@@ -570,7 +600,11 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
         let dl = u64::from_le_bytes(z);
         if ml > 1_048_576
             || dl > DEFAULT_SEGMENT_BYTES * 4
-            || start + 12 + ml as u64 + dl > d.written_bytes
+            || start
+                .checked_add(12)
+                .and_then(|n| n.checked_add(ml as u64))
+                .and_then(|n| n.checked_add(dl))
+                .is_none_or(|end| end > d.written_bytes)
         {
             break;
         }
@@ -586,11 +620,17 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
             break;
         }
         valid = f.stream_position()?;
+        let Some(offset) = start
+            .checked_add(12)
+            .and_then(|n| n.checked_add(ml as u64))
+        else {
+            break;
+        };
         idx.entries.insert(
             m.ref_id.clone(),
             SegmentEntry {
                 ref_id: m.ref_id,
-                offset: start + 12 + ml as u64,
+                offset,
                 len: dl,
                 sha256: m.sha256,
                 lease_deadline_epoch_ms: m.lease_deadline_epoch_ms,

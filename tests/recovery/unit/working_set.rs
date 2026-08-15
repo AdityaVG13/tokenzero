@@ -352,3 +352,63 @@ fn store_served_rehydration_is_low_latency() {
     assert!(latency.min_us <= latency.max_us);
     assert_eq!(latency.mean_us, latency.min_us as f64);
 }
+
+#[test]
+fn link_refs_persists_store_alias_and_rehydrate_expands_canonical() {
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+    let body = large("link-source");
+    let mut set = WorkingSet::new(count_tokens(&body) + 256);
+    let admission = set
+        .admit(&mut store, body.clone(), anchor("src/link.rs"))
+        .unwrap();
+    let evicted = set
+        .evict(&mut store, admission.id)
+        .unwrap()
+        .expect("page out the admitted span");
+    let source = evicted.ref_id;
+    let alias = "tz://s/0123456789abcdef";
+
+    assert!(set.link_refs(&mut store, &source, alias));
+    assert_eq!(set.evicted_refs().get(&source), set.evicted_refs().get(alias));
+    assert_eq!(store.alias_target(alias).as_deref(), Some(source.as_str()));
+    let expanded = store.expand(alias, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content.as_bytes(), body.as_bytes());
+
+    let fault = set
+        .rehydrate_ref(&mut store, alias, None, None)
+        .unwrap()
+        .expect("linked alias must fault the canonical blob");
+    assert!(!fault.partial);
+    assert_eq!(set.visible_lines()[0].as_bytes(), body.as_bytes());
+    assert!(set.evicted_refs().get(alias).is_none());
+    assert!(set.evicted_refs().get(&source).is_none());
+    assert!(store.alias_target(alias).is_none());
+}
+
+#[test]
+fn replacing_evicted_span_drops_linked_alias_ids() {
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+    let first = large("first-link");
+    let mut set = WorkingSet::new(replacement_tokens("src/replace.rs"));
+    let admission = set
+        .admit(&mut store, first, anchor("src/replace.rs"))
+        .unwrap();
+    let source = admission.evicted[0].ref_id.clone();
+    let alias = "tz://s/fedcba9876543210";
+    assert!(set.link_refs(&mut store, &source, alias));
+
+    let replacement = large("replacement-link");
+    set.admit(&mut store, replacement, anchor("src/replace.rs"))
+        .unwrap();
+    assert!(set.evicted_refs().get(alias).is_none());
+    assert!(store.alias_target(alias).is_none());
+    assert!(
+        set.rehydrate_ref(&mut store, alias, None, None)
+            .unwrap()
+            .is_none(),
+        "stale alias must not keep a dead span id"
+    );
+}

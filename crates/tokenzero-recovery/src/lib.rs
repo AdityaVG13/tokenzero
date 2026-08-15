@@ -2771,6 +2771,16 @@ impl RecoveryStore {
     }
 
     fn persist(&mut self) -> Result<(), RecoveryError> {
+        self.persist_inner(true)
+    }
+
+    /// Persist while the caller already holds `PersistLock` for this cache.
+    /// Nested `persist_pending` would unlock on drop before prune unlinks.
+    pub(crate) fn persist_assuming_locked(&mut self) -> Result<(), RecoveryError> {
+        self.persist_inner(false)
+    }
+
+    fn persist_inner(&mut self, acquire_lock: bool) -> Result<(), RecoveryError> {
         let storage_unchanged = self.persistence_path.as_deref().is_none_or(|path| {
             let (disk_identity, journal_identity) = cache_identities(path);
             disk_identity == self.disk_identity && journal_identity == self.journal_identity
@@ -2788,7 +2798,11 @@ impl RecoveryStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
+        let _lock = if acquire_lock {
+            Some(PersistLock::acquire(recovery_lock_path(&path))?)
+        } else {
+            None
+        };
         let wal = recovery_session_wal(&path, &self.config)?;
         let unchanged_since_last_write = self.disk_identity.is_some()
             && !wal.foreign_write_since(self.disk_identity, self.journal_identity);

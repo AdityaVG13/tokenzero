@@ -1,6 +1,7 @@
 use super::*;
 use crate::working_set::WorkingSet;
 use crate::RecoveryStore;
+use std::fs;
 use tempfile::tempdir;
 use tokenzero_core::ContentType;
 
@@ -119,6 +120,17 @@ fn apply_promote_forget_and_link_mutate_or_fail_loud() {
         set.evicted_refs().get(&source),
         set.evicted_refs().get("tz://blob/alias-link")
     );
+    assert_eq!(
+        store.alias_target("tz://blob/alias-link").as_deref(),
+        Some(source.as_str())
+    );
+    let recovered = set
+        .rehydrate_ref(&mut store, "tz://blob/alias-link", None, None)
+        .unwrap()
+        .expect("linked alias must demand-page the source span");
+    assert!(!recovered.partial);
+    assert!(set.evicted_refs().get("tz://blob/alias-link").is_none());
+    assert!(store.alias_target("tz://blob/alias-link").is_none());
 }
 
 #[test]
@@ -139,6 +151,19 @@ fn apply_commit_session_persists_and_missing_path_fails_loud() {
     assert!(effect.applied);
     assert_eq!(effect.substrate, "recovery_store.persist");
     assert!(path.exists());
+
+    let snapshot_meta = fs::metadata(&path).unwrap();
+    let snapshot_fp = (snapshot_meta.len(), snapshot_meta.modified().ok());
+    store.store_blob_deferred("wal-appended session bytes", ContentType::Unknown);
+    let effect =
+        apply_memory_verb(&mut set, &mut store, &request(MemoryVerb::CommitSession)).unwrap();
+    assert!(effect.applied, "WAL append after first snapshot must count as applied");
+    let after_meta = fs::metadata(&path).unwrap();
+    assert_eq!(
+        (after_meta.len(), after_meta.modified().ok()),
+        snapshot_fp,
+        "second commit WAL-appends; snapshot len+mtime stays the old detector's identity"
+    );
 }
 
 #[test]

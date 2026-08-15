@@ -268,11 +268,7 @@ impl TokenZeroEngine {
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full
     /// serve, nothing recorded) instead of failing the call.
     pub(crate) fn session_lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
-        match self.session.lock() {
-            Ok(mut slot) => Self::load_session_memory(&mut slot, self.session_persist.as_ref())
-                .lookup(key, content_sha256),
-            Err(_) => SeenState::Miss,
-        }
+        self.with_session_memory(|| SeenState::Miss, |memory| memory.lookup(key, content_sha256))
     }
 
     /// Fail-open write-back of this call's serve records and rollup counters.
@@ -281,29 +277,27 @@ impl TokenZeroEngine {
         pending: Vec<(ServeKey, ServedRecord)>,
         summary: &SessionSummary,
     ) -> (u64, u64) {
-        let (watermark, snapshot) = {
-            let Ok(mut slot) = self.session.lock() else {
-                return (0, 0);
-            };
-            let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
-            let changed_keys: Vec<_> = pending
-                .into_iter()
-                .map(|(key, record)| {
-                    memory.record(key.clone(), record);
-                    key
-                })
-                .collect();
-            memory.absorb(summary);
-            if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
-                memory.note_bytes(full, delta);
-            }
-            let watermark = memory.advance_hwm();
-            let snapshot = self
-                .session_persist
-                .is_some()
-                .then(|| SessionPersistSnapshot::from_memory(memory, &changed_keys));
-            (watermark, snapshot)
-        };
+        let persist_enabled = self.session_persist.is_some();
+        let (watermark, snapshot) = self.with_session_memory(
+            || ((0, 0), None),
+            |memory| {
+                let changed_keys: Vec<_> = pending
+                    .into_iter()
+                    .map(|(key, record)| {
+                        memory.record(key.clone(), record);
+                        key
+                    })
+                    .collect();
+                memory.absorb(summary);
+                if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
+                    memory.note_bytes(full, delta);
+                }
+                let watermark = memory.advance_hwm();
+                let snapshot = persist_enabled
+                    .then(|| SessionPersistSnapshot::from_memory(memory, &changed_keys));
+                (watermark, snapshot)
+            },
+        );
         if let (Some(persist), Some(snapshot)) = (self.session_persist.as_ref(), snapshot.as_ref())
         {
             persist.persist(snapshot);
@@ -332,17 +326,35 @@ impl TokenZeroEngine {
         ServeFlight { engine: self, keys }
     }
 
-    fn load_session_memory<'a>(
-        slot: &'a mut Option<SessionMemory>,
-        persistence: Option<&SessionPersistence>,
-    ) -> &'a mut SessionMemory {
-        slot.get_or_insert_with(|| {
-            let mut memory = SessionMemory::default();
-            if let Some(persist) = persistence {
-                persist.load_into(&mut memory);
+    /// Run `f` on live session memory. Cold load is a local `SessionMemory`
+    /// (flock/disk without `self.session`); the mutex inserts only if the
+    /// slot is still `None`, then runs `f`.
+    fn with_session_memory<R>(
+        &self,
+        on_poison: impl FnOnce() -> R,
+        f: impl FnOnce(&mut SessionMemory) -> R,
+    ) -> R {
+        match self.session.lock() {
+            Ok(mut slot) => {
+                if let Some(memory) = slot.as_mut() {
+                    return f(memory);
+                }
             }
-            memory
-        })
+            Err(_) => return on_poison(),
+        }
+        let loaded = Self::session_memory_from_disk(self.session_persist.as_ref());
+        match self.session.lock() {
+            Ok(mut slot) => f(slot.get_or_insert(loaded)),
+            Err(_) => on_poison(),
+        }
+    }
+
+    fn session_memory_from_disk(persistence: Option<&SessionPersistence>) -> SessionMemory {
+        let mut memory = SessionMemory::default();
+        if let Some(persist) = persistence {
+            persist.load_into(&mut memory);
+        }
+        memory
     }
 
     pub(crate) fn admit_working_set_response(
@@ -408,19 +420,19 @@ impl TokenZeroEngine {
     }
 
     pub fn session_rollup(&self) -> Value {
-        match self.session.lock() {
-            Ok(mut slot) => {
-                Self::load_session_memory(&mut slot, self.session_persist.as_ref()).rollup()
-            }
-            Err(_) => json!({
-                "records": 0,
-                "dedup_hits": 0,
-                "diff_hits": 0,
-                "visible_tokens_saved": 0,
-                "diff_tokens_saved": 0,
-                "poisoned": true
-            }),
-        }
+        self.with_session_memory(
+            || {
+                json!({
+                    "records": 0,
+                    "dedup_hits": 0,
+                    "diff_hits": 0,
+                    "visible_tokens_saved": 0,
+                    "diff_tokens_saved": 0,
+                    "poisoned": true
+                })
+            },
+            |memory| memory.rollup(),
+        )
     }
 
     pub(crate) fn rg_binary(&self) -> Option<&Path> {

@@ -7,13 +7,12 @@
 //! only after a visible mutation.
 
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::SystemTime;
 
 use crate::working_set::{SpanAnchor, WorkingSet, WorkingSetResponse};
 use crate::{RecoveryError, RecoveryStore};
+use zero_store::{FileIdentity, SessionWal, SessionWalConfig};
 
 /// Six RACC actions-v2 memory-management verbs (tokenzero-fmeo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -143,6 +142,7 @@ pub fn apply_memory_verb(
                     "commit_session requires a recovery persist path",
                 )
             })?;
+            // Applied iff snapshot or WAL FileIdentity changed (len/mtime/ino).
             let before = persist_fingerprint(&path);
             store.persist_pending()?;
             let after = persist_fingerprint(&path);
@@ -191,7 +191,7 @@ pub fn apply_memory_verb(
         }
         MemoryVerb::LinkRefs => {
             let (source, alias) = link_pair(request)?;
-            if !working_set.link_refs(source, alias) {
+            if !working_set.link_refs(store, source, alias) {
                 return Err(not_applied(
                     request.verb,
                     format!("link_refs did not record {source} -> {alias}"),
@@ -267,9 +267,14 @@ fn link_pair(request: &MemoryVerbRequest) -> Result<(&str, &str), MemoryVerbErro
     }
 }
 
-fn persist_fingerprint(path: &Path) -> Option<(u64, Option<SystemTime>)> {
-    let meta = fs::metadata(path).ok()?;
-    Some((meta.len(), meta.modified().ok()))
+/// Snapshot + WAL identity, same pairing `RecoveryStore` uses in `cache_identities`.
+/// After the first snapshot, later persists append the session WAL and leave
+/// the snapshot file's len+mtime unchanged; WAL identity is the applied signal.
+fn persist_fingerprint(path: &Path) -> (Option<FileIdentity>, Option<FileIdentity>) {
+    match SessionWal::new(path, SessionWalConfig::default()) {
+        Ok(wal) => (wal.snapshot_identity(), wal.wal_identity()),
+        Err(_) => (FileIdentity::capture(path), None),
+    }
 }
 
 #[cfg(test)]
