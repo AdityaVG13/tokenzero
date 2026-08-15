@@ -1,8 +1,6 @@
 # cargo-deny supply-chain policy for TokenZero.
 # Run: cargo deny check   (advisories + licenses + bans + sources)
-# The allow-list below is exactly the set of permissive, OSI-approved licenses
-# present in the dependency tree (verified via `cargo metadata`); all are
-# compatible with TokenZero's own MIT license.
+# Allow-list matches the locked graph. Re-run `cargo deny check` after dep changes.
 
 [graph]
 all-features = true
@@ -19,9 +17,13 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    # Declared by asupersync 0.3.5 and franken-* crates pulled through FastMCP.
+    "LicenseRef-MIT-OpenAI-Anthropic-Rider",
 ]
 
 [bans]
@@ -33,3 +35,7 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/AdityaVG13/zerostack",
+    "https://github.com/Dicklesworthstone/fastmcp_rust",
+]
