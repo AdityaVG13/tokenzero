@@ -77,3 +77,41 @@ fn ref_without_a_selector_falls_back_to_a_declared_lossy_capsule() {
         .validate_omission_rule(&original)
         .expect("omission rule must hold");
 }
+
+#[test]
+fn fz_and_gz_blob_refs_are_exact_recovery_selectors() {
+    let original = big_original();
+    for scheme in ["fz://blob/abc", "gz://blob/abc"] {
+        let selector = format!("{scheme}#B0-100");
+        let capsule =
+            finalize_capsule_omission(truncated_capsule(), &original, 0, Some(selector.clone()))
+                .expect("same-store blob aliases must satisfy the omission rule");
+        assert!(
+            capsule.text.contains(&selector),
+            "recovery ref must be visible for {scheme}: {}",
+            capsule.text
+        );
+        assert!(capsule.exact_refs.iter().any(|r| r == &selector));
+        capsule
+            .validate_omission_rule(&original)
+            .expect("omission rule must hold");
+    }
+
+    let fz = make_capsule_with_recovery_ref(
+        &original,
+        count_tokens(&original),
+        Mode::Structured,
+        60,
+        Some("big.txt"),
+        Some("fz://blob/abcdef"),
+    )
+    .expect("fz://blob recovery refs must attach a byte selector");
+    assert!(
+        fz.exact_refs
+            .iter()
+            .any(|reference| reference.starts_with("fz://blob/abcdef#B0-")),
+        "{:?}",
+        fz.exact_refs
+    );
+    fz.validate_omission_rule(&original).unwrap();
+}

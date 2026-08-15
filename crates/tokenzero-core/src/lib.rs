@@ -461,11 +461,19 @@ impl Capsule {
     }
 }
 
+fn exact_recovery_scheme(reference: &str) -> bool {
+    let base = reference
+        .split_once('#')
+        .map_or(reference, |(base, _)| base);
+    // Recovery expand treats fz://blob and gz://blob as same-store aliases of tz://.
+    base.starts_with("tz://") || base.starts_with("fz://blob/") || base.starts_with("gz://blob/")
+}
+
 fn exact_ref_has_selector(reference: &str) -> bool {
     let Some((base, selector)) = reference.split_once('#') else {
         return false;
     };
-    if !base.starts_with("tz://") || selector.is_empty() {
+    if !exact_recovery_scheme(base) || selector.is_empty() {
         return false;
     }
     if let Some(bytes) = selector.strip_prefix('B') {
@@ -484,7 +492,7 @@ fn exact_ref_has_selector(reference: &str) -> bool {
 }
 
 fn exact_recovery_ref(reference: &str, byte_len: usize) -> Option<String> {
-    reference.starts_with("tz://").then(|| {
+    exact_recovery_scheme(reference).then(|| {
         if reference.contains('#') {
             reference.to_string()
         } else {

@@ -2236,6 +2236,11 @@ impl RecoveryStore {
         {
             self.store_alias_deferred(short_bare, &full_bare);
         }
+        // Collision marks the short form ambiguous; expand will refuse it.
+        // Never advertise a handle that cannot be recovered.
+        if self.is_alias_ambiguous(short_bare) {
+            return ref_id.to_string();
+        }
         short
     }
 

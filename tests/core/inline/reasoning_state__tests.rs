@@ -314,6 +314,7 @@ fn raw_decision_view_recovery_is_exact_bound_and_redacted() {
 #[test]
 fn continuation_classes_preserve_exact_scoped_empirical_and_unavailable() {
     let (view, exact_contract) = decision_view(d(5));
+    let tokenizer = view.identity().tokenizer_identity_digest();
     let recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
     let order = ReasoningStateOrderV1::new(0, None).unwrap();
     let exact_binding = state_binding(&exact_contract);
@@ -339,7 +340,8 @@ fn continuation_classes_preserve_exact_scoped_empirical_and_unavailable() {
         ModelStateContinuationKindV1::ExactNeutral
     );
 
-    let scoped_contract = contract_with_policy(d(3), d(5), NativeStatePolicyV1::ScopedCertificate);
+    let scoped_contract =
+        contract_with_policy(tokenizer, d(5), NativeStatePolicyV1::ScopedCertificate);
     let scoped = OpaqueReasoningStateEnvelopeV1::capture(
         OpaqueReasoningStateKindV1::SignedThinkingBlocks,
         ReasoningContinuationStatusV1::ScopedCertificate,
@@ -370,7 +372,7 @@ fn continuation_classes_preserve_exact_scoped_empirical_and_unavailable() {
     ));
 
     let approximate_contract =
-        contract_with_policy(d(3), d(5), NativeStatePolicyV1::ExactIfAvailable);
+        contract_with_policy(tokenizer, d(5), NativeStatePolicyV1::ExactIfAvailable);
     let approximate = OpaqueReasoningStateEnvelopeV1::capture(
         OpaqueReasoningStateKindV1::ProviderContinuationId,
         ReasoningContinuationStatusV1::Approximate,
@@ -436,9 +438,11 @@ fn continuation_classes_preserve_exact_scoped_empirical_and_unavailable() {
 #[test]
 fn continuation_evidence_mismatch_and_expiry_fail_closed() {
     let (view, _) = decision_view(d(5));
+    let tokenizer = view.identity().tokenizer_identity_digest();
     let recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
     let order = ReasoningStateOrderV1::new(0, None).unwrap();
-    let scoped_contract = contract_with_policy(d(3), d(5), NativeStatePolicyV1::ScopedCertificate);
+    let scoped_contract =
+        contract_with_policy(tokenizer, d(5), NativeStatePolicyV1::ScopedCertificate);
     let scoped = OpaqueReasoningStateEnvelopeV1::capture(
         OpaqueReasoningStateKindV1::SignedThinkingBlocks,
         ReasoningContinuationStatusV1::ScopedCertificate,
@@ -487,7 +491,7 @@ fn continuation_evidence_mismatch_and_expiry_fail_closed() {
     }
 
     let approximate_contract =
-        contract_with_policy(d(3), d(5), NativeStatePolicyV1::ExactIfAvailable);
+        contract_with_policy(tokenizer, d(5), NativeStatePolicyV1::ExactIfAvailable);
     let approximate = OpaqueReasoningStateEnvelopeV1::capture(
         OpaqueReasoningStateKindV1::ProviderContinuationId,
         ReasoningContinuationStatusV1::Approximate,
@@ -559,6 +563,75 @@ fn continuation_evidence_mismatch_and_expiry_fail_closed() {
     assert_eq!(
         expired.unavailable_reason(),
         Some(ModelStateUnavailableReasonV1::StateExpired)
+    );
+}
+
+#[test]
+fn continuation_assessment_refuses_tokenizer_and_tool_schema_drift() {
+    let (view, matching) = decision_view(d(5));
+    let recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
+    let order = ReasoningStateOrderV1::new(0, None).unwrap();
+    let tokenizer = view.identity().tokenizer_identity_digest();
+    let drifted_tokenizer = OpaqueReasoningStateEnvelopeV1::capture(
+        OpaqueReasoningStateKindV1::ProviderReasoningItems,
+        ReasoningContinuationStatusV1::Exact,
+        state_binding(&contract(d(3), d(5))),
+        order,
+        None,
+        None,
+        b"exact-native-state".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        ModelStateContinuationAssessmentV1::assess(
+            drifted_tokenizer.reference(),
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap_err(),
+        ModelStateContinuationErrorV1::TokenizerIdentityMismatch
+    );
+    let drifted_tools = OpaqueReasoningStateEnvelopeV1::capture(
+        OpaqueReasoningStateKindV1::ProviderReasoningItems,
+        ReasoningContinuationStatusV1::Exact,
+        state_binding(&contract(tokenizer, d(99))),
+        order,
+        None,
+        None,
+        b"exact-native-state".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        ModelStateContinuationAssessmentV1::assess(
+            drifted_tools.reference(),
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap_err(),
+        ModelStateContinuationErrorV1::ToolSchemaIdentityMismatch
+    );
+    let matched = OpaqueReasoningStateEnvelopeV1::capture(
+        OpaqueReasoningStateKindV1::ProviderReasoningItems,
+        ReasoningContinuationStatusV1::Exact,
+        state_binding(&matching),
+        order,
+        None,
+        None,
+        b"exact-native-state".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        ModelStateContinuationAssessmentV1::assess(
+            matched.reference(),
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap()
+        .class(),
+        ModelStateContinuationKindV1::ExactNeutral
     );
 }
 

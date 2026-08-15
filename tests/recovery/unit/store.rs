@@ -278,6 +278,26 @@ fn concurrent_short_alias_collision_marks_ambiguous_without_overwrite() {
 }
 
 #[test]
+fn session_visible_alias_collision_does_not_advertise_unexpandable_short() {
+    let mut store = RecoveryStore::new(None);
+    let first = format!("tz://blob/{}", "a".repeat(64));
+    let second = format!("tz://blob/{}", "b".repeat(64));
+    let short = store.register_session_visible_alias(&second);
+    assert!(short.starts_with("tz://s/"), "{short}");
+    store.remove_alias(&short);
+    store.store_alias_deferred(&short, &first);
+    let advertised = store.register_session_visible_alias(&second);
+    assert_eq!(
+        advertised, second,
+        "colliding short form must not be advertised: {advertised}"
+    );
+    assert!(store.is_alias_ambiguous(&short));
+    let expanded = store.expand(&short, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "ambiguous-alias");
+}
+
+#[test]
 fn old_string_blob_cache_round_trips_without_shape_rewrite() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");

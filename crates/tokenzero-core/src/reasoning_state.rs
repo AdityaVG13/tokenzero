@@ -781,6 +781,15 @@ impl ModelStateContinuationAssessmentV1 {
         now_unix_ms: u64,
     ) -> Result<Self, ModelStateContinuationErrorV1> {
         validate_continuation_evidence_for_state(state_reference, &evidence)?;
+        let view_identity = raw_recovery.decision_view_identity();
+        if state_reference.binding().tokenizer_identity()
+            != view_identity.tokenizer_identity_digest()
+        {
+            return Err(ModelStateContinuationErrorV1::TokenizerIdentityMismatch);
+        }
+        if state_reference.binding().tool_schema_digest() != view_identity.tool_schema_digest() {
+            return Err(ModelStateContinuationErrorV1::ToolSchemaIdentityMismatch);
+        }
         let expired = state_reference
             .valid_until_unix_ms()
             .is_some_and(|expiry| now_unix_ms >= expiry);
@@ -941,6 +950,8 @@ pub enum ModelStateContinuationErrorV1 {
     InvalidEvidenceExpiry,
     EvidenceStatusMismatch,
     ScopedCertificateMismatch,
+    TokenizerIdentityMismatch,
+    ToolSchemaIdentityMismatch,
     RawByteLengthOverflow,
     DecisionViewIdentityMismatch,
     DecisionViewDigestMismatch,
@@ -965,6 +976,12 @@ impl fmt::Display for ModelStateContinuationErrorV1 {
             }
             Self::ScopedCertificateMismatch => f.write_str(
                 "model-state scoped evidence certificate differs from the state reference",
+            ),
+            Self::TokenizerIdentityMismatch => f.write_str(
+                "raw Decision View tokenizer identity differs from the reasoning-state binding",
+            ),
+            Self::ToolSchemaIdentityMismatch => f.write_str(
+                "raw Decision View tool schema differs from the reasoning-state binding",
             ),
             Self::RawByteLengthOverflow => {
                 f.write_str("raw Decision View byte length exceeds the receipt range")
