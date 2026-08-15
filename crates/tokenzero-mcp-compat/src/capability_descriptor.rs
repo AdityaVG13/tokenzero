@@ -15,7 +15,7 @@ use tokenzero_engine::codemode_wire::{OperationClass, classify_descriptor_tool};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.
-pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.3";
+pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.4";
 
 /// Machine-readable policy descriptor enumerating every TokenZero tool,
 /// capability tag, and ZeroRef v1 feature.
@@ -55,14 +55,16 @@ pub struct ToolCapability {
 
 /// ZeroRef v1 capability contract.
 ///
-/// Portability is deliberately narrow: only full-hash blob refs, with optional
-/// byte or line fragments, cross engine boundaries under a compatible shared
-/// content-addressed store. The tz, fz, and gz schemes identify the same blob
-/// digest; they do not make execution, error, session, file, graph, index, or
-/// unit refs portable. Expand must verify the complete blob digest before
-/// applying a fragment and must fail typed on missing, incompatible, stale,
-/// dangling, or corrupt refs. Correctness evidence never authorizes zero-copy,
-/// latency, or performance claims.
+/// Protocol facts (schemes, blob-kind portability scope, fragment selectors)
+/// stay listed. Proven multi-OS / cross-engine portability is gated off until
+/// `ZEROREF_REQUIRE_ALL_OS` green evidence exists for macos, linux, and
+/// windows (`cross_engine` stays false; host-local Darwin rows are not
+/// multi-OS proof). The tz, fz, and gz schemes identify the same blob digest;
+/// they do not make execution, error, session, file, graph, index, or unit
+/// refs portable. Expand must verify the complete blob digest before applying
+/// a fragment and must fail typed on missing, incompatible, stale, dangling,
+/// or corrupt refs. Correctness evidence never authorizes zero-copy, latency,
+/// or performance claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct ZeroRefCapabilities {
     pub version: String,
@@ -137,10 +139,11 @@ impl Default for ZeroRefCapabilities {
             fragment_selectors: strings(&["#B", "#L"]),
             symbol_aware: true,
             diff_baseline: true,
-            // Evidence-backed blob expand across engines under a shared CAS
-            // (tests/fixtures/zeroref-conformance-evidence.json). Non-blob portable
-            // refs remain unsupported.
-            cross_engine: true,
+            // Gated until multi-OS ZeroRef evidence is green under
+            // ZEROREF_REQUIRE_ALL_OS (macos+linux+windows). Retained host-local
+            // / Darwin-only matrix rows are not multi-OS proof. Non-blob
+            // portable refs remain unsupported.
+            cross_engine: false,
             portable_ref_kinds: strings(&["blob"]),
             unsupported_portable_ref_kinds: strings(&[
                 "execution",
@@ -152,14 +155,15 @@ impl Default for ZeroRefCapabilities {
                 "unit",
             ]),
             limitations: strings(&[
-                "Cross-engine portability is limited to full-hash ZeroRef v1 blob refs and #B/#L fragments.",
+                "Host-local / same-host shared-CAS blob expand is available; retained host-OS ZeroRef evidence is not multi-OS proof and does not authorize proven cross-engine or multi-OS portability claims.",
+                "cross_engine stays false until ZEROREF_REQUIRE_ALL_OS green evidence exists for macos, linux, and windows.",
+                "Blob-kind protocol scope (full-hash ZeroRef v1 blob refs and #B/#L fragments) is listed; execution/error/session/file/graph/index/unit refs are not portable.",
                 "ZeroRef v1 uses strict byte bounds and line starts with clamped line ends; this fixed protocol rule is not separately negotiated.",
                 "Correctness evidence does not establish zero-copy, latency, or performance claims.",
             ]),
             features: strings(&[
                 "shared-content-addressable-storage",
                 "blob-ref-expand",
-                "cross-engine-blob-expand",
                 "fragment-selectors",
                 "symbol-aware-recovery",
                 "diff-baseline",

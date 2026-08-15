@@ -280,7 +280,7 @@ pub fn expand_schema() -> Value {
             "ref": {
                 "type": "string",
                 "pattern": "^(tz|fz|gz)://",
-                "description": "Exact recovery ref (tz://, fz://, or gz:// blob refs: same-store scheme alias, plus evidence-backed cross-engine blob expand under shared CAS; non-blob portable refs unsupported)."
+                "description": "Exact recovery ref (tz://, fz://, or gz:// blob refs: same-store scheme alias; shared-CAS expand when attached; multi-OS/proven cross-engine portability not advertised pending multi-OS ZeroRef evidence; non-blob portable refs unsupported)."
             },
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),

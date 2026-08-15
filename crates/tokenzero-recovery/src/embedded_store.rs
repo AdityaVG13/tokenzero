@@ -530,8 +530,7 @@ impl TokenZeroStore {
                 "features": [
                     "shared-content-addressable-storage",
                     "blob-ref-expand",
-                    "fragment-selectors",
-                    "cross-engine"
+                    "fragment-selectors"
                 ]
             },
             "recovery": {

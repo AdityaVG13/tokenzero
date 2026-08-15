@@ -7,6 +7,9 @@
 //! binaries are required. CI is the mandatory lane: it builds pinned peers and
 //! invokes this exact test with `--ignored` (CC1-R1-003).
 //!
+//! A Darwin-only local `--ignored` run is a single host-OS row, not multi-OS
+//! evidence. Do not advertise Linux/Windows portability from that log alone.
+//!
 //! Run from the tokenzero repo root:
 //!     env -u TOKENZERO_CACHE_PATH -u ZEROSTACK_STORE_ROOT \
 //!       CARGO_BUILD_JOBS=1 FSZERO_BIN=/path/to/fszero \

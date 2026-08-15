@@ -129,15 +129,18 @@ named_test!(retained_evidence_is_green_or_pending_with_sibling_shas, {
 });
 
 named_test!(
-    capability_descriptor_matches_evidence_backed_blob_cross_engine,
+    capability_descriptor_gates_cross_engine_until_multi_os_evidence,
     {
         let z = CapabilityDescriptor::for_surface(McpToolSurface::Classic).zeroref_v1;
         require! {
             "descriptor.enabled" => z.enabled,
             "descriptor.shared_cas" => z.shared_cas,
             "descriptor.blob_ref_expand" => z.blob_ref_expand,
-            "descriptor.cross_engine" => z.cross_engine,
-            "descriptor.feature" => z.features.iter().any(|f| f == "cross-engine-blob-expand"),
+            // Option B: do not advertise proven multi-OS / cross-engine
+            // portability until ZEROREF_REQUIRE_ALL_OS green evidence exists.
+            "descriptor.cross_engine_gated" => !z.cross_engine,
+            "descriptor.no_cross_engine_feature" =>
+                z.features.iter().all(|f| f != "cross-engine-blob-expand"),
         }
         assert_eq!(z.portable_ref_kinds, ["blob"]);
         for kind in [
@@ -160,6 +163,13 @@ named_test!(
             z.limitations
                 .iter()
                 .any(|value| value.contains("performance claims"))
+        );
+        assert!(
+            z.limitations.iter().any(|value| {
+                value.contains("not multi-OS proof")
+                    || value.contains("ZEROREF_REQUIRE_ALL_OS")
+            }),
+            "limitations must disclose host-local evidence is not multi-OS proof"
         );
         for scheme in ["tz://", "fz://", "gz://"] {
             assert!(
