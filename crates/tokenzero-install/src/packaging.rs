@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokenzero_core::operation_abi::{SEMANTIC_CONTRACT_VERSION, contract_digest_hex};
+use tokenzero_core::operation_abi::{contract_digest_hex, SEMANTIC_CONTRACT_VERSION};
 
 /// Package artifact names (release binaries / packages).
 pub const ARTIFACT_MCP: &str = "tokenzero-mcp";
@@ -315,7 +315,7 @@ pub fn install_surface(
     let prev = load_install_state(prefix)?;
     if let Some(prev) = &prev {
         if prev.surface != surface {
-            let _ = uninstall_surface(prefix);
+            uninstall_surface(prefix)?;
         }
     }
 
@@ -333,10 +333,27 @@ pub fn install_surface(
 /// Remove install state, client config, and shim marker for this prefix.
 pub fn uninstall_surface(prefix: &Path) -> Result<Option<InstallState>, String> {
     let prev = load_install_state(prefix)?;
-    let _ = fs::remove_file(install_state_path(prefix));
-    let _ = fs::remove_file(prefix.join(CLIENT_CONFIG_FILE));
-    let _ = fs::remove_file(prefix.join("shim-target"));
-    Ok(prev)
+    let errors: Vec<String> = [
+        install_state_path(prefix),
+        prefix.join(CLIENT_CONFIG_FILE),
+        prefix.join("shim-target"),
+    ]
+    .iter()
+    .filter_map(|path| remove_install_file(path).err())
+    .collect();
+    if errors.is_empty() {
+        Ok(prev)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn remove_install_file(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove {}: {err}", path.display())),
+    }
 }
 
 /// Detect dual surface selection attempts (env) and fail closed.

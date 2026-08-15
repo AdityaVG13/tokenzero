@@ -199,14 +199,12 @@ fn identity_fields_are_local_and_stored_verbatim_when_supplied() {
         Some(hash_hint(source_hint).as_str())
     );
     assert_eq!(recorded.source_hash.as_deref().unwrap().len(), 16);
-    assert!(
-        recorded
-            .source_hash
-            .as_deref()
-            .unwrap()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    );
+    assert!(recorded
+        .source_hash
+        .as_deref()
+        .unwrap()
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     assert_ne!(recorded.source_hash.as_deref(), Some(source_hint));
 }
 
@@ -616,6 +614,150 @@ fn sync_rebuilds_incompatible_sqlite_cache_schema() {
 }
 
 #[test]
+fn sync_migrates_sqlite_events_missing_tokenizer_id_column() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    record_event(&path, &test_event("read")).unwrap();
+    let sqlite_path = sqlite_path_for_ledger(&path);
+    let conn = Connection::open(&sqlite_path).unwrap();
+    conn.execute_batch(
+        "
+            CREATE TABLE events (
+                line_no INTEGER PRIMARY KEY,
+                schema_version TEXT NOT NULL, event TEXT NOT NULL, timestamp_unix INTEGER NOT NULL,
+                tool TEXT NOT NULL, mode TEXT NOT NULL,
+                raw_tokens INTEGER NOT NULL, visible_tokens INTEGER NOT NULL, recovery_tokens INTEGER NOT NULL,
+                task_lossless INTEGER NOT NULL, cache_hit INTEGER NOT NULL, retry_count INTEGER NOT NULL,
+                failure INTEGER NOT NULL, exact_ref_count INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+                source_hash TEXT, session_id TEXT, call_id TEXT, ref_ids TEXT, record_hash TEXT NOT NULL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let status = sync_jsonl_to_sqlite(&path).unwrap();
+    assert!(status.ok);
+    assert_eq!(status.event_count, 1);
+
+    let conn = Connection::open(&status.sqlite_path).unwrap();
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(events)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        columns.iter().any(|name| name == "tokenizer_id"),
+        "init_sqlite must add tokenizer_id rather than returning Ok with a stale schema: {columns:?}"
+    );
+    let tokenizer_id: String = conn
+        .query_row(
+            "SELECT tokenizer_id FROM events WHERE line_no = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!tokenizer_id.is_empty());
+}
+
+#[test]
+fn sync_rebuilds_sqlite_when_meta_integers_are_corrupt() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let scan = scan_jsonl(&path, |_| Ok(())).unwrap();
+    assert_eq!(scan.event_count, 0);
+    write_sidecar_meta(
+        &meta_path_for_ledger(&path),
+        &PulseSyncMeta {
+            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+            ledger_sha256: scan.ledger_sha256.clone(),
+            event_count: 0,
+            skipped_lines: 0,
+            updated_unix: 1,
+        },
+    )
+    .unwrap();
+    let sqlite_path = sqlite_path_for_ledger(&path);
+    let conn = Connection::open(&sqlite_path).unwrap();
+    conn.execute_batch(
+        "
+            CREATE TABLE events (
+                line_no INTEGER PRIMARY KEY,
+                schema_version TEXT NOT NULL, event TEXT NOT NULL, timestamp_unix INTEGER NOT NULL,
+                tool TEXT NOT NULL, mode TEXT NOT NULL,
+                raw_tokens INTEGER NOT NULL, visible_tokens INTEGER NOT NULL, recovery_tokens INTEGER NOT NULL,
+                task_lossless INTEGER NOT NULL, cache_hit INTEGER NOT NULL, retry_count INTEGER NOT NULL,
+                failure INTEGER NOT NULL, exact_ref_count INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+                source_hash TEXT, session_id TEXT, call_id TEXT, ref_ids TEXT,
+                tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core', record_hash TEXT NOT NULL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            ",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES
+            ('schema_version', ?1),
+            ('source_of_truth', ?2),
+            ('ledger_sha256', ?3),
+            ('event_count', 'nope'),
+            ('skipped_lines', '0'),
+            ('updated_unix', '1')",
+        rusqlite::params![
+            PULSE_SYNC_SCHEMA_VERSION,
+            PULSE_SOURCE_OF_TRUTH,
+            scan.ledger_sha256
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let status = sync_jsonl_to_sqlite(&path).unwrap();
+    assert_eq!(status.event_count, 0);
+    let conn = Connection::open(&status.sqlite_path).unwrap();
+    let event_count: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'event_count'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        event_count, "0",
+        "corrupt integer meta must not be treated as a successful empty cache"
+    );
+}
+
+#[test]
+fn export_fails_closed_on_corrupt_ref_ids_json() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let output = dir.path().join("snapshot.jsonl");
+    record_event(
+        &path,
+        &test_event("read").with_attribution(None, None, vec!["tz://one".into()]),
+    )
+    .unwrap();
+    let status = sync_jsonl_to_sqlite(&path).unwrap();
+    let conn = Connection::open(&status.sqlite_path).unwrap();
+    conn.execute("UPDATE events SET ref_ids = 'not-json'", [])
+        .unwrap();
+    drop(conn);
+
+    let err = export_jsonl(&path, &output).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(
+        err.to_string().contains("ref_ids"),
+        "export must fail on corrupt ref_ids rather than emitting empty refs: {err}"
+    );
+    assert!(!output.exists());
+}
+
+#[test]
 fn sqlite_cache_rebuild_removes_sidecars() {
     let dir = tempdir().unwrap();
     let sqlite_path = dir.path().join("events.sqlite");
@@ -950,24 +1092,18 @@ fn session_ledger_schema_json_has_expected_fields() {
     assert!(schema["entry"]["token_turn_savings"].is_string());
     assert!(schema["privacy"].is_object());
     assert_eq!(schema["privacy"]["upload"], "none");
-    assert!(
-        schema["privacy"]["session_id"]
-            .as_str()
-            .unwrap()
-            .contains("stored verbatim")
-    );
-    assert!(
-        schema["privacy"]["call_id"]
-            .as_str()
-            .unwrap()
-            .contains("stored verbatim")
-    );
-    assert!(
-        schema["privacy"]["ref_ids"]
-            .as_str()
-            .unwrap()
-            .contains("stable local join keys")
-    );
+    assert!(schema["privacy"]["session_id"]
+        .as_str()
+        .unwrap()
+        .contains("stored verbatim"));
+    assert!(schema["privacy"]["call_id"]
+        .as_str()
+        .unwrap()
+        .contains("stored verbatim"));
+    assert!(schema["privacy"]["ref_ids"]
+        .as_str()
+        .unwrap()
+        .contains("stable local join keys"));
     let source_hash = schema["privacy"]["source_hash"].as_str().unwrap();
     for required in ["unvalidated", "first 64 bits", "correlatable", "collision"] {
         assert!(
@@ -975,12 +1111,10 @@ fn session_ledger_schema_json_has_expected_fields() {
             "missing {required:?}: {source_hash}"
         );
     }
-    assert!(
-        schema["entry"]["session_id"]
-            .as_str()
-            .unwrap()
-            .contains("not anonymized")
-    );
+    assert!(schema["entry"]["session_id"]
+        .as_str()
+        .unwrap()
+        .contains("not anonymized"));
     assert!(schema["report"]["total_recovery_adjusted_token_turn_cost"].is_string());
     assert!(schema["report"]["dpmt"].is_string());
     assert!(schema["pricing"]["dpmt"].is_string());

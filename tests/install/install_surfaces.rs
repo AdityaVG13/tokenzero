@@ -5,8 +5,8 @@
 use std::fs;
 
 use tokenzero_install::{
-    InstallWrite, detect_present_agents, doctor, doctor_exit_codes, doctor_fix, doctor_ls,
-    doctor_undo, inspect_client_surface,
+    detect_present_agents, doctor, doctor_exit_codes, doctor_fix, doctor_ls, doctor_undo,
+    inspect_client_surface, InstallWrite,
 };
 
 // ---------- doctor ----------
@@ -124,6 +124,18 @@ fn doctor_undo_restores_empty_cache_parent_and_refuses_nonempty() {
     let undo = doctor_undo(&root, &run_id);
     assert_eq!(undo["status"], "ok", "{undo}");
     assert!(!root.join(".tokenzero").exists());
+    let undo_path = root.join(".doctor/runs").join(&run_id).join("undo.json");
+    assert!(
+        undo_path.is_file(),
+        "successful undo must persist undo.json"
+    );
+    let listed = doctor_ls(&root);
+    let runs = listed["runs"].as_array().expect("runs");
+    assert!(
+        runs.iter()
+            .any(|run| run["run_id"] == run_id && run["has_undo"] == true),
+        "doctor ls must observe the persisted undo artifact: {listed}"
+    );
 
     let fix2 = doctor_fix(&root, None, false);
     assert_eq!(fix2["status"], "ok", "{fix2}");
@@ -137,6 +149,33 @@ fn doctor_undo_restores_empty_cache_parent_and_refuses_nonempty() {
         "created directory is no longer empty; refusing to move later user data"
     );
     assert!(root.join(".tokenzero").join("keep.txt").exists());
+}
+
+#[test]
+fn doctor_undo_reports_partial_when_undo_artifact_cannot_be_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("tz");
+    fs::create_dir_all(&root).unwrap();
+
+    let fix = doctor_fix(&root, None, false);
+    assert_eq!(fix["status"], "ok", "{fix}");
+    let run_id = fix["run_id"].as_str().expect("run_id").to_string();
+    let run_dir = root.join(".doctor/runs").join(&run_id);
+    fs::create_dir(run_dir.join("undo.json")).unwrap();
+
+    let undo = doctor_undo(&root, &run_id);
+    assert_eq!(undo["status"], "partial", "{undo}");
+    assert_eq!(undo["ok"], false, "{undo}");
+    assert_eq!(undo["exit_code"], 2, "{undo}");
+    let errors = undo["artifact_errors"].as_array().expect("artifact_errors");
+    assert!(
+        errors.iter().any(|error| error["artifact"] == "undo"),
+        "must name the undo artifact that failed to persist: {undo}"
+    );
+    assert!(
+        !root.join(".tokenzero").exists(),
+        "directory restore still happens; the report must not call that full success"
+    );
 }
 
 // ---------- inspect ----------

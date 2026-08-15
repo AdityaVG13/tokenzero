@@ -129,3 +129,50 @@ fn install_surface_replaces_peer_config_atomically() {
     assert!(load_install_state(prefix).unwrap().is_none());
     assert!(!prefix.join(CLIENT_CONFIG_FILE).exists());
 }
+
+#[test]
+fn uninstall_surface_is_idempotent_when_files_already_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = uninstall_report(uninstall_surface(dir.path()).unwrap());
+    assert_eq!(report["uninstalled"], false);
+}
+
+#[test]
+fn uninstall_surface_fails_when_a_target_cannot_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path();
+    let bin = prefix.join("bin");
+    fs::write(&bin, b"x").unwrap();
+    install_surface(PackageSurface::Mcp, prefix, &bin).unwrap();
+    let shim = prefix.join("shim-target");
+    fs::remove_file(&shim).unwrap();
+    fs::create_dir(&shim).unwrap();
+    let err = uninstall_surface(prefix).unwrap_err();
+    assert!(err.contains("remove"), "{err}");
+    assert!(
+        shim.exists(),
+        "leftover shim directory must remain after failed uninstall"
+    );
+}
+
+#[test]
+fn install_surface_does_not_succeed_when_prior_surface_cannot_be_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path();
+    let bin = prefix.join("bin");
+    fs::write(&bin, b"x").unwrap();
+    install_surface(PackageSurface::Mcp, prefix, &bin).unwrap();
+    let shim = prefix.join("shim-target");
+    fs::remove_file(&shim).unwrap();
+    fs::create_dir(&shim).unwrap();
+    let err = install_surface(PackageSurface::RawWorker, prefix, &bin).unwrap_err();
+    assert!(err.contains("remove"), "{err}");
+    let state = load_install_state(prefix).unwrap();
+    assert!(
+        state.is_none()
+            || state
+                .as_ref()
+                .is_some_and(|s| s.surface == PackageSurface::Mcp),
+        "must not claim a successful switch to raw-worker: {state:?}"
+    );
+}

@@ -405,10 +405,31 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
             "quarantine_path": quarantine.display().to_string()
         }));
     }
-    let report = doctor_status_report!("tokenzero.doctor.undo.v1", "ok", true, 0;
+    let mut report = doctor_status_report!("tokenzero.doctor.undo.v1", "ok", true, 0;
         "run_id" => resolved_run_id, "mutates" => true, "restored" => restored);
-    if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
-        let _ = atomic_write(&run_dir.join("undo.json"), &bytes);
+    let undo_path = run_dir.join("undo.json");
+    match serde_json::to_vec_pretty(&report) {
+        Ok(bytes) => {
+            if let Err(err) = atomic_write(&undo_path, &bytes) {
+                report["status"] = serde_json::json!("partial");
+                report["ok"] = serde_json::json!(false);
+                report["exit_code"] = serde_json::json!(2);
+                report["artifact_errors"] = serde_json::json!([{
+                    "artifact": "undo",
+                    "path": undo_path.display().to_string(),
+                    "error": err.to_string()
+                }]);
+            }
+        }
+        Err(err) => {
+            report["status"] = serde_json::json!("partial");
+            report["ok"] = serde_json::json!(false);
+            report["exit_code"] = serde_json::json!(2);
+            report["artifact_errors"] = serde_json::json!([{
+                "artifact": "undo",
+                "error": format!("serialize undo report: {err}")
+            }]);
+        }
     }
     report
 }

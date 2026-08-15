@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fs4::{FileExt, TryLockError};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -10,12 +10,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
+use tokenzero_core::{savings_ratio, PULSE_SCHEMA_VERSION};
 
 mod eprocess;
-pub use eprocess::{
-    AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError,
-};
+pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
 
 trait IntoIo<T> {
     fn into_io(self) -> IoResult<T>;
@@ -268,7 +266,7 @@ pub enum PulseFileOpenMode {
 
 #[cfg(unix)]
 pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
-    use rustix::fs::{CWD, Mode, OFlags, openat};
+    use rustix::fs::{openat, Mode, OFlags, CWD};
 
     let access = match mode {
         PulseFileOpenMode::Append => OFlags::WRONLY | OFlags::APPEND,
@@ -559,11 +557,12 @@ fn ref_ids_to_column(ref_ids: &[String]) -> IoResult<Option<String>> {
     }
 }
 
-fn ref_ids_from_column(column: Option<String>) -> Vec<String> {
-    column
-        .as_deref()
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or_default()
+fn ref_ids_from_column(column: Option<String>) -> rusqlite::Result<Vec<String>> {
+    match column.as_deref() {
+        None | Some("") => Ok(Vec::new()),
+        Some(text) => serde_json::from_str(text)
+            .map_err(|err| rusqlite::Error::InvalidColumnName(format!("ref_ids JSON: {err}"))),
+    }
 }
 
 pub fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -594,7 +593,11 @@ fn init_sqlite(conn: &Connection) -> IoResult<()> {
         "ALTER TABLE events ADD COLUMN ref_ids TEXT",
         "ALTER TABLE events ADD COLUMN tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core'",
     ] {
-        let _ = conn.execute(ddl, []);
+        if let Err(err) = conn.execute(ddl, []) {
+            if !err.to_string().contains("duplicate column name") {
+                return Err(err).into_io();
+            }
+        }
     }
     Ok(())
 }
@@ -666,9 +669,9 @@ fn read_sqlite_meta(conn: &Connection) -> IoResult<PulseSyncMeta> {
         schema_version = sqlite_meta_value(conn, "schema_version")?;
         source_of_truth = sqlite_meta_value(conn, "source_of_truth")?;
         ledger_sha256 = sqlite_meta_value(conn, "ledger_sha256")?;
-        event_count = sqlite_meta_value(conn, "event_count")?.parse().unwrap_or(0);
-        skipped_lines = sqlite_meta_value(conn, "skipped_lines")?.parse().unwrap_or(0);
-        updated_unix = sqlite_meta_value(conn, "updated_unix")?.parse().unwrap_or(0);
+        event_count = sqlite_meta_value(conn, "event_count")?.parse().into_io()?;
+        skipped_lines = sqlite_meta_value(conn, "skipped_lines")?.parse().into_io()?;
+        updated_unix = sqlite_meta_value(conn, "updated_unix")?.parse().into_io()?;
     })
 }
 
@@ -842,7 +845,7 @@ fn pulse_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PulseEvent>
         source_hash = row.get(14)?;
         session_id = row.get(15)?;
         call_id = row.get(16)?;
-        ref_ids = ref_ids_from_column(row.get(17)?);
+        ref_ids = ref_ids_from_column(row.get(17)?)?;
         tokenizer_id = row.get(18)?;
     })
 }
