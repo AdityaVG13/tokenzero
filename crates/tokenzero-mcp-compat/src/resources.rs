@@ -1,9 +1,9 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
+use crate::catalog::{resource_specs, tool_clusters_for_surface, tool_docs_for_surface};
+use crate::jsonrpc::{tool_filter_discovery, JsonRpcErrorData};
 use crate::TokenZeroEngine;
-use crate::catalog::{resource_specs, tool_clusters, tool_docs};
-use crate::jsonrpc::{JsonRpcErrorData, tool_filter_discovery};
 use tokenzero_engine::codemode_catalog::codemode_method_catalog;
 
 /// Build the JSON payload string for a resource URI. Used by both the
@@ -25,8 +25,8 @@ pub(crate) fn build_resource_payload(
         "resource://tokenzero/tools" => json!({
             "schema_version": MCP_SCHEMA_VERSION,
             "status": "ok",
-            "tools": tool_docs(),
-            "tool_clusters": tool_clusters(),
+            "tools": tool_docs_for_surface(engine.config.tool_surface),
+            "tool_clusters": tool_clusters_for_surface(engine.config.tool_surface),
             "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
             "next_actions": ["Use canonical tz_* names in durable instructions; aliases exist for client ergonomics."]
         }),
@@ -95,9 +95,8 @@ pub(crate) fn build_resource_payload(
         _ => unreachable!("resource was already resolved"),
     };
 
-    serde_json::to_string_pretty(&payload).map_err(|err| {
-        JsonRpcErrorData::internal_error(format!("serialize resource {uri}: {err}"))
-    })
+    serde_json::to_string_pretty(&payload)
+        .map_err(|err| JsonRpcErrorData::internal_error(format!("serialize resource {uri}: {err}")))
 }
 
 pub(crate) fn read_resource(

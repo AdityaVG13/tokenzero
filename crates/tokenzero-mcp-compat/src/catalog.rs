@@ -2,13 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use tokenzero_core::McpToolSurface;
 use tokenzero_core::operation_abi::{
     batch_schema, cache_pack_schema, codemode_describe_schema, codemode_search_schema, edit_schema,
     execute_code_schema, expand_schema, fetch_schema, glob_schema, no_args_schema, read_schema,
     recall_schema, report_tool_issue_schema, rewrite_schema, search_schema, shell_schema,
     text_schema, tree_schema,
 };
+use tokenzero_core::McpToolSurface;
 
 macro_rules! catalog_json {
     ($($token:tt)*) => { serde_json::json!($($token)*) };
@@ -144,9 +144,13 @@ fn catalog_entries(
 
 /// Long-form catalog served by resource://tokenzero/tools. The tools/list
 /// wire format stays compact; every detail removed from it lives here.
-pub(crate) fn tool_docs() -> Vec<Value> {
+/// Membership matches `tool_listed_on_surface` so Classic does not document
+/// CodeMode-exclusive tools the process will not register or dispatch.
+pub(crate) fn tool_docs_for_surface(surface: McpToolSurface) -> Vec<Value> {
+    use crate::surface_health::surface_includes;
     let canonical = canonical_tool_specs();
     catalog_entries(canonical)
+        .filter(|(_, seed)| surface_includes(surface, seed.name))
         .map(|(name, seed)| {
             let canonical = name == seed.name;
             let (input_schema, output_schema) = if canonical {
@@ -182,7 +186,7 @@ macro_rules! resource_rows {
 pub fn resource_specs() -> Vec<ResourceSpec> {
     resource_rows![
         ( "resource://tokenzero/capabilities", "TokenZero capabilities", "Discover tool clusters, aliases, protocol versions, and next recommended calls.", "application/json", ),
-        ( "resource://tokenzero/tools", "TokenZero tool catalog", "Read the complete tool catalog with schemas and agent-oriented descriptions.", "application/json", ),
+        ( "resource://tokenzero/tools", "TokenZero tool catalog", "Read the tool catalog for this MCP surface with schemas and agent-oriented descriptions.", "application/json", ),
         ( "resource://tokenzero/roots", "TokenZero allowed roots", "Discover file-system roots that read/find/tree/shell cwd operations may access.", "application/json", ),
         ( "resource://tokenzero/modes", "TokenZero render modes", "Discover accepted mode values for compacting, diagnostics, exact recovery, and pass-through output.", "application/json", ),
         ( "resource://tokenzero/codemode", "TokenZero CodeMode catalog", "Full CodeMode method catalog with signatures and discovery prefixes.", "application/json", ),
@@ -269,14 +273,11 @@ pub(crate) fn canonical_tool_names_for_surface(surface: McpToolSurface) -> Vec<S
         .collect()
 }
 
-pub(crate) fn tool_cluster_names() -> Vec<&'static str> {
-    let mut clusters = canonical_tool_specs()
-        .iter()
-        .map(|seed| seed.cluster)
-        .collect::<Vec<_>>();
-    clusters.sort_unstable();
-    clusters.dedup();
-    clusters
+/// Cluster names `tools/list` actually accepts as filters (`material`, `execution`).
+/// Catalog grouping tags such as `edit`, `web`, and `codemode` are not
+/// filter keys and must not be advertised as accepted params.
+pub(crate) fn accepted_tool_cluster_filters() -> &'static [&'static str] {
+    &["material", "execution"]
 }
 
 pub(crate) fn alias_summary(target: &str) -> String {
@@ -311,16 +312,17 @@ fn tool_description(
 // Input schemas are owned by `tokenzero_core::operation_abi` (tokenzero-irx9.1).
 // Catalog prose/docs remain here; structural I/O parity is enforced against the ABI.
 
-pub(crate) fn tool_clusters() -> Value {
-    let canonical = canonical_tool_specs();
+pub(crate) fn tool_clusters_for_surface(surface: McpToolSurface) -> Value {
+    use crate::surface_health::surface_includes;
     let mut by_cluster: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for seed in canonical {
+    for seed in canonical_tool_specs() {
+        if !surface_includes(surface, seed.name) {
+            continue;
+        }
         by_cluster.entry(seed.cluster).or_default().push(seed.name);
     }
-    catalog_json!(
-        by_cluster
-            .into_iter()
-            .map(|(cluster, tools)| catalog_json!({"cluster": cluster, "tools": tools}))
-            .collect::<Vec<_>>()
-    )
+    catalog_json!(by_cluster
+        .into_iter()
+        .map(|(cluster, tools)| catalog_json!({"cluster": cluster, "tools": tools}))
+        .collect::<Vec<_>>())
 }

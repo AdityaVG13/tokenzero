@@ -51,3 +51,23 @@ fn shared_shape_eval_commands_have_unique_path_safe_defaults_and_keep_overrides(
     }
     assert_eq!(defaults.len(), cases.len());
 }
+
+#[test]
+fn mcp_server_about_does_not_advertise_local_codemode_surface() {
+    use clap::CommandFactory;
+    let about = Cli::command()
+        .find_subcommand("mcp-server")
+        .expect("mcp-server subcommand")
+        .get_about()
+        .expect("mcp-server about")
+        .to_string();
+    let lower = about.to_ascii_lowercase();
+    assert!(
+        !lower.contains("codemode surface") && !lower.contains("or codemode"),
+        "mcp-server about must not claim a local CodeMode surface: {about}"
+    );
+    assert!(
+        lower.contains("classic"),
+        "mcp-server about must name the classic compatibility surface: {about}"
+    );
+}

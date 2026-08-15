@@ -1,13 +1,13 @@
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
+use tokenzero_core::{McpToolSurface, MCP_SCHEMA_VERSION};
 
-use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
+use crate::catalog::{accepted_tool_cluster_filters, tool_specs_for_filter_with_health};
 use crate::job_progress;
 use crate::{
-    InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs,
+    call_tool, read_resource, resource_specs, tool_specs, InitializeState, TokenZeroEngine,
 };
 
 macro_rules! wire_json {
@@ -352,10 +352,8 @@ pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) ->
         RpcMethod::ReadResource => {
             let params = rpc_try!(required_params(object, &id, "resources/read", "uri"));
             let uri = rpc_try!(required_string_param(params, &id, "resources/read", "uri"));
-            rpc_try!(
-                read_resource(engine, uri)
-                    .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error))
-            )
+            rpc_try!(read_resource(engine, uri)
+                .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error)))
         }
         RpcMethod::ListPrompts => {
             rpc_try!(optional_cursor_params(object, &id, "prompts/list"));
@@ -397,10 +395,8 @@ pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) ->
             {
                 job_progress::remember_progress_token_value(engine.session_id(), Some(token));
             }
-            let result = rpc_try!(
-                call_tool(engine, name, &args, call_id)
-                    .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error))
-            );
+            let result = rpc_try!(call_tool(engine, name, &args, call_id)
+                .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error)));
             if let Some(job_id) = job_progress::observe_job_launch(engine.session_id(), &result) {
                 follow_job_lifecycle(engine, &job_id);
             }
@@ -663,14 +659,14 @@ impl Default for ToolListFilter {
 impl ToolListFilter {
     fn to_meta(&self, tools_returned: usize) -> Value {
         // Full filter guidance lives in server/discover and the capabilities resource.
-        wire_json!({ "profile": self.cluster.as_deref().unwrap_or("full"), "cluster": self.cluster.as_deref().unwrap_or("all"), "includeAliases": self.include_aliases, "availableClusters": tool_cluster_names(), "toolsReturned": tools_returned })
+        wire_json!({ "profile": self.cluster.as_deref().unwrap_or("full"), "cluster": self.cluster.as_deref().unwrap_or("all"), "includeAliases": self.include_aliases, "availableClusters": accepted_tool_cluster_filters(), "toolsReturned": tools_returned })
     }
 }
 
 pub(crate) fn tool_filter_discovery(surface: McpToolSurface) -> Value {
     match surface {
         McpToolSurface::Classic => {
-            wire_json!({ "surface": "classic", "default": { "profile": "full", "cluster": "all", "includeAliases": true }, "recommended": [ { "profile": "material", "params": {"_meta": {"tokenzero/toolCluster": "material"}}, "description": "Read, search, tree, glob, and exact-ref recovery tools." }, { "profile": "execution", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}, "description": "Shell, ingest, cache, rewrite, discovery, and memory tools." } ], "acceptedParams": { "_meta.tokenzero/toolCluster": tool_cluster_names(), "_meta.tokenzero/includeAliases": "boolean, defaults false when a cluster is selected", "cluster": "top-level compatibility alias for tokenzero/toolCluster", "profile": "top-level compatibility alias; accepted values are full, all, material, execution" } })
+            wire_json!({ "surface": "classic", "default": { "profile": "full", "cluster": "all", "includeAliases": true }, "recommended": [ { "profile": "material", "params": {"_meta": {"tokenzero/toolCluster": "material"}}, "description": "Read, search, tree, glob, and exact-ref recovery tools." }, { "profile": "execution", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}, "description": "Shell, ingest, cache, rewrite, discovery, and memory tools." } ], "acceptedParams": { "_meta.tokenzero/toolCluster": accepted_tool_cluster_filters(), "_meta.tokenzero/includeAliases": "boolean, defaults false when a cluster is selected", "cluster": "top-level compatibility alias for tokenzero/toolCluster", "profile": "top-level compatibility alias; accepted values are full, all, material, execution" } })
         }
         McpToolSurface::CodeMode => {
             wire_json!({ "surface": "codemode", "default": {"profile": "codemode", "cluster": "codemode", "includeAliases": false}, "recommended": [{ "profile": "codemode", "params": {}, "description": "Exactly tz_execute_code, tz_codemode_search, and tz_codemode_describe." }], "acceptedParams": {} })
@@ -907,9 +903,13 @@ impl JsonRpcErrorData {
 
     fn unknown_tool_cluster(cluster: &str) -> Self {
         let mut available_options = vec!["all".to_string(), "full".to_string()];
-        available_options.extend(tool_cluster_names().into_iter().map(str::to_string));
+        available_options.extend(
+            accepted_tool_cluster_filters()
+                .iter()
+                .map(|cluster| (*cluster).to_string()),
+        );
         let suggestions = similar_options(cluster, &available_options);
-        recoverable_error!("unknown_tool_cluster", "INVALID_ARGUMENT", format!("unknown tools/list cluster: {cluster}"), "Use tools/list params._meta.tokenzero/toolCluster with one of available_options, or omit it for the full catalog.".into(); (available_options); (suggestions); [{"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "material"}}}, {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}}]; {"entity_type": "tool_cluster", "provided": cluster, "parameter": "cluster", "available_clusters": tool_cluster_names()})
+        recoverable_error!("unknown_tool_cluster", "INVALID_ARGUMENT", format!("unknown tools/list cluster: {cluster}"), "Use tools/list params._meta.tokenzero/toolCluster with one of available_options, or omit it for the full catalog.".into(); (available_options); (suggestions); [{"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "material"}}}, {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}}]; {"entity_type": "tool_cluster", "provided": cluster, "parameter": "cluster", "available_clusters": accepted_tool_cluster_filters()})
     }
 
     fn unknown_method(method: &str) -> Self {
@@ -1172,13 +1172,11 @@ mod deep_pass_tests {
         let init: Value = serde_json::from_str(&init).unwrap();
         assert!(init.get("result").is_some(), "{init:#}");
 
-        assert!(
-            handle_jsonrpc(
-                &engine,
-                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            )
-            .is_none()
-        );
+        assert!(handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )
+        .is_none());
 
         let listed = handle_jsonrpc(
             &engine,
@@ -1189,6 +1187,54 @@ mod deep_pass_tests {
         assert!(
             listed.get("result").is_some(),
             "poisoned initialize must still reach Ready: {listed:#}"
+        );
+    }
+
+    #[test]
+    fn classic_tools_list_meta_does_not_advertise_unfilterable_clusters() {
+        let (_dir, engine) = test_engine();
+        engine.mark_lifecycle_ready_for_tests();
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&listed).unwrap();
+        let clusters = parsed["result"]["_meta"]["tokenzero/toolFilter"]["availableClusters"]
+            .as_array()
+            .expect("tools/list must advertise availableClusters");
+        let clusters: Vec<&str> = clusters.iter().filter_map(Value::as_str).collect();
+        assert_eq!(clusters, ["material", "execution"]);
+        let names: Vec<&str> = parsed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        for exclusive in [
+            "tz_execute_code",
+            "tz_codemode_search",
+            "tz_codemode_describe",
+        ] {
+            assert!(
+                !names.contains(&exclusive),
+                "Classic tools/list must not list {exclusive}: {names:?}"
+            );
+        }
+
+        let rejected = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"tokenzero/toolCluster":"codemode"}}}"#,
+        )
+        .unwrap();
+        let rejected: Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(rejected["error"]["data"]["kind"], "unknown_tool_cluster");
+        let available = rejected["error"]["data"]["available_clusters"]
+            .as_array()
+            .unwrap();
+        assert!(
+            !available.iter().any(|cluster| cluster == "codemode"),
+            "unknown_tool_cluster must not advertise the rejected cluster as available: {available:?}"
         );
     }
 }

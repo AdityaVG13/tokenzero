@@ -2,20 +2,20 @@
 //! capabilities, and ZeroRef v1 features served by `resource://tokenzero/capabilities`.
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
+use tokenzero_core::{McpToolSurface, MCP_SCHEMA_VERSION};
 
 use crate::catalog::{
-    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
-    tool_clusters,
+    canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
+    tool_clusters_for_surface, ResourceSpec,
 };
-use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
-use tokenzero_engine::codemode_wire::{OperationClass, classify_descriptor_tool};
+use crate::jsonrpc::{tool_filter_discovery, SUPPORTED_PROTOCOL_VERSIONS};
+use tokenzero_engine::codemode_wire::{classify_descriptor_tool, OperationClass};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.
-pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.4";
+pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.5";
 
 /// Machine-readable policy descriptor enumerating every TokenZero tool,
 /// capability tag, and ZeroRef v1 feature.
@@ -87,7 +87,7 @@ impl CapabilityDescriptor {
     pub fn for_surface(surface: McpToolSurface) -> Self {
         let canonical_tools = canonical_tool_names_for_surface(surface);
         let aliases = alias_map_for_surface(surface);
-        let tools = build_all_tool_capabilities();
+        let tools = build_tool_capabilities_for_surface(surface);
         Self {
             descriptor_version: PR18_DESCRIPTOR_VERSION.to_string(),
             schema_version: MCP_SCHEMA_VERSION.to_string(),
@@ -98,7 +98,7 @@ impl CapabilityDescriptor {
             tool_surface: surface.as_str().to_string(),
             canonical_tools,
             aliases,
-            tool_clusters: tool_clusters(),
+            tool_clusters: tool_clusters_for_surface(surface),
             tool_filtering: tool_filter_discovery(surface),
             tools,
             zeroref_v1: ZeroRefCapabilities::default(),
@@ -188,9 +188,11 @@ fn alias_map_for_surface(surface: McpToolSurface) -> BTreeMap<String, String> {
     map
 }
 
-fn build_all_tool_capabilities() -> Vec<ToolCapability> {
+fn build_tool_capabilities_for_surface(surface: McpToolSurface) -> Vec<ToolCapability> {
+    use crate::surface_health::surface_includes;
     canonical_tool_specs()
         .iter()
+        .filter(|seed| surface_includes(surface, seed.name))
         .map(|seed| ToolCapability {
             name: seed.name.to_string(),
             cluster: seed.cluster.to_string(),
