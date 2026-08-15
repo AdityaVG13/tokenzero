@@ -604,7 +604,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "table": "mcp_tools",
             "behavioral_parity": "not_claimed",
             "schema_relationship": "operation_abi_args_surface_specific_envelopes",
-            "availability_rule": "available_in_this_build is true only when at least one listed MCP surface is compiled",
+            "availability_rule": "available_in_this_build is true only for classic FastMCP tools when the surface-mcp feature is compiled; CodeMode-only control tools stay false on this CLI",
             "name_contract": {
                 "mcp": "tz_* tool names",
                 "cli": "bare verbs selected by cli_verb",

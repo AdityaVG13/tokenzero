@@ -189,7 +189,7 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
         ( "resource://tokenzero/tools", "TokenZero tool catalog", "Read the tool catalog for this MCP surface with schemas and agent-oriented descriptions.", "application/json", ),
         ( "resource://tokenzero/roots", "TokenZero allowed roots", "Discover file-system roots that read/find/tree/shell cwd operations may access.", "application/json", ),
         ( "resource://tokenzero/modes", "TokenZero render modes", "Discover accepted mode values for compacting, diagnostics, exact recovery, and pass-through output.", "application/json", ),
-        ( "resource://tokenzero/codemode", "TokenZero CodeMode catalog", "Full CodeMode method catalog with signatures and discovery prefixes.", "application/json", ),
+        ( "resource://tokenzero/codemode", "TokenZero CodeMode catalog", "Aggregate-host CodeMode binding catalog with signatures and discovery prefixes. Classic MCP does not register or dispatch these as tools.", "application/json", ),
         ( "resource://tokenzero/cache", "TokenZero cache state", "Discover local recovery-cache and shell-output retention configuration without exposing payloads.", "application/json", ),
         ( "resource://tokenzero/session-boot", "TokenZero session boot", "Read the bounded manifest+delta boot capsule and component token attribution.", "application/json", ),
         ( "resource://tokenzero/metrics", "TokenZero tool metrics", "Read per-tool call counts, error counts, slow-call counts, and latency (this session plus cross-session cumulative).", "application/json", ),

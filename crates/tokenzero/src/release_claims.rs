@@ -428,6 +428,7 @@ if !covered { push_unique_reason(&mut reasons, "adapter approval artifact rows d
 artifact_gate! { evaluate_recovery_claim_gate, "recovery_artifact", "byte-perfect recovery proof not attached to public claim", |artifact| {
 let rows = artifact["normal_rows"].as_array();
 let reasons = failures! {
+        artifact["schema_version"] != "tokenzero.exact_recovery_audit.v1" => "recovery artifact schema mismatch";
         artifact["ok"] != true => "recovery artifact did not pass";
         !rows.is_some_and(|rows| !rows.is_empty() && rows.iter().all(|row| row["all_refs_recover"] == true)) => "byte-perfect recovery proof not attached to public claim";
     };
@@ -437,6 +438,7 @@ let reasons = failures! {
 artifact_gate! { evaluate_task_success_claim_gate, "task_success_artifact", "task-success proof not attached to public claim", |artifact| {
 let rows = artifact["rows"].as_array();
 let reasons = failures! {
+        artifact["schema_version"] != "tokenzero.one_shot_eval.v1" => "task-success artifact schema mismatch";
         artifact["ok"] != true || artifact["critical_miss_rate"] != 0.0 || rows.is_none_or(|rows| rows.is_empty() || !rows.iter().all(|row| row["task_success"] == true)) => "task-success proof not attached to public claim";
     };
 (reasons, object!({"schema_version": artifact["schema_version"], "critical_miss_rate": artifact["critical_miss_rate"], "row_count": rows.map_or(0,Vec::len)}))
@@ -444,7 +446,99 @@ let reasons = failures! {
 
 artifact_gate! { evaluate_os_claim_gate, "os_artifact", "OS artifact set not attached to public claim", |artifact| {
 let reasons = failures! {
+        artifact["schema_version"] != "tokenzero.os_reach_audit.v1" => "OS artifact schema mismatch";
+        artifact["all_release_oses_run"] != true => "OS artifact set missing required release OS rows";
         artifact["public_os_claim_approved"] != true => "OS artifact set not approved for public claim";
     };
 (reasons, object!({"schema_version": artifact["schema_version"], "all_release_oses_run": artifact["all_release_oses_run"], "public_os_claim_approved": artifact["public_os_claim_approved"]}))
 } }
+
+#[cfg(test)]
+mod honesty_gate_tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn write_json(dir: &Path, name: &str, value: &serde_json::Value) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, serde_json::to_vec(value).expect("serialize fixture")).unwrap();
+        path
+    }
+
+    fn reasons(gate: &Value) -> Vec<String> {
+        gate["reasons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|reason| reason.as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn recovery_gate_rejects_green_rows_with_wrong_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_json(
+            dir.path(),
+            "recovery.json",
+            &json!({
+                "schema_version": "not.a.real.schema",
+                "ok": true,
+                "normal_rows": [{"all_refs_recover": true}]
+            }),
+        );
+        let gate = evaluate_recovery_claim_gate(Some(&path)).unwrap();
+        assert_eq!(gate["pass"], false, "{gate}");
+        assert!(
+            reasons(&gate)
+                .iter()
+                .any(|reason| reason == "recovery artifact schema mismatch"),
+            "{gate}"
+        );
+    }
+
+    #[test]
+    fn os_gate_rejects_approved_flag_without_all_release_oses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_json(
+            dir.path(),
+            "os.json",
+            &json!({
+                "schema_version": "tokenzero.os_reach_audit.v1",
+                "all_release_oses_run": false,
+                "public_os_claim_approved": true
+            }),
+        );
+        let gate = evaluate_os_claim_gate(Some(&path)).unwrap();
+        assert_eq!(gate["pass"], false, "{gate}");
+        assert!(
+            reasons(&gate)
+                .iter()
+                .any(|reason| reason == "OS artifact set missing required release OS rows"),
+            "{gate}"
+        );
+    }
+
+    #[test]
+    fn task_success_gate_rejects_wrong_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_json(
+            dir.path(),
+            "task.json",
+            &json!({
+                "schema_version": "tokenzero.wrong.v1",
+                "ok": true,
+                "critical_miss_rate": 0.0,
+                "rows": [{"task_success": true}]
+            }),
+        );
+        let gate = evaluate_task_success_claim_gate(Some(&path)).unwrap();
+        assert_eq!(gate["pass"], false, "{gate}");
+        assert!(
+            reasons(&gate)
+                .iter()
+                .any(|reason| reason == "task-success artifact schema mismatch"),
+            "{gate}"
+        );
+    }
+}

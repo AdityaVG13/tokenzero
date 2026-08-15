@@ -57,6 +57,7 @@ rpc_methods! {
     ListResourceTemplates => "resources/templates/list",
     ReadResource => "resources/read",
     ListPrompts => "prompts/list",
+    GetPrompt => "prompts/get",
     SetLoggingLevel => "logging/setLevel",
     ListTools => "tools/list",
     CallTool => "tools/call",
@@ -72,6 +73,7 @@ impl RpcMethod {
                 | Self::ListResourceTemplates
                 | Self::ReadResource
                 | Self::ListPrompts
+                | Self::GetPrompt
                 | Self::SetLoggingLevel
         )
     }
@@ -371,6 +373,14 @@ pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) ->
         RpcMethod::ListPrompts => {
             rpc_try!(optional_cursor_params(object, &id, "prompts/list"));
             wire_json!({"prompts": []})
+        }
+        RpcMethod::GetPrompt => {
+            let params = rpc_try!(required_params(object, &id, "prompts/get", "name"));
+            let name = rpc_try!(required_string_param(params, &id, "prompts/get", "name"));
+            return Some(jsonrpc_invalid_params_error(
+                id,
+                JsonRpcErrorData::unknown_prompt(name),
+            ));
         }
         RpcMethod::SetLoggingLevel => {
             let params = rpc_try!(required_object_params(object, &id, "logging/setLevel"));
@@ -682,7 +692,7 @@ pub(crate) fn tool_filter_discovery(surface: McpToolSurface) -> Value {
             wire_json!({ "surface": "classic", "default": { "profile": "full", "cluster": "all", "includeAliases": true }, "recommended": [ { "profile": "material", "params": {"_meta": {"tokenzero/toolCluster": "material"}}, "description": "Read, search, tree, glob, and exact-ref recovery tools." }, { "profile": "execution", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}, "description": "Shell, ingest, cache, rewrite, discovery, and memory tools." } ], "acceptedParams": { "_meta.tokenzero/toolCluster": accepted_tool_cluster_filters(), "_meta.tokenzero/includeAliases": "boolean, defaults false when a cluster is selected", "cluster": "top-level compatibility alias for tokenzero/toolCluster", "profile": "top-level compatibility alias; accepted values are full, all, material, execution" } })
         }
         McpToolSurface::CodeMode => {
-            wire_json!({ "surface": "codemode", "default": {"profile": "codemode", "cluster": "codemode", "includeAliases": false}, "recommended": [{ "profile": "codemode", "params": {}, "description": "Exactly tz_execute_code, tz_codemode_search, and tz_codemode_describe." }], "acceptedParams": {} })
+            wire_json!({ "surface": "codemode", "default": {"profile": "codemode", "cluster": "codemode", "includeAliases": false}, "recommended": [{ "profile": "codemode", "params": {}, "description": "tz_execute_code, tz_codemode_search, tz_codemode_describe, and tz_report_tool_issue." }], "acceptedParams": {} })
         }
     }
 }
@@ -693,7 +703,7 @@ fn mcp_initialize_instructions(surface: McpToolSurface) -> &'static str {
             "TokenZero compacts tool output and stores exact bytes behind tz:// refs; recover them with tz_expand. Short tool names (read, find, grep, glob, tree, shell, ingest, expand, mem, cache_pack, rewrite, discover) are aliases of the tz_* tools. Full per-tool docs: resources/read resource://tokenzero/tools."
         }
         McpToolSurface::CodeMode => {
-            "TokenZero CodeMode exposes exactly tz_execute_code, tz_codemode_search, and tz_codemode_describe. Per-op MCP tools are unavailable in this mode."
+            "TokenZero CodeMode lists tz_execute_code, tz_codemode_search, tz_codemode_describe, and tz_report_tool_issue. Per-op MCP tools are unavailable in this mode."
         }
     }
 }
@@ -882,6 +892,11 @@ impl JsonRpcErrorData {
                 "Set params.level to a supported logging level.",
                 wire_json!([{"method": "logging/setLevel", "params": {"level": "info"}}]),
             ),
+            ("prompts/get", "name") => (
+                Vec::new(),
+                "Call prompts/list; this server's prompt catalog is empty.",
+                wire_json!([{"method": "prompts/list", "params": {}}]),
+            ),
             _ => (
                 Vec::new(),
                 "Add the missing parameter and retry with object params.",
@@ -912,6 +927,10 @@ impl JsonRpcErrorData {
     pub(crate) fn unknown_resource(uri: &str) -> Self {
         let available_options = resource_uris();
         recoverable_error!("unknown_resource", "NOT_FOUND", format!("unknown resource: {uri}"), "Call resources/list, then retry resources/read with one of available_options as params.uri.".into(); (available_options); (similar_options(uri, &resource_uris())); [{"method": "resources/list", "params": {}}]; {"entity_type": "resource", "provided": uri, "uri": uri, "available_resources": resource_uris()})
+    }
+
+    fn unknown_prompt(name: &str) -> Self {
+        recoverable_error!("unknown_prompt", "NOT_FOUND", format!("unknown prompt: {name}"), "Call prompts/list; this server advertises the prompts capability with an empty catalog.".into(); []; []; [{"method": "prompts/list", "params": {}}]; {"entity_type": "prompt", "provided": name, "name": name, "available_prompts": []})
     }
 
     fn unknown_tool_cluster(cluster: &str) -> Self {
@@ -1250,6 +1269,101 @@ mod deep_pass_tests {
         assert!(
             !available.iter().any(|cluster| cluster == "codemode"),
             "unknown_tool_cluster must not advertise the rejected cluster as available: {available:?}"
+        );
+    }
+
+    #[test]
+    fn advertised_prompts_capability_implements_prompts_get() {
+        let (_dir, engine) = test_engine();
+        let init = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"honesty","version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let init: Value = serde_json::from_str(&init).unwrap();
+        assert!(
+            init["result"]["capabilities"]["prompts"].is_object(),
+            "initialize advertises prompts: {init:#}"
+        );
+        assert!(handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )
+        .is_none());
+
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}}"#,
+        )
+        .unwrap();
+        let listed: Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(
+            listed["result"]["prompts"].as_array().map(Vec::len),
+            Some(0),
+            "{listed:#}"
+        );
+
+        let got = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"missing"}}"#,
+        )
+        .unwrap();
+        let got: Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(got["error"]["code"], -32602, "{got:#}");
+        assert_eq!(got["error"]["data"]["kind"], "unknown_prompt", "{got:#}");
+        assert_eq!(got["error"]["data"]["provided"], "missing", "{got:#}");
+        assert_eq!(
+            got["error"]["data"]["available_prompts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "{got:#}"
+        );
+    }
+
+    #[test]
+    fn codemode_initialize_instructions_include_report_tool_issue() {
+        use tokenzero_core::McpToolSurface;
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        engine.config.tool_surface = McpToolSurface::CodeMode;
+        let init = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"honesty","version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let init: Value = serde_json::from_str(&init).unwrap();
+        let instructions = init["result"]["instructions"].as_str().unwrap_or("");
+        assert!(
+            instructions.contains("tz_report_tool_issue"),
+            "CodeMode initialize must not claim a three-tool catalog: {instructions}"
+        );
+        assert!(
+            !instructions.contains("exactly tz_execute_code"),
+            "CodeMode initialize must not use exclusive 'exactly' language that omits report: {instructions}"
+        );
+
+        assert!(handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )
+        .is_none());
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let listed: Value = serde_json::from_str(&listed).unwrap();
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"tz_report_tool_issue"),
+            "CodeMode tools/list must include the advertised report tool: {names:?}"
         );
     }
 
