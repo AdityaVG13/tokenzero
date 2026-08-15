@@ -375,16 +375,16 @@ impl TokenZeroEngine {
             })
         } else {
             // Capsule admission (ZS-VIEW-006): the default policy keeps the
-            // legacy fixed byte threshold byte-for-byte; the HorizonCost
-            // policy routes the same payload through the estimator. The
-            // blob/file refs recorded above provide the ref handling cost.
+            // legacy fixed byte threshold byte-for-byte; HorizonCost requires
+            // labeled expansion/horizon and refuses when those are missing.
             let capsule_mode = match self.read_payload_admission(
                 text.len(),
                 mode,
                 exact_ref_token_count(&acc.refs),
             ) {
-                LocalPayloadPolicy::Inline => mode,
-                LocalPayloadPolicy::ExactRef => Mode::Exact,
+                Ok(LocalPayloadPolicy::Inline) => mode,
+                Ok(LocalPayloadPolicy::ExactRef) => Mode::Exact,
+                Err(response) => return Err(response),
             };
             tokenzero_core::make_capsule_with_recovery_ref(
                 &text,
@@ -581,34 +581,37 @@ impl TokenZeroEngine {
 
 impl TokenZeroEngine {
     /// Capsule admission for one read payload (ZS-VIEW-006). The default
-    /// `ByteThreshold` policy is the legacy fixed-threshold rule, unchanged;
-    /// `HorizonCost` consults the estimator with replay-default expansion
-    /// probability and horizon (per-call predictions are the estimator
-    /// contract, fed here once replay wiring lands).
+    /// `ByteThreshold` policy is the legacy fixed-threshold rule, unchanged.
+    /// `HorizonCost` consults the estimator only with per-call or
+    /// replay-derived expansion probability and horizon. This read path has
+    /// neither (`ServeOptions` carries only `fresh`; no replay estimator is
+    /// wired), so Auto-mode HorizonCost is refused instead of unlabeled
+    /// `AdmissionEstimator` defaults. Explicit modes stay inline without
+    /// consulting the estimator.
     fn read_payload_admission(
         &self,
         payload_bytes: usize,
         mode: Mode,
-        handling_cost_tokens: usize,
-    ) -> LocalPayloadPolicy {
-        let result = match self.config.admission_policy {
-            AdmissionPolicy::ByteThreshold => local_payload_policy(
+        _handling_cost_tokens: usize,
+    ) -> Result<LocalPayloadPolicy, ToolResponse> {
+        match self.config.admission_policy {
+            AdmissionPolicy::ByteThreshold => Ok(local_payload_policy(
                 payload_bytes,
                 self.config.capsule_exact_ref_threshold_bytes,
                 mode,
                 true,
-            ),
-            AdmissionPolicy::HorizonCost => local_payload_policy_estimated(
-                payload_bytes,
-                mode,
-                true,
-                &self.config.admission_estimator,
-                None,
-                None,
-                handling_cost_tokens as u64,
-            ),
-        };
-        result
+            )),
+            AdmissionPolicy::HorizonCost if mode != Mode::Auto => Ok(LocalPayloadPolicy::Inline),
+            AdmissionPolicy::HorizonCost => Err(failure_response(
+                "read",
+                "horizon_cost_refused",
+                "HorizonCost admission refused: expansion probability and \
+                 horizon estimates are missing",
+                Some(
+                    "use ByteThreshold, or supply per-call expansion_probability_milli and horizon",
+                ),
+            )),
+        }
     }
 }
 

@@ -46,6 +46,59 @@ fn read_missing_file_names_no_such_file_hint() {
 }
 
 #[test]
+fn auto_horizon_cost_without_estimates_fails_loud() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payload.txt");
+    fs::write(&path, "abcdefghij").unwrap();
+
+    let mut config = EngineConfig::for_root(dir.path());
+    config.admission_policy = AdmissionPolicy::HorizonCost;
+    config.session_dedup = false;
+    let engine = TokenZeroEngine::new(config);
+    let response = engine.read(&[path], Mode::Auto, None, None, false, 1, 4000);
+    let error = response.error.expect("HorizonCost without estimates must fail");
+    assert_eq!(error.code, "horizon_cost_refused");
+    assert!(
+        error.message.contains("expansion probability"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("horizon"), "{}", error.message);
+}
+
+#[test]
+fn labeled_horizon_cost_estimates_drive_admission_without_defaults() {
+    let estimator = AdmissionEstimator {
+        exact_ref_threshold_bytes: 40 * 1024,
+        default_expansion_probability_milli: 0,
+        default_horizon: 100,
+    };
+    // 16 KB ~ 4096 tokens. Labeled p=0, horizon=1, handling=10 admits.
+    // Estimator defaults (p=0, horizon=100) must not be consulted: a
+    // labeled always-expand p=1000 with the same handling stays inline.
+    let admitted = local_payload_policy_estimated(
+        16 * 1024,
+        Mode::Auto,
+        true,
+        &estimator,
+        0,
+        1,
+        10,
+    );
+    assert_eq!(admitted, LocalPayloadPolicy::ExactRef);
+    let refused = local_payload_policy_estimated(
+        16 * 1024,
+        Mode::Auto,
+        true,
+        &estimator,
+        1000,
+        1,
+        10,
+    );
+    assert_eq!(refused, LocalPayloadPolicy::Inline);
+}
+
+#[test]
 fn read_directory_names_use_tree_hint() {
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
