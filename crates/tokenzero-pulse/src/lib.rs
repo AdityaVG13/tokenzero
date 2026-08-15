@@ -13,7 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
 mod eprocess;
-pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
+pub use eprocess::{
+    AnytimeFailureMonitor, EProcessSnapshot, FragmentServeError, MonitorConfigError,
+    serve_fragment_after_digest,
+};
 
 trait IntoIo<T> {
     fn into_io(self) -> IoResult<T>;
