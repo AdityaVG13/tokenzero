@@ -846,6 +846,9 @@ struct RefIndexEntry {
     last_expanded_ts: Option<u128>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     metadata_migrated: bool,
+    /// FNV-1a of the JSON without this field. Torn or truncated lines fail it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit: Option<u32>,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -3265,7 +3268,14 @@ fn parsed_ref_index_entries(text: &str) -> impl Iterator<Item = RefIndexEntry> +
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map_while(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| {
+            let entry: RefIndexEntry = serde_json::from_str(line).ok()?;
+            match entry.commit {
+                None => Some(entry),
+                Some(commit) if commit == ref_index_line_commit(&entry) => Some(entry),
+                Some(_) => None,
+            }
+        })
 }
 
 fn ref_index_store_path(store_path: &Path) -> Option<PathBuf> {
@@ -3287,9 +3297,41 @@ fn locked_ref_index_shard(root: &Path, ref_id: &str) -> Option<(PathBuf, Persist
 }
 
 fn compact_ref_index_if_needed(shard: &Path) {
-    if fs::metadata(shard).is_ok_and(|meta| meta.len() > REF_INDEX_MAX_BYTES) {
-        let _ = compact_ref_index_shard(shard);
+    let Ok(meta) = fs::metadata(shard) else {
+        return;
+    };
+    if meta.len() <= REF_INDEX_MAX_BYTES {
+        return;
     }
+    let Some(text) = ref_index_text(shard) else {
+        return;
+    };
+    let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+    if lines == 0 {
+        return;
+    }
+    let live = newest_ref_index_entries(&text, None).len();
+    let stale = lines.saturating_sub(live);
+    // Append-only until most of the shard is superseded. Rewrite-compaction
+    // at the 1MiB threshold is what a kill mid-rename used to risk.
+    if (stale as f64) / (lines as f64) < REF_INDEX_RECLAIM_STALE_RATIO {
+        return;
+    }
+    let _ = compact_ref_index_shard(shard);
+}
+
+const REF_INDEX_RECLAIM_STALE_RATIO: f64 = 0.75;
+
+fn ref_index_line_commit(entry: &RefIndexEntry) -> u32 {
+    let mut hashed = entry.clone();
+    hashed.commit = None;
+    let bytes = serde_json::to_vec(&hashed).unwrap_or_default();
+    let mut hash = 2_166_136_261u32;
+    for byte in bytes {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash
 }
 
 fn append_blob_refs_to_ref_index(
@@ -3354,7 +3396,10 @@ fn append_ref_index_line(
             && shard
                 .parent()
                 .is_some_and(|root| shard == ref_index_shard_path(root, ref_id)),
+        commit: None,
     };
+    let mut entry = entry;
+    entry.commit = Some(ref_index_line_commit(&entry));
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
     private_open_options()
@@ -3446,7 +3491,10 @@ fn write_ref_index_entries<'a>(
     {
         let mut file = create_private_new(&tmp)?;
         for entry in entries {
-            serde_json::to_writer(&mut file, entry)?;
+            let mut stamped = entry.clone();
+            stamped.commit = None;
+            stamped.commit = Some(ref_index_line_commit(&stamped));
+            serde_json::to_writer(&mut file, &stamped)?;
             file.write_all(b"\n")?;
         }
     }
