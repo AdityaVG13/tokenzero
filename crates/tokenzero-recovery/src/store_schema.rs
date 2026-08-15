@@ -161,12 +161,19 @@ pub fn write_actioncache_segment(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     let _lock = lock_exclusive(dest)?;
     let tmp = unique_tmp_path(dest);
     let commit = commit_for_tmp(&tmp);
-    fs::write(&tmp, bytes)?;
-    let digest = hex_sha256(bytes);
-    fs::write(&commit, digest.as_bytes())?;
-    fs::rename(&tmp, dest)?;
-    let _ = fs::remove_file(commit);
-    Ok(())
+    let result = (|| {
+        fs::write(&tmp, bytes)?;
+        let digest = hex_sha256(bytes);
+        fs::write(&commit, digest.as_bytes())?;
+        fs::rename(&tmp, dest)?;
+        let _ = fs::remove_file(&commit);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&commit);
+    }
+    result
 }
 
 /// Recover a segment after crash: promote a committed temp, discard an uncommitted one.
@@ -373,6 +380,26 @@ mod shadow_lock_tests {
             lines,
             workers * per_worker,
             "ring trim under lock must not drop concurrent appends"
+        );
+    }
+
+    #[test]
+    fn write_segment_unlinks_sidecars_when_rename_fails() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("entry.json");
+        fs::create_dir_all(&dest).unwrap();
+        let err = write_actioncache_segment(&dest, b"{}").expect_err("rename onto directory");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name();
+                let name = name.to_string_lossy();
+                (name.ends_with(".tmp") || name.ends_with(".commit")).then(|| name.into_owned())
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed segment write must unlink tmp/commit ({err}): {leftovers:?}"
         );
     }
 }

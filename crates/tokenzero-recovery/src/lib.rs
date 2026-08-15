@@ -906,8 +906,14 @@ fn write_ordinal_generation(path: &Path, generation: u64) -> Result<(), Recovery
         let tmp = recovery_tmp_path(&destination);
         match create_private_new(&tmp) {
             Ok(mut file) => {
-                writeln!(file, "{generation}")?;
-                file.sync_all()?;
+                let write_result = (|| {
+                    writeln!(file, "{generation}")?;
+                    file.sync_all()
+                })();
+                if let Err(error) = write_result {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error.into());
+                }
                 if let Err(error) = fs::rename(&tmp, &destination) {
                     let _ = fs::remove_file(&tmp);
                     return Err(error.into());
@@ -1564,13 +1570,24 @@ impl RecoveryStore {
         if shrunk && let Some(path) = path.as_ref() {
             // persist() can journal-append an empty session delta and leave
             // the snapshot carrying the old inline bodies. Rewrite the root.
-            self.publish_snapshot(path)?;
+            // Keep leases on persist failure so GC cannot collect objects
+            // the in-memory markers still name.
+            if let Err(err) = self.publish_snapshot(path) {
+                return Err(err);
+            }
         }
         if path.is_some() {
+            let mut release_err = None;
             for op in &leased_ops {
-                cas.release_lease(&project, op).map_err(|err| {
-                    io::Error::other(format!("release CAS publish lease {op}: {err}"))
-                })?;
+                if let Err(err) = cas.release_lease(&project, op) {
+                    release_err = release_err.or(Some((op.clone(), err)));
+                }
+            }
+            if let Some((op, err)) = release_err {
+                return Err(io::Error::other(format!(
+                    "release CAS publish lease {op}: {err}"
+                ))
+                .into());
             }
         }
         if failed > 0 {
@@ -3618,8 +3635,10 @@ fn write_ref_index_entries<'a>(
 ) -> Result<(), RecoveryError> {
     create_ref_index_dir(shard.parent().unwrap_or_else(|| Path::new(".")))?;
     let tmp = recovery_tmp_path(shard);
-    {
+    let mut created = false;
+    let result = (|| {
         let mut file = create_private_new(&tmp)?;
+        created = true;
         for entry in entries {
             let mut stamped = entry.clone();
             stamped.commit = None;
@@ -3627,8 +3646,14 @@ fn write_ref_index_entries<'a>(
             serde_json::to_writer(&mut file, &stamped)?;
             file.write_all(b"\n")?;
         }
+        drop(file);
+        fs::rename(&tmp, shard)?;
+        Ok(())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, shard).map_err(RecoveryError::from)
+    result
 }
 
 pub(crate) fn ref_index_blob_lru(ref_id: &str) -> (u64, u128) {
@@ -4943,5 +4968,43 @@ mod input_validation_boundary_tests {
         }
         let hex = ref_index_shard_path(root, "tz://blob/abcdef0123456789");
         assert_eq!(hex.file_name().and_then(|n| n.to_str()), Some("abc.ndjson"));
+    }
+}
+
+#[cfg(test)]
+mod tmp_cleanup_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn write_ref_index_entries_unlinks_tmp_when_rename_fails() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path().join("abc.ndjson");
+        fs::create_dir_all(&shard).unwrap();
+        let entry = RefIndexEntry {
+            ref_id: "tz://blob/abcdef0123456789".into(),
+            store_path: "/tmp/store".into(),
+            ts: 1,
+            content_class: ContentClass::Unknown,
+            expanded: false,
+            expansion_count: 0,
+            last_expanded_ts: None,
+            metadata_migrated: false,
+            commit: None,
+        };
+        write_ref_index_entries(&shard, std::iter::once(&entry))
+            .expect_err("rename onto directory");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name();
+                let name = name.to_string_lossy();
+                name.contains(".tmp").then(|| name.into_owned())
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed ref-index rewrite must unlink tmp: {leftovers:?}"
+        );
     }
 }

@@ -476,21 +476,27 @@ impl SegmentStore {
         let p = Self::manifest_path(&self.cache_path);
         self.manifest.checksum = checksum(&self.manifest)?;
         let tmp = p.with_extension(format!("tmp-{}", std::process::id()));
-        let mut f = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
-        f.write_all(&serde_json::to_vec(&self.manifest)?)?;
-        f.sync_all()?;
-        drop(f);
-        if p.is_file() {
-            fs::copy(&p, bak(&p))?;
-            File::open(bak(&p))?.sync_all()?
+        let result = (|| {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp)?;
+            f.write_all(&serde_json::to_vec(&self.manifest)?)?;
+            f.sync_all()?;
+            drop(f);
+            if p.is_file() {
+                fs::copy(&p, bak(&p))?;
+                File::open(bak(&p))?.sync_all()?
+            }
+            fs::rename(&tmp, &p)?;
+            sync_dir(&self.root)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        fs::rename(tmp, p)?;
-        sync_dir(&self.root)?;
-        Ok(())
+        result
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -579,17 +585,23 @@ fn write_index(
     d.index_hash = hash(&b);
     let p = root.join(&d.index_file);
     let t = p.with_extension("index.tmp");
-    let mut f = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&t)?;
-    f.write_all(&b)?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(t, p)?;
-    sync_dir(root)?;
-    Ok(())
+    let result = (|| {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&t)?;
+        f.write_all(&b)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&t, &p)?;
+        sync_dir(root)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&t);
+    }
+    result
 }
 fn load_index(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentStoreError> {
     let b = fs::read(root.join(&d.index_file))?;
@@ -776,5 +788,27 @@ mod expand_lock_tests {
         let err = SegmentStore::create_shadow(PathBuf::from("~/recovery-cache.json"), None)
             .expect_err("tilde store");
         assert!(err.to_string().contains("unexpanded ~ store path"), "{err}");
+    }
+
+    #[test]
+    fn write_index_unlinks_tmp_when_rename_fails() {
+        let dir = tempdir().unwrap();
+        let mut descriptor = desc(1);
+        descriptor.index_file = "recovery.1.segment.index".into();
+        fs::create_dir_all(dir.path().join(&descriptor.index_file)).unwrap();
+        let err = write_index(dir.path(), &mut descriptor, &SegmentIndex::default())
+            .expect_err("rename onto directory");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name();
+                let name = name.to_string_lossy();
+                name.contains(".tmp").then(|| name.into_owned())
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed index write must unlink tmp ({err}): {leftovers:?}"
+        );
     }
 }

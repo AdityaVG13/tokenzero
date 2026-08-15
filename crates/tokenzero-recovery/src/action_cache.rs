@@ -261,15 +261,15 @@ impl ActionCacheIndex {
             fs::create_dir_all(parent)?;
         }
         fs::write(&path, b"1")?;
+        // Own the pin immediately so a later get() error still unlinks it.
         // Recheck after the pin is visible so a concurrent eviction that
         // marked L3-cold (or tombstoned) between the first get and the pin
         // cannot hand out a dangling artifact_ref.
-        match self.get(key)? {
-            Some(fresh) if !fresh.l3_cold => Ok(Some((fresh, ServedArtifact { path }))),
-            _ => {
-                let _ = fs::remove_file(&path);
-                Ok(None)
-            }
+        let pin = ServedArtifact { path };
+        match self.get(key) {
+            Ok(Some(fresh)) if !fresh.l3_cold => Ok(Some((fresh, pin))),
+            Ok(_) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 
@@ -685,5 +685,23 @@ mod serve_l3_recheck_tests {
         let err = index.put(live_entry(4)).expect_err("tilde store root");
         let msg = err.to_string();
         assert!(msg.contains("unexpanded ~ store path"), "{msg}");
+    }
+
+    #[test]
+    fn serve_unlinks_pin_when_segment_is_unreadable() {
+        let dir = tempdir().unwrap();
+        let index = ActionCacheIndex::open(dir.path());
+        let item = live_entry(9);
+        index.put(item.clone()).unwrap();
+        let segment = index
+            .root()
+            .join(&item.key[..2])
+            .join(format!("{}.json", item.key));
+        fs::write(&segment, b"not-json").unwrap();
+        let err = index.serve(&item.key).expect_err("corrupt segment");
+        assert!(
+            !index.has_in_flight_serve(&item.key),
+            "failed serve must not leave a pin that blocks GC: {err}"
+        );
     }
 }

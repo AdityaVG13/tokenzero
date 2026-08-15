@@ -1067,6 +1067,7 @@ fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
             spill.write(chunk, captured_before, &captured)?;
         }
     }
+    spill.retain = true;
     Ok(CapturedStream {
         text: String::from_utf8_lossy(&captured).into_owned(),
         capture: StreamCapture {
@@ -1088,6 +1089,7 @@ struct SpillWriter {
     file: Option<File>,
     path: Option<PathBuf>,
     bytes_written: usize,
+    retain: bool,
 }
 
 impl SpillWriter {
@@ -1098,6 +1100,7 @@ impl SpillWriter {
             file: None,
             path: None,
             bytes_written: 0,
+            retain: false,
         }
     }
 
@@ -1124,11 +1127,14 @@ impl SpillWriter {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut file = File::create(&path)?;
-            file.write_all(&captured[..captured_before])?;
-            self.bytes_written = self.bytes_written.saturating_add(captured_before);
+            let file = File::create(&path)?;
             self.path = Some(path);
             self.file = Some(file);
+            self.file
+                .as_mut()
+                .expect("spill file initialized")
+                .write_all(&captured[..captured_before])?;
+            self.bytes_written = self.bytes_written.saturating_add(captured_before);
         }
         self.file
             .as_mut()
@@ -1136,6 +1142,17 @@ impl SpillWriter {
             .write_all(chunk)?;
         self.bytes_written = self.bytes_written.saturating_add(chunk.len());
         Ok(())
+    }
+}
+
+impl Drop for SpillWriter {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.retain {
+            if let Some(path) = self.path.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -1575,5 +1592,62 @@ mod input_validation_tests {
         )
         .expect_err("tilde spill");
         assert!(err.to_string().contains("unexpanded ~ spill"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod spill_cleanup_tests {
+    use super::*;
+    use std::io::Read;
+
+    struct FailAfter {
+        data: Vec<u8>,
+        pos: usize,
+        reads: usize,
+        fail_at: usize,
+    }
+
+    impl Read for FailAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if self.reads >= self.fail_at {
+                return Err(io::Error::other("injected read failure"));
+            }
+            let remain = self.data.len().saturating_sub(self.pos);
+            let n = remain.min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn capture_error_unlinks_partial_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = RunOutputPolicy {
+            per_stream_capture_bytes: 64,
+            spill_threshold_bytes: 8,
+            spill_dir: Some(dir.path().to_path_buf()),
+        };
+        let reader = FailAfter {
+            data: vec![b'x'; 32],
+            pos: 0,
+            reads: 0,
+            fail_at: 2,
+        };
+        capture_reader_with_observer(reader, "stdout", policy, |_| {})
+            .expect_err("injected read failure");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name();
+                let name = name.to_string_lossy();
+                (name.starts_with("tokenzero-") && name.ends_with(".log")).then(|| name.into_owned())
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed capture must unlink spill files: {leftovers:?}"
+        );
     }
 }

@@ -195,8 +195,10 @@ pub fn write_entity_novelty(
     }
     let bytes = serde_json::to_vec_pretty(record)?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &bytes)?;
-    fs::rename(&tmp, &path)?;
+    if let Err(err) = fs::write(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
     Ok(path)
 }
 
@@ -281,3 +283,24 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 #[path = "../../../tests/recovery/inline/entity_novelty__tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod tmp_cleanup_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn write_unlinks_tmp_when_rename_fails() {
+        let dir = tempdir().unwrap();
+        let record = EntityNoveltyRecord::empty("global", "tokenzero").unwrap();
+        let path = entity_novelty_path(dir.path(), "global");
+        fs::create_dir_all(&path).unwrap();
+        write_entity_novelty(dir.path(), &record).expect_err("rename onto directory");
+        let tmp = path.with_extension("json.tmp");
+        assert!(
+            !tmp.exists(),
+            "failed novelty write must unlink tmp {}",
+            tmp.display()
+        );
+    }
+}

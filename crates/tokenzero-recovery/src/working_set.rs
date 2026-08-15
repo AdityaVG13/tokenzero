@@ -19,6 +19,8 @@ pub const ALREADY_RESIDENT_ATOM: &str = "0";
 /// Alarm threshold for pathological fault/re-eviction cycles.
 pub const THRASH_ALARM_FAULT_RATE: f64 = 0.5;
 const MAX_PREFETCH_HINTS_PER_FAULT: usize = 1;
+/// Cap queued hints so a caller that never drains cannot grow the set without bound.
+const MAX_QUEUED_PREFETCH_HINTS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanAnchor {
@@ -680,6 +682,9 @@ impl WorkingSet {
                 .into_iter()
                 .take(MAX_PREFETCH_HINTS_PER_FAULT),
         );
+        while self.prefetch_hints.len() > MAX_QUEUED_PREFETCH_HINTS {
+            self.prefetch_hints.pop_front();
+        }
     }
 
     fn remove_evicted_ref(&mut self, store: &mut RecoveryStore, id: u64) {
@@ -863,6 +868,53 @@ mod input_validation_tests {
         assert!(
             err.to_string().contains("invalid span line window"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn prefetch_hint_queue_is_bounded() {
+        let dir = tempdir().unwrap();
+        let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+        let mut set = WorkingSet::new(8192);
+        set.register_prefetch_hook(Box::new(SameFileNeighborPrefetch));
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let admission = set
+                .admit(
+                    &mut store,
+                    format!("span-body-{i} more tokens for eviction\n"),
+                    SpanAnchor {
+                        path: PathBuf::from("same.rs"),
+                        symbol: None,
+                        start_line: i * 2 + 1,
+                        end_line: i * 2 + 1,
+                    },
+                )
+                .unwrap();
+            ids.push(admission.id);
+        }
+        for id in &ids[1..] {
+            set.evict(&mut store, *id)
+                .unwrap()
+                .expect("resident span must page out");
+        }
+        let refs: Vec<String> = set.evicted_refs().keys().cloned().collect();
+        assert!(
+            !refs.is_empty(),
+            "explicit evict must populate prefetch candidates"
+        );
+        for _ in 0..40 {
+            for id in &ids[1..] {
+                let _ = set.evict(&mut store, *id);
+            }
+            let live_refs: Vec<String> = set.evicted_refs().keys().cloned().collect();
+            for ref_id in &live_refs {
+                let _ = set.rehydrate_ref(&mut store, ref_id, None, None);
+            }
+        }
+        assert!(
+            set.take_prefetch_hints().len() <= MAX_QUEUED_PREFETCH_HINTS,
+            "undrained prefetch hints must not grow without bound"
         );
     }
 }
