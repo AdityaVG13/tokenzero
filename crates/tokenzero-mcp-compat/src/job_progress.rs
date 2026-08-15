@@ -44,7 +44,7 @@ pub enum JobEvent {
 struct Session {
     family: ClientFamily,
     logging_enabled: bool,
-    progress_token: Option<String>,
+    progress_token: Option<Value>,
     terminals: HashSet<String>,
     pending: Vec<Value>,
 }
@@ -113,7 +113,13 @@ fn bound_message(text: &str) -> String {
     out
 }
 
-fn progress_notification(token: &str, progress: u64, total: u64, message: &str) -> Value {
+fn progress_token_or_job_id(token: Option<&Value>, job_id: &str) -> Value {
+    token
+        .cloned()
+        .unwrap_or_else(|| Value::String(job_id.to_string()))
+}
+
+fn progress_notification(token: &Value, progress: u64, total: u64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "notifications/progress",
@@ -142,7 +148,7 @@ fn logging_notification(message: &str) -> Value {
 /// or a duplicate terminal.
 pub fn plan_notification(
     mode: NotifyMode,
-    token: Option<&str>,
+    token: Option<&Value>,
     event: &JobEvent,
     already_terminal: bool,
 ) -> Option<Value> {
@@ -153,14 +159,14 @@ pub fn plan_notification(
     match (mode, event) {
         (NotifyMode::PollOnly, _) => None,
         (NotifyMode::Progress, JobEvent::Started { job_id }) => Some(progress_notification(
-            token.unwrap_or(job_id),
+            &progress_token_or_job_id(token, job_id),
             0,
             1,
             &format!("job {job_id} started"),
         )),
         (NotifyMode::Progress, JobEvent::Progress { job_id, cursor }) => {
             Some(progress_notification(
-                token.unwrap_or(job_id),
+                &progress_token_or_job_id(token, job_id),
                 0,
                 1,
                 &format!("job {job_id} bytes={cursor}"),
@@ -168,7 +174,7 @@ pub fn plan_notification(
         }
         (NotifyMode::Progress, JobEvent::Completed { job_id, status }) => {
             Some(progress_notification(
-                token.unwrap_or(job_id),
+                &progress_token_or_job_id(token, job_id),
                 1,
                 1,
                 &format!("job {job_id} {status}"),
@@ -197,7 +203,12 @@ pub fn remember_logging_enabled(session_id: &str) {
         .logging_enabled = true;
 }
 
+#[cfg(test)]
 pub fn remember_progress_token(session_id: &str, token: Option<String>) {
+    remember_progress_token_value(session_id, token.map(Value::String));
+}
+
+pub fn remember_progress_token_value(session_id: &str, token: Option<Value>) {
     if let Some(token) = token {
         lock_sessions()
             .entry(session_id.to_string())
@@ -215,13 +226,13 @@ pub fn observe(session_id: &str, event: JobEvent) {
         | JobEvent::Completed { job_id, .. } => job_id.clone(),
     };
     let already = session.terminals.contains(&job_id);
+    let token_present = session.progress_token.is_some();
     let mode = notify_mode(
         session.family,
         session.logging_enabled,
-        session.progress_token.as_deref(),
+        token_present.then_some(""),
     );
-    if let Some(note) = plan_notification(mode, session.progress_token.as_deref(), &event, already)
-    {
+    if let Some(note) = plan_notification(mode, session.progress_token.as_ref(), &event, already) {
         session.pending.push(note);
     }
     if matches!(event, JobEvent::Completed { .. }) {
@@ -236,14 +247,13 @@ pub fn take_notifications(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-pub fn progress_token_from_params(params: &Value) -> Option<String> {
-    let meta = params.get("_meta")?;
-    let token = meta.get("progressToken")?;
-    token
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| token.as_i64().map(|n| n.to_string()))
-        .or_else(|| token.as_u64().map(|n| n.to_string()))
+pub fn progress_token_from_params(params: &Value) -> Option<Value> {
+    let token = params.get("_meta")?.get("progressToken")?;
+    match token {
+        Value::String(_) => Some(token.clone()),
+        Value::Number(number) if number.is_i64() || number.is_u64() => Some(token.clone()),
+        _ => None,
+    }
 }
 
 pub fn job_id_from_tool_result(result: &Value) -> Option<String> {

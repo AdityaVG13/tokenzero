@@ -85,15 +85,8 @@ fn main() {
         process::exit(0);
     }
 
-    if args.iter().any(|a| a == "--mode=codemode")
-        || args
-            .windows(2)
-            .any(|w| w[0] == "--mode" && w[1] == "codemode")
-    {
-        eprintln!(
-            "tokenzero-mcp: artifact is locked to classic MCP; refused --mode=codemode. \
-Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only as a raw worker."
-        );
+    if let Err(e) = require_classic_surface_flags(&args) {
+        eprintln!("{e}");
         process::exit(2);
     }
 
@@ -119,7 +112,14 @@ Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only 
     }
 
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut config = EngineConfig::for_root(&cwd);
+    let root = match stdio_root_from_args(&args, cwd) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("tokenzero-mcp: {error}");
+            process::exit(2);
+        }
+    };
+    let mut config = EngineConfig::for_root(&root);
     config.tool_surface = McpToolSurface::Classic;
     // FastMCP run never returns (`!`).
     run_fastmcp_stdio(config);
@@ -182,6 +182,39 @@ fn parse_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
         i += 1;
     }
     Ok(None)
+}
+
+fn require_classic_surface_flags(args: &[String]) -> Result<(), String> {
+    for name in ["--mode", "--tool-surface", "--surface"] {
+        if let Some(value) =
+            parse_flag(args, name).map_err(|error| format!("tokenzero-mcp: {error}"))?
+        {
+            match value.parse::<McpToolSurface>() {
+                Ok(McpToolSurface::Classic) => {}
+                Ok(McpToolSurface::CodeMode) => {
+                    return Err(
+                        "tokenzero-mcp: artifact is locked to classic MCP; refused --mode=codemode. \
+Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only as a raw worker."
+                            .into(),
+                    );
+                }
+                Err(error) => return Err(format!("tokenzero-mcp: {error}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stdio_root_from_args(args: &[String], cwd: PathBuf) -> Result<PathBuf, String> {
+    let root = parse_flag(args, "--root")?;
+    let repo = parse_flag(args, "--repo")?;
+    match (root, repo) {
+        (Some(root), Some(repo)) if root != repo => {
+            Err(format!("--root ({root:?}) and --repo ({repo:?}) disagree"))
+        }
+        (Some(root), _) | (None, Some(root)) => Ok(PathBuf::from(root)),
+        (None, None) => Ok(cwd),
+    }
 }
 
 fn flag_or_exit(args: &[String], name: &str) -> Option<String> {
@@ -247,7 +280,11 @@ fn run_uninstall(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{argv_without_option_values, parse_flag};
+    use super::{
+        argv_without_option_values, parse_flag, require_classic_surface_flags, stdio_root_from_args,
+    };
+    use std::path::PathBuf;
+    use tokenzero_install::packaging::reject_non_stdio_args;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_string()).collect()
@@ -375,5 +412,79 @@ mod tests {
             !mode.iter().any(|a| a == "mcp"),
             "--mode mcp must not be an unknown subcommand: {mode:?}"
         );
+    }
+
+    #[test]
+    fn stripped_stdio_flags_are_accepted_by_reject_non_stdio_args() {
+        for argv in [
+            args(&["tokenzero-mcp", "--mode", "mcp"]),
+            args(&["tokenzero-mcp", "--mode=mcp"]),
+            args(&["tokenzero-mcp", "--root", "/tmp/ws"]),
+            args(&["tokenzero-mcp", "--repo", "/tmp/repo"]),
+        ] {
+            let verbs = argv_without_option_values(&argv);
+            reject_non_stdio_args("tokenzero-mcp", &verbs).unwrap_or_else(|error| {
+                panic!("stdio flags must survive verb-stripping: {argv:?} verbs={verbs:?} {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn require_classic_surface_flags_accepts_mcp_and_refuses_codemode_aliases() {
+        require_classic_surface_flags(&args(&["tokenzero-mcp", "--mode=mcp"])).unwrap();
+        require_classic_surface_flags(&args(&["tokenzero-mcp", "--mode", "classic"])).unwrap();
+        require_classic_surface_flags(&args(&["tokenzero-mcp", "--tool-surface", "mcp"])).unwrap();
+
+        let refused =
+            require_classic_surface_flags(&args(&["tokenzero-mcp", "--tool-surface", "codemode"]))
+                .expect_err("--tool-surface codemode must fail as loudly as --mode=codemode");
+        assert!(refused.contains("codemode"), "{refused}");
+
+        let invalid = require_classic_surface_flags(&args(&["tokenzero-mcp", "--mode", "foobar"]))
+            .expect_err("unknown --mode must not fall through to stdio");
+        assert!(
+            invalid.contains("foobar") || invalid.contains("unsupported"),
+            "{invalid}"
+        );
+
+        let stolen =
+            require_classic_surface_flags(&args(&["tokenzero-mcp", "--mode", "--root", "/tmp/ws"]))
+                .expect_err("bare --mode must not steal the next flag");
+        assert!(
+            stolen.contains("--root") || stolen.contains("requires a value"),
+            "{stolen}"
+        );
+    }
+
+    #[test]
+    fn stdio_root_from_args_honors_root_and_repo() {
+        let cwd = PathBuf::from("/cwd");
+        assert_eq!(
+            stdio_root_from_args(&args(&["tokenzero-mcp"]), cwd.clone()).unwrap(),
+            cwd
+        );
+        assert_eq!(
+            stdio_root_from_args(
+                &args(&["tokenzero-mcp", "--root", "/tmp/ws"]),
+                PathBuf::from("/cwd")
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/ws")
+        );
+        assert_eq!(
+            stdio_root_from_args(
+                &args(&["tokenzero-mcp", "--repo=/tmp/repo"]),
+                PathBuf::from("/cwd")
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/repo")
+        );
+        let disagree = stdio_root_from_args(
+            &args(&["tokenzero-mcp", "--root", "/tmp/a", "--repo", "/tmp/b"]),
+            PathBuf::from("/cwd"),
+        )
+        .expect_err("disagreeing --root/--repo must fail loud");
+        assert!(disagree.contains("/tmp/a"), "{disagree}");
+        assert!(disagree.contains("/tmp/b"), "{disagree}");
     }
 }

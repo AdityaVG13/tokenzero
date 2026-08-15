@@ -395,7 +395,7 @@ pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) ->
             if let Some(token) =
                 job_progress::progress_token_from_params(&Value::Object(params.clone()))
             {
-                job_progress::remember_progress_token(engine.session_id(), Some(token));
+                job_progress::remember_progress_token_value(engine.session_id(), Some(token));
             }
             let result = rpc_try!(
                 call_tool(engine, name, &args, call_id)
@@ -1080,6 +1080,36 @@ mod deep_pass_tests {
                         .is_some_and(|text| text.contains("failed"))
             }),
             "wait errors must still emit a terminal progress frame: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn integer_progress_token_is_echoed_as_number() {
+        let session = "pt-int-echo";
+        job_progress::remember_progress_token_value(session, Some(serde_json::json!(7)));
+        job_progress::observe(
+            session,
+            job_progress::JobEvent::Started {
+                job_id: "job-int".into(),
+            },
+        );
+        let notes = job_progress::take_notifications(session);
+        assert!(
+            notes.iter().any(|note| {
+                note["method"] == "notifications/progress" && note["params"]["progressToken"] == 7
+            }),
+            "integer progressToken must round-trip as a JSON number: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn fractional_progress_token_does_not_arm_progress_mode() {
+        let token = job_progress::progress_token_from_params(&serde_json::json!({
+            "_meta": { "progressToken": 1.5 }
+        }));
+        assert_eq!(
+            token, None,
+            "fractional progress tokens must not arm notifications/progress (same integer rule as JSON-RPC ids)"
         );
     }
 

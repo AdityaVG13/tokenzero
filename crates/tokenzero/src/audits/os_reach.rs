@@ -293,4 +293,24 @@ mod tests {
             "unquoted space must not split the exe token: {cmd}"
         );
     }
+
+    #[test]
+    fn posix_shell_matrix_command_quotes_dollar_and_apostrophe_paths() {
+        let dollar = posix_shell_matrix_command(
+            Path::new("/tmp/tokenzero"),
+            Path::new("/tmp/cache $dir.json"),
+        );
+        assert!(
+            dollar.contains("'/tmp/cache $dir.json'"),
+            "dollar in cache path must be single-quoted so the shell cannot expand it: {dollar}"
+        );
+        let apostrophe = posix_shell_matrix_command(
+            Path::new("/tmp/it's bin/tokenzero"),
+            Path::new("/tmp/cache.json"),
+        );
+        assert!(
+            apostrophe.contains("'/tmp/it'\"'\"'s bin/tokenzero'"),
+            "apostrophe in exe path must use POSIX nested quoting: {apostrophe}"
+        );
+    }
 }
