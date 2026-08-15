@@ -126,6 +126,8 @@ fn main() {
 }
 
 /// Flags whose following argv token is a value, not a packaging verb.
+/// Includes CLI `mcp-server` value flags so `tokenzero-mcp --allowed-root help`
+/// cannot be scanned as the help verb (same class as `--prefix sbom`).
 const VALUE_FLAGS: &[&str] = &[
     "--prefix",
     "--binary",
@@ -137,6 +139,11 @@ const VALUE_FLAGS: &[&str] = &[
     "--log-level",
     "--cache-path",
     "--once",
+    "--allowed-root",
+    "--default-mode",
+    "--shell-timeout-seconds",
+    "--timeout",
+    "--idle-timeout-seconds",
 ];
 
 /// Drop option values so `--prefix sbom` / `--mode mcp` cannot be scanned as
@@ -281,7 +288,8 @@ fn run_uninstall(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        argv_without_option_values, parse_flag, require_classic_surface_flags, stdio_root_from_args,
+        VALUE_FLAGS, argv_without_option_values, parse_flag, require_classic_surface_flags,
+        stdio_root_from_args,
     };
     use std::path::PathBuf;
     use tokenzero_install::packaging::reject_non_stdio_args;
@@ -500,26 +508,44 @@ mod tests {
 
     #[test]
     fn argv_without_option_values_strips_every_stdio_and_install_value_flag() {
-        for flag in [
-            "--prefix",
-            "--binary",
-            "--surface",
-            "--mode",
-            "--tool-surface",
-            "--root",
-            "--repo",
-            "--log-level",
-            "--cache-path",
-            "--once",
-        ] {
+        assert!(
+            VALUE_FLAGS.contains(&"--allowed-root"),
+            "CLI mcp-server --allowed-root is a value flag sibling of --root/--prefix"
+        );
+        for flag in VALUE_FLAGS {
             let stripped = argv_without_option_values(&args(&["tokenzero-mcp", flag, "help"]));
             assert!(
                 !stripped.iter().any(|a| a == "help"),
                 "{flag} value must not be scanned as a verb: {stripped:?}"
             );
             assert!(
-                stripped.iter().any(|a| a == flag),
+                stripped.iter().any(|a| a == *flag),
                 "{flag} itself must remain so unknown options still fail loud: {stripped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_mcp_server_value_flags_are_not_help_verbs_then_fail_loud() {
+        for flag in [
+            "--allowed-root",
+            "--default-mode",
+            "--shell-timeout-seconds",
+            "--timeout",
+            "--idle-timeout-seconds",
+        ] {
+            let argv = args(&["tokenzero-mcp", flag, "help"]);
+            let verbs = argv_without_option_values(&argv);
+            assert!(
+                !verbs.iter().any(|a| a == "help"),
+                "{flag} help must not open the help verb: {verbs:?}"
+            );
+            let Err(error) = reject_non_stdio_args("tokenzero-mcp", &verbs) else {
+                panic!("{flag} must fail as an unsupported option after stripping its value")
+            };
+            assert!(
+                error.contains(flag),
+                "{flag} must fail as an unsupported option after stripping its value: {error}"
             );
         }
     }
