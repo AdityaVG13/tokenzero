@@ -2,13 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -744,7 +746,76 @@ struct ProcessIo {
 struct IoWorker<T> {
     name: &'static str,
     receiver: Receiver<std::io::Result<T>>,
-    handle: Option<thread::JoinHandle<()>>,
+}
+
+type IoPoolJob = Box<dyn FnOnce() + Send>;
+
+struct IoPoolState {
+    jobs: VecDeque<IoPoolJob>,
+}
+
+struct IoPool {
+    state: Mutex<IoPoolState>,
+    woke: Condvar,
+    spawned: AtomicUsize,
+}
+
+fn io_pool_size() -> usize {
+    // stdin + stdout + stderr readers can run at once per exec.
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_mul(3))
+        .unwrap_or(12)
+        .clamp(6, 48)
+}
+
+fn io_pool() -> &'static IoPool {
+    static POOL: OnceLock<&'static IoPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let size = io_pool_size();
+        let pool: &'static IoPool = Box::leak(Box::new(IoPool {
+            state: Mutex::new(IoPoolState {
+                jobs: VecDeque::new(),
+            }),
+            woke: Condvar::new(),
+            spawned: AtomicUsize::new(0),
+        }));
+        for index in 0..size {
+            thread::Builder::new()
+                .name(format!("tokenzero-io-{index}"))
+                .spawn(move || io_pool_worker(pool))
+                .unwrap_or_else(|err| panic!("tokenzero-runtime io pool thread: {err}"));
+            pool.spawned.fetch_add(1, Ordering::Relaxed);
+        }
+        pool
+    })
+}
+
+fn io_pool_worker(pool: &'static IoPool) {
+    loop {
+        let job = {
+            let mut guard = pool.state.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if let Some(job) = guard.jobs.pop_front() {
+                    break job;
+                }
+                guard = pool.woke.wait(guard).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        let _ = catch_unwind(AssertUnwindSafe(job));
+    }
+}
+
+fn submit_io_job(job: IoPoolJob) {
+    let pool = io_pool();
+    let mut guard = pool.state.lock().unwrap_or_else(|p| p.into_inner());
+    guard.jobs.push_back(job);
+    drop(guard);
+    pool.woke.notify_one();
+}
+
+#[cfg(test)]
+fn io_pool_spawned_threads() -> usize {
+    io_pool().spawned.load(Ordering::Relaxed)
 }
 
 fn spawn_io_worker<T: Send + 'static>(
@@ -752,14 +823,10 @@ fn spawn_io_worker<T: Send + 'static>(
     work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> IoWorker<T> {
     let (sender, receiver) = mpsc::channel();
-    let handle = thread::spawn(move || {
+    submit_io_job(Box::new(move || {
         let _ = sender.send(work());
-    });
-    IoWorker {
-        name,
-        receiver,
-        handle: Some(handle),
-    }
+    }));
+    IoWorker { name, receiver }
 }
 
 fn required_child_pipe<T>(pipe: Option<T>, name: &'static str) -> Result<T, RuntimeError> {
@@ -880,22 +947,10 @@ fn ensure_worker_joined<T>(
     if recovered.is_some() {
         return Ok(recovered);
     }
-    // Last resort: hand the JoinHandle to a joiner thread so Drop never detaches
-    // a live reader. With Windows job terminate (or Unix process-group kill),
-    // this path should be rare; the joiner exits when the pipe finally closes.
-    reaper_join_worker(worker);
+    // Last resort: the pooled worker stays on the pipe until terminate closes
+    // it. Do not spawn a joiner thread; that was the old spawn-per-exec leak.
+    let _ = worker;
     Ok(None)
-}
-
-fn reaper_join_worker<T>(worker: &mut IoWorker<T>) {
-    if let Some(handle) = worker.handle.take() {
-        let name = worker.name;
-        thread::spawn(move || {
-            if handle.join().is_err() {
-                eprintln!("tokenzero-runtime: {name} panicked after IO shutdown grace");
-            }
-        });
-    }
 }
 
 fn poll_stdin(
@@ -913,28 +968,12 @@ fn poll_worker<T>(
         .receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
     {
-        Ok(result) => {
-            join_worker(worker)?;
-            Ok(Some(result))
-        }
+        Ok(result) => Ok(Some(result)),
         Err(RecvTimeoutError::Timeout) => Ok(None),
-        Err(RecvTimeoutError::Disconnected) => {
-            join_worker(worker)?;
-            Err(RuntimeError::Io(std::io::Error::other(format!(
-                "{} exited without reporting a result",
-                worker.name
-            ))))
-        }
+        Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::Io(std::io::Error::other(
+            format!("{} exited without reporting a result", worker.name),
+        ))),
     }
-}
-
-fn join_worker<T>(worker: &mut IoWorker<T>) -> Result<(), RuntimeError> {
-    if let Some(handle) = worker.handle.take() {
-        handle.join().map_err(|_| {
-            RuntimeError::Io(std::io::Error::other(format!("{} panicked", worker.name)))
-        })?;
-    }
-    Ok(())
 }
 
 fn deadline_from(start: Instant, timeout: Duration) -> Instant {

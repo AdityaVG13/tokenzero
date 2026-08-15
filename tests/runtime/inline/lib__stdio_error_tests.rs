@@ -110,3 +110,18 @@ fn request_cancellation_terminates_the_owned_shell_tree() {
         started.elapsed()
     );
 }
+
+#[test]
+fn io_pool_reuses_threads_across_one_hundred_jobs() {
+    let before = io_pool_spawned_threads();
+    for i in 0..100 {
+        let worker = spawn_io_worker("pool probe", move || Ok(i));
+        let result = worker.receiver.recv().expect("pooled job result");
+        assert_eq!(result.expect("job ok"), i);
+    }
+    let after = io_pool_spawned_threads();
+    assert_eq!(after, io_pool_size());
+    if before > 0 {
+        assert_eq!(after, before);
+    }
+}
