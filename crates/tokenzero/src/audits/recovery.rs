@@ -19,12 +19,54 @@ fn run_args_with_command(root: &str, cache: &str, command: &[&str]) -> Vec<Strin
 }
 
 fn exact_expand_check(exe: &Path, cache: &Path, refs: &[Json]) -> Result<Vec<Json>> {
-    refs.iter().filter_map(|r| {
-        let rid = r["ref"].as_str().unwrap_or_default();
-        if rid.is_empty() { return None; }
-        let expanded = Command::new(exe).arg("expand").arg(rid).arg("--cache-path").arg(cache).arg("--raw").output().ok()?;
-        Some(Ok(object!({"kind": r["kind"], "ref": rid, "expand_success": expanded.status.success(), "bytes": expanded.stdout.len(), "byte_perfect": expanded.status.success()})))
-    }).collect()
+    refs.iter()
+        .filter_map(|r| {
+            let rid = r["ref"].as_str().unwrap_or_default();
+            if rid.is_empty() {
+                return None;
+            }
+            Some(expand_ref_check_row(
+                exe,
+                cache,
+                r["kind"].as_str().unwrap_or(""),
+                rid,
+            ))
+        })
+        .collect()
+}
+
+/// Record spawn failures as failed checks. Skipping them would let remaining
+/// successful expands green-light refs that were never recovered.
+pub(crate) fn expand_ref_check_row(
+    exe: &Path,
+    cache: &Path,
+    kind: &str,
+    rid: &str,
+) -> Result<Json> {
+    match Command::new(exe)
+        .arg("expand")
+        .arg(rid)
+        .arg("--cache-path")
+        .arg(cache)
+        .arg("--raw")
+        .output()
+    {
+        Ok(expanded) => Ok(object!({
+            "kind": kind,
+            "ref": rid,
+            "expand_success": expanded.status.success(),
+            "bytes": expanded.stdout.len(),
+            "byte_perfect": expanded.status.success()
+        })),
+        Err(err) => Ok(object!({
+            "kind": kind,
+            "ref": rid,
+            "expand_success": false,
+            "bytes": 0,
+            "byte_perfect": false,
+            "error": err.to_string()
+        })),
+    }
 }
 
 type FalseSuccessCaseDef = (
@@ -133,7 +175,10 @@ pub(crate) fn run_exact_recovery_audit(
         })
         .collect::<Result<Vec<_>>>()?;
     let degraded_rows: Vec<_> = deg_cmds.iter().map(|c| {
-        let r = run_json_command(&exe, &c.args).unwrap_or(object!({"status":"error","diagnostic":{"code":"exec_failed"},"telemetry":{"transport_status":"unknown"},"accounting":{"visible_tokens":0}}));
+        // --json tool errors and child-exit mirroring both exit non-zero while
+        // still writing the capsule JSON. Keep that payload; only synthesize
+        // exec_failed when stdout is not JSON at all.
+        let r = run_json_command_lenient(&exe, &c.args).unwrap_or(object!({"status":"error","diagnostic":{"code":"exec_failed"},"telemetry":{"transport_status":"unknown"},"accounting":{"visible_tokens":0}}));
         Ok(exact_recovery_degraded_row(&c.tool, r))
     }).collect::<Result<Vec<_>>>()?;
 
@@ -308,7 +353,7 @@ pub(crate) fn run_harm_eval(output_json: PathBuf, output_md: Option<PathBuf>) ->
     let cs = cache.to_str().unwrap();
     let rows: Vec<_> = cases.iter().map(|(id, cmd, expected)| {
         let args = run_args_with_command(rs, cs, cmd);
-        let row = run_json_command(&exe, &args)?;
+        let row = run_json_command_lenient(&exe, &args)?;
         let vis = row["visible"]["text"].as_str().unwrap_or_default();
         let has_ref = refs_available(&row);
         let pass = vis.contains(*expected) && has_ref && !vis.contains("abc123");
@@ -329,7 +374,7 @@ pub(crate) fn run_protected_anchor_audit(
     let cases = protected_anchor_cases(temp.path(), &cache);
     let (mut total_exp, mut total_miss) = (0usize, 0usize);
     let rows: Vec<_> = cases.into_iter().map(|case| {
-        let r = run_json_command(&exe, &case.args)?;
+        let r = run_json_command_lenient(&exe, &case.args)?;
         let vis = r["visible"]["text"].as_str().unwrap_or_default().to_ascii_lowercase();
         let missing: Vec<_> = case.expected_anchors.iter().filter(|a| !vis.contains(&a.to_ascii_lowercase())).map(|s| s.to_string()).collect();
         total_exp += case.expected_anchors.len();
@@ -430,7 +475,15 @@ pub(crate) fn run_json_command<S: AsRef<std::ffi::OsStr>>(exe: &Path, args: &[S]
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-pub(crate) fn run_json_command_lenient(exe: &Path, args: &[String]) -> Result<Json> {
+/// Parse `--json` stdout even when the process exits non-zero.
+///
+/// `tokenzero run --json` mirrors the child exit code, and tool-error capsules
+/// also exit 1. The JSON envelope is the evidence; dropping it treats a failed
+/// child as a harness crash (or, with `unwrap_or`, as a fake exec_failed).
+pub(crate) fn run_json_command_lenient<S: AsRef<std::ffi::OsStr>>(
+    exe: &Path,
+    args: &[S],
+) -> Result<Json> {
     let output = Command::new(exe).args(args).output()?;
     anyhow::ensure!(
         !output.stdout.is_empty(),
@@ -490,4 +543,52 @@ pub(crate) fn p95_f64(values: &mut [f64]) -> Option<f64> {
             .saturating_sub(1)
             .min(values.len() - 1)],
     )
+}
+
+#[cfg(test)]
+mod error_path_tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn expand_ref_check_row_records_spawn_failure_instead_of_skipping() {
+        let cache = tempdir().unwrap();
+        let row = expand_ref_check_row(
+            Path::new("/definitely/not/a/tokenzero-expand-binary"),
+            cache.path(),
+            "combined",
+            "tz://missing",
+        )
+        .expect("spawn failure must still produce a check row");
+        assert_eq!(row["kind"], "combined");
+        assert_eq!(row["ref"], "tz://missing");
+        assert_eq!(row["expand_success"], false, "{row}");
+        assert_eq!(row["byte_perfect"], false, "{row}");
+        assert_eq!(row["bytes"], 0, "{row}");
+        assert!(
+            row["error"].as_str().is_some_and(|error| !error.is_empty()),
+            "spawn error must be preserved: {row}"
+        );
+    }
+
+    #[test]
+    fn exact_expand_check_does_not_drop_unspawnable_refs() {
+        let cache = tempdir().unwrap();
+        let refs = vec![
+            object!({"kind": "stdout", "ref": "tz://a"}),
+            object!({"kind": "combined", "ref": "tz://b"}),
+        ];
+        let checks = exact_expand_check(
+            Path::new("/definitely/not/a/tokenzero-expand-binary"),
+            cache.path(),
+            &refs,
+        )
+        .expect("failed expands are rows, not omitted");
+        assert_eq!(checks.len(), 2, "{checks:?}");
+        assert!(
+            checks.iter().all(|row| row["byte_perfect"] == false),
+            "unrecovered refs must fail the byte-perfect gate: {checks:?}"
+        );
+    }
 }

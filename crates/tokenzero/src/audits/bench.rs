@@ -214,13 +214,20 @@ pub(crate) fn run_tokenzero_bench_row(
 }
 
 fn expand_ref_checks(exe: &Path, cache: &Path, telemetry: &Json) -> Result<Vec<Json>> {
-    ["stdout", "stderr", "combined"].iter().filter_map(|kind| {
-        let ref_id = telemetry[&format!("{kind}_ref")].as_str().unwrap_or_default();
-        if ref_id.is_empty() { return None; }
-        let expanded = Command::new(exe).arg("expand").arg(ref_id).arg("--cache-path").arg(cache).arg("--raw").output().ok()?;
-        let bytes = expanded.stdout.len();
-        Some(Ok(object!({"kind": kind, "ref": ref_id, "expand_success": expanded.status.success(), "bytes": bytes, "byte_perfect": expanded.status.success()})))
-    }).collect()
+    ["stdout", "stderr", "combined"]
+        .iter()
+        .filter_map(|kind| {
+            let ref_id = telemetry[&format!("{kind}_ref")]
+                .as_str()
+                .unwrap_or_default();
+            if ref_id.is_empty() {
+                return None;
+            }
+            Some(super::recovery::expand_ref_check_row(
+                exe, cache, kind, ref_id,
+            ))
+        })
+        .collect()
 }
 
 pub(crate) fn private_benchmark_path(suite: &str) -> PathBuf {

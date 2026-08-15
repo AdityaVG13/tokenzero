@@ -49,7 +49,11 @@ fn one_shot_missed(row: &Json) -> bool {
 }
 
 fn one_shot_shell_cmd<'a>(unix: &'a str, windows: &'a str) -> &'a str {
-    if cfg!(windows) { windows } else { unix }
+    if cfg!(windows) {
+        windows
+    } else {
+        unix
+    }
 }
 
 fn one_shot_anchors_ok(id: &str, row: &Json, visible: &str, anchors: &[&str]) -> bool {
@@ -97,7 +101,7 @@ pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>
     let shell_rows: Vec<_> = shell_cases
         .iter()
         .map(|(id, args, anchors)| {
-            let row = run_json_command(&exe, args)?;
+            let row = run_json_command_lenient(&exe, args)?;
             let vis = row["visible"]["text"].as_str().unwrap_or_default();
             let refs_ok = refs_available(&row);
             let anchors_ok = one_shot_anchors_ok(id, &row, vis, anchors);
@@ -200,7 +204,7 @@ pub(crate) fn run_security_privacy_audit(
         "Write-Output 'token=abc123'; [Console]::Error.WriteLine('password=hunter2'); exit 2",
     );
     let run_args = one_shot_shell_args(temp.path(), &cache, one_shot_shell_cmd(sc_unix, sc_win));
-    let run_row = run_json_command(&exe, &run_args)?;
+    let run_row = run_json_command_lenient(&exe, &run_args)?;
     let visible = run_row["visible"]["text"].as_str().unwrap_or_default();
     let comb_ref = run_row["telemetry"]["combined_ref"]
         .as_str()
@@ -313,7 +317,7 @@ pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) 
         "Write-Output 'warning: note'; [Console]::Error.WriteLine('error: fail'); exit 3",
     );
     let run_args = one_shot_shell_args(temp.path(), &cache, one_shot_shell_cmd(fu, fw));
-    let failure_row = run_json_command(&exe, &run_args)?;
+    let failure_row = run_json_command_lenient(&exe, &run_args)?;
 
     let bench_out = ws_sibling_artifact_path(&output_json, "tokenzero_ws_001_bench.json");
     let bench = run_bench_competitors(BenchCompetitorsArgs {

@@ -237,7 +237,7 @@ fn main() -> Result<()> {
     @emit { Read => handle_read, Find => handle_find, Grep => handle_grep, Glob => handle_glob, Tree => handle_tree, Edit => handle_edit, Recall => handle_recall, Fetch => handle_fetch, Run => handle_run, Ingest => handle_ingest, Expand => handle_expand, }
     @result { Rewrite => emit_rewrite, Doctor => handle_doctor, Pulse => handle_pulse, SessionLedger => handle_session_ledger, Cache => handle_cache, Install => handle_install, Init => handle_init, Clients => handle_clients, ClientStatus => handle_client_status, Capabilities => handle_capabilities, CachePack => handle_cache_pack, Bench => handle_bench, Quote => handle_quote, }
     @json_md { McpSmoke => |j, m| run_mcp_artifact(j, m, 1), McpSoak => |j, m| run_mcp_artifact(j, m, 25), ExactRecoveryShell => run_exact_recovery_shell, ExactRecoveryAudit => run_exact_recovery_audit, HarmEval => run_harm_eval, ProtectedAnchorAudit => run_protected_anchor_audit, FalseSuccessShell => run_false_success_shell, RepoInventory => run_repo_inventory, PromptCachePack => run_prompt_cache_pack, ShellMatrix => run_shell_matrix, OneShotEval => run_one_shot_eval, AdapterApprovalTemplate => run_adapter_approval_template, CompletionAudit => run_completion_audit, SecurityPrivacyAudit => run_security_privacy_audit, ArtifactHandoff => run_artifact_handoff, WsSkeleton => run_ws_skeleton, }
-    @value { SessionOpen(args) => engine_from_common(&args).session_boot_snapshot(); Stats(args) => handle_stats(args)?; InstallSmoke(args) => run_install_smoke(args.output_json, args.apply)?; PackageAudit(args) => handle_package_audit(args); OsReachAudit(args) => run_os_reach_audit(args.output_json, args.output_md, args.root, args.os_artifact, args.release_approval,)?; OsReleaseArtifact(args) => run_os_release_artifact(args.output_json, args.output_md, args.root,)?; SourceCurrencyAudit(args) => run_source_currency_audit(args.output_json, args.output_md, args.refresh_ledger, args.refresh_git_heads,)?; AdapterApprovalAudit(args) => run_adapter_approval_audit(args.output_json, args.output_md, args.approval_file, args.execution_approval,)?; ClaimAudit(args) => run_claim_audit(args.output_json, args.output_md, args.release_approval, ClaimEvidenceInputs { source_artifact: args.source_artifact, benchmark_artifact: args.benchmark_artifact, adapter_approval_artifact: args.adapter_approval_artifact, recovery_artifact: args.recovery_artifact, task_success_artifact: args.task_success_artifact, os_artifact: args.os_artifact, },)?; Reach(args) => run_reach(args.root, args.output_json)?; }
+    @value { SessionOpen(args) => engine_from_common(&args).session_boot_snapshot(); Stats(args) => handle_stats(args)?; InstallSmoke(args) => run_install_smoke(args.output_json, args.apply)?; PackageAudit(args) => handle_package_audit(args)?; OsReachAudit(args) => run_os_reach_audit(args.output_json, args.output_md, args.root, args.os_artifact, args.release_approval,)?; OsReleaseArtifact(args) => run_os_release_artifact(args.output_json, args.output_md, args.root,)?; SourceCurrencyAudit(args) => run_source_currency_audit(args.output_json, args.output_md, args.refresh_ledger, args.refresh_git_heads,)?; AdapterApprovalAudit(args) => run_adapter_approval_audit(args.output_json, args.output_md, args.approval_file, args.execution_approval,)?; ClaimAudit(args) => run_claim_audit(args.output_json, args.output_md, args.release_approval, ClaimEvidenceInputs { source_artifact: args.source_artifact, benchmark_artifact: args.benchmark_artifact, adapter_approval_artifact: args.adapter_approval_artifact, recovery_artifact: args.recovery_artifact, task_success_artifact: args.task_success_artifact, os_artifact: args.os_artifact, },)?; Reach(args) => run_reach(args.root, args.output_json)?; }
     @special {
     Mem(args) => {
         let engine = engine_from_common(&args);
@@ -1765,20 +1765,42 @@ fn handle_robot_docs(args: RobotDocsArgs) {
     );
 }
 
-fn handle_package_audit(args: PackageAuditArgs) -> serde_json::Value {
-    let root = tokenzero_work_root(None);
-    let artifacts = if args.dist.as_path() == Path::new(".") {
-        Vec::new()
-    } else if args.dist.exists() && args.dist.is_file() {
-        vec![args.dist]
-    } else if args.dist.exists() {
-        fs::read_dir(args.dist)
-            .map(|rd| rd.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    install::package_audit(&root, &artifacts)
+fn handle_package_audit(args: PackageAuditArgs) -> Result<serde_json::Value> {
+    let artifacts = collect_package_audit_artifacts(&args.dist)?;
+    Ok(install::package_audit(
+        &tokenzero_work_root(None),
+        &artifacts,
+    ))
+}
+
+/// `--dist .` (the default) audits workspace packaging files. Any other path
+/// must exist and be readable; an empty or unreadable dist must not silently
+/// fall back to those defaults (which can report ok:true with no archives).
+fn collect_package_audit_artifacts(dist: &Path) -> Result<Vec<PathBuf>> {
+    if dist == Path::new(".") {
+        return Ok(Vec::new());
+    }
+    if dist.is_file() {
+        return Ok(vec![dist.to_path_buf()]);
+    }
+    if !dist.exists() {
+        anyhow::bail!("package-audit --dist {} does not exist", dist.display());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dist)
+        .with_context(|| format!("package-audit --dist {} is unreadable", dist.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("package-audit --dist {} is unreadable", dist.display()))?;
+        paths.push(entry.path());
+    }
+    if paths.is_empty() {
+        anyhow::bail!(
+            "package-audit --dist {} contains no artifacts",
+            dist.display()
+        );
+    }
+    Ok(paths)
 }
 
 fn handle_quote(args: QuoteArgs) -> Result<()> {
@@ -2509,5 +2531,50 @@ mod argv_sibling_tests {
             rewritten,
             vec!["tokenzero", "run", "--cwd", "/tmp", "--", "echo", "ok"]
         );
+    }
+}
+
+#[cfg(test)]
+mod package_audit_dist_tests {
+    use super::collect_package_audit_artifacts;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn default_dot_dist_keeps_workspace_packaging_defaults() {
+        let artifacts = collect_package_audit_artifacts(Path::new(".")).unwrap();
+        assert!(
+            artifacts.is_empty(),
+            "'.' is the documented fallback to workspace packaging files: {artifacts:?}"
+        );
+    }
+
+    #[test]
+    fn missing_dist_fails_loud_instead_of_auditing_defaults() {
+        let error = collect_package_audit_artifacts(Path::new(
+            "/definitely/not/a/tokenzero-package-audit-dist",
+        ))
+        .expect_err("missing --dist must not fall through to Cargo.toml defaults");
+        let message = error.to_string();
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(message.contains("--dist"), "{message}");
+    }
+
+    #[test]
+    fn empty_dist_directory_fails_loud_instead_of_auditing_defaults() {
+        let temp = tempdir().unwrap();
+        let error = collect_package_audit_artifacts(temp.path())
+            .expect_err("empty --dist must not report ok against workspace defaults");
+        let message = error.to_string();
+        assert!(message.contains("contains no artifacts"), "{message}");
+    }
+
+    #[test]
+    fn file_dist_is_collected() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("tokenzero.tar.gz");
+        std::fs::write(&file, b"not-a-real-archive").unwrap();
+        let artifacts = collect_package_audit_artifacts(&file).unwrap();
+        assert_eq!(artifacts, vec![file]);
     }
 }
