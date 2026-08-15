@@ -316,6 +316,16 @@ impl WorkingSet {
         text: String,
         anchor: SpanAnchor,
     ) -> Result<Admission, RecoveryError> {
+        if anchor.start_line == 0 || anchor.start_line > anchor.end_line {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid span line window {}..={}",
+                    anchor.start_line, anchor.end_line
+                ),
+            )
+            .into());
+        }
         if let Some(index) = self.spans.iter().position(|span| span.anchor == anchor) {
             if let SpanBody::Resident(previous) = &self.spans[index].body {
                 if previous == &text {
@@ -469,9 +479,8 @@ impl WorkingSet {
         let (resident_id, resident_anchor) = if partial {
             let relative_start = effective_start.unwrap_or(1).max(1);
             let returned_lines = result.content.lines().count().max(1);
-            let requested_end = effective_end.unwrap_or_else(|| {
-                relative_start.saturating_add(returned_lines.saturating_sub(1))
-            });
+            let requested_end = effective_end
+                .unwrap_or_else(|| relative_start.saturating_add(returned_lines.saturating_sub(1)));
             let relative_end = requested_end.max(relative_start);
             let absolute_start = source_anchor
                 .start_line
@@ -535,9 +544,11 @@ impl WorkingSet {
         store: &mut RecoveryStore,
         id: u64,
     ) -> Result<Option<EvictedSpan>, RecoveryError> {
-        let Some(victim) = self.spans.iter().position(|span| {
-            span.id == id && matches!(span.body, SpanBody::Resident(_))
-        }) else {
+        let Some(victim) = self
+            .spans
+            .iter()
+            .position(|span| span.id == id && matches!(span.body, SpanBody::Resident(_)))
+        else {
             return Ok(None);
         };
         self.page_out_at(store, victim).map(Some)
@@ -558,7 +569,7 @@ impl WorkingSet {
     /// Persists `alias -> source` so `RecoveryStore::expand` can resolve it.
     /// Returns false when `source` is unknown, equal to `alias`, or the map is unchanged.
     pub fn link_refs(&mut self, store: &mut RecoveryStore, source: &str, alias: &str) -> bool {
-        if source == alias {
+        if source.is_empty() || alias.is_empty() || source == alias {
             return false;
         }
         let Some(ids) = self.evicted_refs.get(source).cloned() else {
@@ -824,4 +835,34 @@ fn parse_line_fragment(fragment: &str) -> Option<(usize, usize)> {
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod input_validation_tests {
+    use super::*;
+    use crate::RecoveryStore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn admit_refuses_zero_start_line() {
+        let dir = tempdir().unwrap();
+        let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+        let mut set = WorkingSet::new(8192);
+        let err = set
+            .admit(
+                &mut store,
+                "body".into(),
+                SpanAnchor {
+                    path: PathBuf::from("src/a.rs"),
+                    symbol: None,
+                    start_line: 0,
+                    end_line: 1,
+                },
+            )
+            .expect_err("start_line 0");
+        assert!(
+            err.to_string().contains("invalid span line window"),
+            "{err}"
+        );
+    }
 }

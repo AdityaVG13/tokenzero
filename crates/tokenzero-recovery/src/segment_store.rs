@@ -106,6 +106,13 @@ impl SegmentStore {
         cas: Option<SharedCas>,
     ) -> Result<Self, SegmentStoreError> {
         let cache = cache.into();
+        if crate::unexpanded_tilde_path(&cache) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpanded ~ store path: {}", cache.display()),
+            )
+            .into());
+        }
         let root = cache.parent().unwrap_or(Path::new(".")).to_path_buf();
         fs::create_dir_all(&root)?;
         // Hold the store lock across create+publish so a concurrent open()
@@ -157,6 +164,13 @@ impl SegmentStore {
         cas: Option<SharedCas>,
     ) -> Result<Self, SegmentStoreError> {
         let cache = cache.into();
+        if crate::unexpanded_tilde_path(&cache) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpanded ~ store path: {}", cache.display()),
+            )
+            .into());
+        }
         let root = cache.parent().unwrap_or(Path::new(".")).to_path_buf();
         // Recovery can truncate the hot segment and rewrite its index, so it must
         // serialize with writers and use a manifest re-read under that lock.
@@ -201,6 +215,16 @@ impl SegmentStore {
         self.publish()
     }
     pub fn put(&mut self, r: &str, b: &[u8], lease: u64) -> Result<(), SegmentStoreError> {
+        if r.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty segment ref").into());
+        }
+        if crate::unexpanded_tilde_path(&self.cache_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpanded ~ store path: {}", self.cache_path.display()),
+            )
+            .into());
+        }
         let _l = Lock::get(lock_path(&self.cache_path))?;
         self.reload()?;
         let content_hash = hash(b);
@@ -279,12 +303,12 @@ impl SegmentStore {
                 entry_bytes: u64::MAX,
                 segment_bytes,
             })?;
-        let entry_bytes = size
-            .checked_add(MAGIC.len() as u64)
-            .ok_or(SegmentStoreError::EntryTooLarge {
-                entry_bytes: u64::MAX,
-                segment_bytes,
-            })?;
+        let entry_bytes =
+            size.checked_add(MAGIC.len() as u64)
+                .ok_or(SegmentStoreError::EntryTooLarge {
+                    entry_bytes: u64::MAX,
+                    segment_bytes,
+                })?;
         if entry_bytes > segment_bytes {
             return Err(SegmentStoreError::EntryTooLarge {
                 entry_bytes,
@@ -488,9 +512,7 @@ fn desc(g: u64) -> SegmentDescriptor {
     }
 }
 fn next_generation(generation: u64) -> Result<u64, SegmentStoreError> {
-    generation
-        .checked_add(1)
-        .ok_or(SegmentStoreError::Overflow)
+    generation.checked_add(1).ok_or(SegmentStoreError::Overflow)
 }
 fn hash(b: &[u8]) -> String {
     crate::migration::full_sha256_hex(b)
@@ -628,10 +650,7 @@ fn recover(root: &Path, d: &SegmentDescriptor) -> Result<SegmentIndex, SegmentSt
             break;
         }
         valid = f.stream_position()?;
-        let Some(offset) = start
-            .checked_add(12)
-            .and_then(|n| n.checked_add(ml as u64))
-        else {
+        let Some(offset) = start.checked_add(12).and_then(|n| n.checked_add(ml as u64)) else {
             break;
         };
         idx.entries.insert(
@@ -668,7 +687,7 @@ fn portable_hash(r: &str) -> Option<&str> {
         .strip_prefix("tz://blob/")
         .or_else(|| r.strip_prefix("fz://blob/"))
         .or_else(|| r.strip_prefix("gz://blob/"))?;
-    (h.len() == 64).then_some(h)
+    zero_ref::is_full_lower_hex(h).then_some(h)
 }
 fn remove(p: &Path) -> io::Result<()> {
     match fs::remove_file(p) {
@@ -744,5 +763,18 @@ mod expand_lock_tests {
             check.expand("keep").unwrap().as_deref(),
             Some(b"live-bytes-xxxx".as_slice())
         );
+    }
+
+    #[test]
+    fn put_refuses_empty_ref_and_unexpanded_tilde() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut store = SegmentStore::create_shadow(cache, None).unwrap();
+        let err = store.put("", b"bytes", u64::MAX).expect_err("empty ref");
+        assert!(err.to_string().contains("empty segment ref"), "{err}");
+
+        let err = SegmentStore::create_shadow(PathBuf::from("~/recovery-cache.json"), None)
+            .expect_err("tilde store");
+        assert!(err.to_string().contains("unexpanded ~ store path"), "{err}");
     }
 }

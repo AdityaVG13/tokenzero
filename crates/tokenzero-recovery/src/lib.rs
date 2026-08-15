@@ -561,6 +561,16 @@ impl Default for RecoveryConfig {
     }
 }
 
+impl RecoveryConfig {
+    /// Fail loud when a load cap cannot round-trip a snapshot.
+    pub fn validate(&self) -> Result<(), RecoveryError> {
+        if self.max_load_bytes == 0 {
+            return Err(invalid_input("RecoveryConfig.max_load_bytes must be nonzero").into());
+        }
+        Ok(())
+    }
+}
+
 fn default_legacy_compat() -> bool {
     true
 }
@@ -1187,6 +1197,7 @@ impl RecoveryStore {
         source_end_line: usize,
         content_type: ContentType,
     ) -> Result<String, RecoveryError> {
+        refuse_unexpanded_tilde_store_path(path)?;
         let source = fs::read_to_string(path)?;
         let line_count = content_line_count(&source);
         if line_range_out_of_bounds(source_start_line, source_end_line, line_count) {
@@ -1519,9 +1530,8 @@ impl RecoveryStore {
             }
             None => None,
         };
-        let project = crate::shared_cas::project_id(cas.root()).map_err(|err| {
-            io::Error::other(format!("CAS project id for leased publish: {err}"))
-        })?;
+        let project = crate::shared_cas::project_id(cas.root())
+            .map_err(|err| io::Error::other(format!("CAS project id for leased publish: {err}")))?;
         let mut failed = 0usize;
         let mut shrunk = false;
         let mut leased_ops: Vec<String> = Vec::new();
@@ -1627,6 +1637,7 @@ impl RecoveryStore {
                 end_exclusive,
             });
         };
+        refuse_unexpanded_tilde_store_path(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1697,6 +1708,9 @@ impl RecoveryStore {
     }
 
     pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {
+        if alias.is_empty() || target_ref.is_empty() {
+            return Err(invalid_input("alias and target ref must be non-empty").into());
+        }
         self.store_alias_deferred(alias, target_ref);
         self.persist()
     }
@@ -1706,6 +1720,9 @@ impl RecoveryStore {
     /// A conflicting target never replaces the first mapping. The alias is
     /// marked ambiguous so later expansion fails loudly instead.
     pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
+        if alias.is_empty() || target_ref.is_empty() {
+            return;
+        }
         self.skip_empty_persist = false;
         match self.state.aliases.get(alias) {
             Some(current) if current == target_ref => return,
@@ -2839,6 +2856,8 @@ impl RecoveryStore {
             self.evict();
             return Ok(());
         };
+        self.config.validate()?;
+        refuse_unexpanded_tilde_store_path(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -2990,10 +3009,13 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
 fn parse_line_fragment(fragment: &str) -> (Option<usize>, Option<usize>) {
     let value = fragment.trim().trim_start_matches('L');
     let (start, end) = value.split_once('-').unwrap_or((value, value));
-    (
-        start.trim_start_matches('L').parse().ok(),
-        end.trim_start_matches('L').parse().ok(),
-    )
+    let start = start.trim_start_matches('L').parse::<usize>().ok();
+    let end = end.trim_start_matches('L').parse::<usize>().ok();
+    // Line windows are one-based. Zero is malformed, not "slice from line 1".
+    match (start, end) {
+        (Some(0), _) | (_, Some(0)) => (None, None),
+        other => other,
+    }
 }
 
 fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
@@ -3067,7 +3089,7 @@ fn select_content<'a>(
     }
     let (mut selected_start, mut selected_end) = (start_line, end_line);
     resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
-    if let Some(start) = selected_start {
+    if let Some(start) = selected_start.filter(|&line| line > 0) {
         return line_slice_exact(&content, start, selected_end.unwrap_or(start));
     }
     if let Some(symbol) = selector
@@ -3265,11 +3287,13 @@ fn ref_index_root() -> Option<PathBuf> {
         return None;
     }
     if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        return (!unexpanded_tilde_path(&path)).then_some(path);
     }
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+        .filter(|path| !unexpanded_tilde_path(path))
 }
 
 fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {
@@ -3788,6 +3812,8 @@ pub(crate) fn load_state(
     path: &Path,
     config: &RecoveryConfig,
 ) -> Result<Option<RecoveryState>, RecoveryError> {
+    config.validate()?;
+    refuse_unexpanded_tilde_store_path(path)?;
     let Some(file) = open_optional_file(path)? else {
         return Ok(None);
     };
@@ -3864,7 +3890,7 @@ pub fn blob_ref_proven_on_disk(cache_path: &Path, ref_id: &str) -> bool {
         return false;
     };
     // Externalized large-blob sidecar: `<cache>.blobs/<full-hash>.txt`.
-    if hash.len() == 64 {
+    if zero_ref::is_full_lower_hex(hash) {
         let sidecar = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
         if sidecar.is_file() {
             return true;
@@ -3912,6 +3938,26 @@ fn digest_hex(hasher: Sha256) -> String {
 
 fn invalid_data(msg: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
+}
+
+fn invalid_input(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg.into())
+}
+
+/// True when `path` is a literal unexpanded `~` store root (`~/…`), matching
+/// the hub `literal_tilde_root` rule. Never create or persist under it.
+pub(crate) fn unexpanded_tilde_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Normal(component)) if component == "~"
+    )
+}
+
+fn refuse_unexpanded_tilde_store_path(path: &Path) -> Result<(), RecoveryError> {
+    if unexpanded_tilde_path(path) {
+        return Err(invalid_input(format!("unexpanded ~ store path: {}", path.display())).into());
+    }
+    Ok(())
 }
 
 fn finalize_utf8_digest(bytes: Vec<u8>, hasher: Sha256) -> std::io::Result<(String, String)> {
@@ -4741,5 +4787,106 @@ mod select_content_option_tests {
             select_content(content, Some("around:5"), None, None, None, None),
             "2\n3\n4\n5\n6\n7\n8\n"
         );
+    }
+
+    #[test]
+    fn zero_based_range_selector_does_not_slice_line_one() {
+        let content = "one\ntwo\nthree\nfour\nfive\n".to_string();
+        assert_eq!(
+            select_content(content.clone(), Some("range:0-2"), None, None, None, None),
+            content,
+            "range:0 must not silently remap to line 1"
+        );
+        assert_eq!(
+            select_content(content, Some("range:0-2"), Some(5), Some(5), None, None),
+            "five\n",
+            "malformed zero range must not clear an explicit window"
+        );
+    }
+
+    #[test]
+    fn zero_line_selector_does_not_slice_line_one() {
+        let content = "one\ntwo\nthree\n".to_string();
+        assert_eq!(
+            select_content(content.clone(), Some("line:0"), None, None, None, None),
+            content
+        );
+    }
+}
+
+#[cfg(test)]
+mod input_validation_boundary_tests {
+    use super::*;
+    use tokenzero_core::ContentType;
+
+    #[test]
+    fn persist_refuses_unexpanded_tilde_store_path() {
+        let mut store = RecoveryStore::new(Some(PathBuf::from("~/recovery-cache.json")));
+        store.store_blob_deferred("payload", ContentType::Unknown);
+        let err = store.persist_pending().expect_err("tilde store path");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpanded ~ store path"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn store_alias_refuses_empty_refs() {
+        let mut store = RecoveryStore::new(None);
+        let err = store
+            .store_alias(
+                "",
+                "tz://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .expect_err("empty alias");
+        assert!(err.to_string().contains("non-empty"), "{err}");
+        let err = store
+            .store_alias("tz://s/abcdabcdabcdabcd", "")
+            .expect_err("empty target");
+        assert!(err.to_string().contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn recovery_config_zero_load_cap_fails_loud() {
+        let err = RecoveryConfig {
+            max_load_bytes: 0,
+            ..RecoveryConfig::default()
+        }
+        .validate()
+        .expect_err("zero max_load_bytes");
+        assert!(
+            err.to_string().contains("max_load_bytes must be nonzero"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn blob_ref_proven_on_disk_rejects_non_hex_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let fake = "g".repeat(64);
+        fs::create_dir_all(blob_sidecar_dir(&cache)).unwrap();
+        fs::write(
+            blob_sidecar_dir(&cache).join(format!("{fake}.txt")),
+            "not a blob",
+        )
+        .unwrap();
+        assert!(
+            !blob_ref_proven_on_disk(&cache, &format!("tz://blob/{fake}")),
+            "non-hex 64-char sidecar must not prove presence"
+        );
+    }
+
+    #[test]
+    fn unexpanded_tilde_path_matches_hub_literal_root_rule() {
+        assert!(unexpanded_tilde_path(Path::new(
+            "~/tokenzero/recovery-cache.json"
+        )));
+        assert!(unexpanded_tilde_path(Path::new("~")));
+        assert!(!unexpanded_tilde_path(Path::new("/var/~/store")));
+        assert!(!unexpanded_tilde_path(Path::new(
+            "/tmp/recovery-cache.json"
+        )));
     }
 }

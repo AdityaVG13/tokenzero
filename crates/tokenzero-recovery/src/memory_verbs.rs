@@ -154,17 +154,25 @@ pub fn apply_memory_verb(
             }
         }
         MemoryVerb::UpdateCapsule => {
-            let text = request.payload.clone().ok_or_else(|| {
-                not_applied(request.verb, "payload is required")
-            })?;
-            let label = request.label.as_deref().ok_or_else(|| {
-                not_applied(request.verb, "label (span path) is required")
-            })?;
-            let Some(anchor) = working_set.anchor_for_path(Path::new(label)) else {
+            let text = request
+                .payload
+                .clone()
+                .ok_or_else(|| not_applied(request.verb, "payload is required"))?;
+            if text.is_empty() {
+                return Err(not_applied(request.verb, "payload must be non-empty"));
+            }
+            let label = request
+                .label
+                .as_deref()
+                .ok_or_else(|| not_applied(request.verb, "label (span path) is required"))?;
+            if label.is_empty() {
                 return Err(not_applied(
                     request.verb,
-                    format!("no capsule at {label}"),
+                    "label (span path) must be non-empty",
                 ));
+            }
+            let Some(anchor) = working_set.anchor_for_path(Path::new(label)) else {
+                return Err(not_applied(request.verb, format!("no capsule at {label}")));
             };
             require_visible_admit(
                 request.verb,
@@ -227,12 +235,23 @@ fn not_applied(verb: MemoryVerb, reason: impl Into<String>) -> MemoryVerbError {
 }
 
 fn payload_anchor(request: &MemoryVerbRequest) -> Result<(String, SpanAnchor), MemoryVerbError> {
-    let text = request.payload.clone().ok_or_else(|| {
-        not_applied(request.verb, "payload is required")
-    })?;
-    let path = request.label.as_deref().ok_or_else(|| {
-        not_applied(request.verb, "label (span path) is required")
-    })?;
+    let text = request
+        .payload
+        .clone()
+        .ok_or_else(|| not_applied(request.verb, "payload is required"))?;
+    if text.is_empty() {
+        return Err(not_applied(request.verb, "payload must be non-empty"));
+    }
+    let path = request
+        .label
+        .as_deref()
+        .ok_or_else(|| not_applied(request.verb, "label (span path) is required"))?;
+    if path.is_empty() {
+        return Err(not_applied(
+            request.verb,
+            "label (span path) must be non-empty",
+        ));
+    }
     let end_line = text.lines().count().max(1);
     Ok((
         text,
@@ -246,23 +265,22 @@ fn payload_anchor(request: &MemoryVerbRequest) -> Result<(String, SpanAnchor), M
 }
 
 fn span_id(request: &MemoryVerbRequest) -> Result<u64, MemoryVerbError> {
-    let raw = request.ref_ids.first().ok_or_else(|| {
-        not_applied(request.verb, "ref_ids[0] span id is required")
-    })?;
-    raw.parse::<u64>().map_err(|_| {
-        not_applied(
-            request.verb,
-            format!("ref_ids[0] is not a span id: {raw}"),
-        )
-    })
+    let raw = request
+        .ref_ids
+        .first()
+        .ok_or_else(|| not_applied(request.verb, "ref_ids[0] span id is required"))?;
+    raw.parse::<u64>()
+        .map_err(|_| not_applied(request.verb, format!("ref_ids[0] is not a span id: {raw}")))
 }
 
 fn link_pair(request: &MemoryVerbRequest) -> Result<(&str, &str), MemoryVerbError> {
     match request.ref_ids.as_slice() {
-        [source, alias, ..] => Ok((source.as_str(), alias.as_str())),
+        [source, alias, ..] if !source.is_empty() && !alias.is_empty() => {
+            Ok((source.as_str(), alias.as_str()))
+        }
         _ => Err(not_applied(
             request.verb,
-            "link_refs requires ref_ids[0] source and ref_ids[1] alias",
+            "link_refs requires non-empty ref_ids[0] source and ref_ids[1] alias",
         )),
     }
 }
@@ -280,3 +298,54 @@ fn persist_fingerprint(path: &Path) -> (Option<FileIdentity>, Option<FileIdentit
 #[cfg(test)]
 #[path = "../../../tests/recovery/inline/memory_verbs__tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod input_validation_tests {
+    use super::*;
+    use crate::RecoveryStore;
+    use crate::working_set::WorkingSet;
+
+    #[test]
+    fn store_refuses_empty_payload_and_label() {
+        let mut store = RecoveryStore::new(None);
+        let mut set = WorkingSet::new(8192);
+        let mut req = MemoryVerbRequest {
+            verb: MemoryVerb::Store,
+            ref_ids: Vec::new(),
+            payload: Some(String::new()),
+            label: Some("src/a.rs".into()),
+        };
+        match apply_memory_verb(&mut set, &mut store, &req) {
+            Err(MemoryVerbError::NotApplied { reason, .. }) => {
+                assert!(reason.contains("non-empty"), "{reason}");
+            }
+            other => panic!("expected NotApplied, got {other:?}"),
+        }
+        req.payload = Some("body".into());
+        req.label = Some(String::new());
+        match apply_memory_verb(&mut set, &mut store, &req) {
+            Err(MemoryVerbError::NotApplied { reason, .. }) => {
+                assert!(reason.contains("non-empty"), "{reason}");
+            }
+            other => panic!("expected NotApplied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_refs_refuses_empty_ids() {
+        let mut store = RecoveryStore::new(None);
+        let mut set = WorkingSet::new(8192);
+        let req = MemoryVerbRequest {
+            verb: MemoryVerb::LinkRefs,
+            ref_ids: vec![String::new(), "tz://blob/alias".into()],
+            payload: None,
+            label: None,
+        };
+        match apply_memory_verb(&mut set, &mut store, &req) {
+            Err(MemoryVerbError::NotApplied { reason, .. }) => {
+                assert!(reason.contains("non-empty"), "{reason}");
+            }
+            other => panic!("expected NotApplied, got {other:?}"),
+        }
+    }
+}

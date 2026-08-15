@@ -124,7 +124,10 @@ impl std::fmt::Display for ActionCacheError {
                 "actioncache eviction refused: retained valid mass {resident_mass} - {evict_weight} would fall below the 99% floor of demanded {demanded_mass} (slack {slack_ppm}ppm)"
             ),
             Self::InvalidDemandMass => {
-                write!(f, "actioncache eviction slack: demanded mass must be nonzero")
+                write!(
+                    f,
+                    "actioncache eviction slack: demanded mass must be nonzero"
+                )
             }
         }
     }
@@ -207,6 +210,18 @@ impl ActionCacheIndex {
 
     pub fn put(&self, entry: ActionCacheEntry) -> Result<(), ActionCacheError> {
         validate_key(&entry.key)?;
+        if entry.artifact_ref.is_empty() {
+            return Err(ActionCacheError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "actioncache artifact_ref must be non-empty",
+            )));
+        }
+        if crate::unexpanded_tilde_path(&self.root) {
+            return Err(ActionCacheError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpanded ~ store path: {}", self.root.display()),
+            )));
+        }
         // Tenancy (ZS-CACHE-015): never clobber another world's live validity
         // record. A live entry written under a different world stays in place;
         // the write-through caller still recorded its own decision.
@@ -649,5 +664,26 @@ mod serve_l3_recheck_tests {
             index.serve(&item.key).unwrap().is_none(),
             "serve must not return an L3-cold artifact_ref"
         );
+    }
+
+    #[test]
+    fn put_refuses_empty_artifact_ref() {
+        let dir = tempdir().unwrap();
+        let index = ActionCacheIndex::open(dir.path());
+        let mut item = live_entry(3);
+        item.artifact_ref.clear();
+        let err = index.put(item).expect_err("empty artifact_ref");
+        assert!(
+            matches!(err, ActionCacheError::Io(ref io) if io.kind() == io::ErrorKind::InvalidInput),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn put_refuses_unexpanded_tilde_store_root() {
+        let index = ActionCacheIndex::open(Path::new("~"));
+        let err = index.put(live_entry(4)).expect_err("tilde store root");
+        let msg = err.to_string();
+        assert!(msg.contains("unexpanded ~ store path"), "{msg}");
     }
 }

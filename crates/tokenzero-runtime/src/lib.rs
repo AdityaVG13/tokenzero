@@ -32,6 +32,9 @@ pub const SHELL_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 
 pub const DEFAULT_SHELL_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_SHELL_SPILL_BYTES: usize = 1024 * 1024;
+/// Hard ceiling for in-memory stream capture. Oversize env/policy values fail
+/// at run rather than allocating unbounded preview buffers.
+pub const MAX_SHELL_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -175,6 +178,11 @@ pub fn plan_command_for_platform(
 ) -> Result<RuntimePlan, RuntimeError> {
     if argv.is_empty() || argv.iter().all(String::is_empty) {
         return Err(RuntimeError::EmptyCommand);
+    }
+    if argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(invalid_runtime_input(
+            "command arguments must not contain NUL",
+        ));
     }
     let make = |execution_mode, argv, shell, shell_arg, explicit_binary| RuntimePlan {
         execution_mode,
@@ -468,6 +476,33 @@ where
     C: Fn() -> bool,
 {
     let output_policy = output_policy.normalized();
+    if output_policy.per_stream_capture_bytes > MAX_SHELL_CAPTURE_BYTES {
+        return Err(invalid_runtime_input(format!(
+            "per_stream_capture_bytes {} exceeds hard max {MAX_SHELL_CAPTURE_BYTES}",
+            output_policy.per_stream_capture_bytes
+        )));
+    }
+    if let Some(dir) = output_policy.spill_dir.as_deref()
+        && unexpanded_tilde_path(dir)
+    {
+        return Err(invalid_runtime_input(format!(
+            "unexpanded ~ spill path: {}",
+            dir.display()
+        )));
+    }
+    if let Some(cwd) = cwd
+        && unexpanded_tilde_path(cwd)
+    {
+        return Err(invalid_runtime_input(format!(
+            "unexpanded ~ cwd: {}",
+            cwd.display()
+        )));
+    }
+    if let Some(env) = env_overrides {
+        for (key, value) in env {
+            validate_env_pair(key, value)?;
+        }
+    }
     let plan = plan_command(argv, cwd, explicit_shell)?;
     let command_display = match plan.execution_mode {
         ExecutionMode::Shell => plan.argv.last().cloned().unwrap_or_else(|| argv.join(" ")),
@@ -1347,14 +1382,42 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
     let mut out = BTreeMap::new();
     for pair in pairs {
         let Some((key, value)) = pair.split_once('=') else {
-            return Err(RuntimeError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("--env requires KEY=VALUE, got {pair}"),
+            return Err(invalid_runtime_input(format!(
+                "--env requires KEY=VALUE, got {pair}"
             )));
         };
+        validate_env_pair(key, value)?;
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+fn validate_env_pair(key: &str, value: &str) -> Result<(), RuntimeError> {
+    if key.is_empty() {
+        return Err(invalid_runtime_input(
+            "environment variable name must be non-empty",
+        ));
+    }
+    if key.contains('\0') || value.contains('\0') {
+        return Err(invalid_runtime_input(
+            "environment variable names and values must not contain NUL",
+        ));
+    }
+    Ok(())
+}
+
+fn unexpanded_tilde_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Normal(component)) if component == "~"
+    )
+}
+
+fn invalid_runtime_input(msg: impl Into<String>) -> RuntimeError {
+    RuntimeError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        msg.into(),
+    ))
 }
 
 #[cfg(test)]
@@ -1368,3 +1431,75 @@ mod inherited_pipe_join_tests;
 #[cfg(test)]
 #[path = "../../../tests/runtime/inline/lib__spill_prune_bounds_tests.rs"]
 mod spill_prune_bounds_tests;
+
+#[cfg(test)]
+mod input_validation_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn env_map_refuses_empty_key_and_nul() {
+        let err = env_map(&["=value".into()]).expect_err("empty key");
+        assert!(err.to_string().contains("non-empty"), "{err}");
+        let err = env_map(&["KEY\0=value".into()]).expect_err("nul key");
+        assert!(err.to_string().contains("NUL"), "{err}");
+        let err = env_map(&["KEY=val\0ue".into()]).expect_err("nul value");
+        assert!(err.to_string().contains("NUL"), "{err}");
+        let ok = env_map(&["KEY=value".into()]).unwrap();
+        assert_eq!(ok.get("KEY").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn plan_command_refuses_nul_in_argv() {
+        let err = plan_command(&["echo".into(), "ok\0".into()], None, false).expect_err("nul argv");
+        assert!(err.to_string().contains("NUL"), "{err}");
+    }
+
+    #[test]
+    fn run_refuses_unexpanded_tilde_cwd_and_oversize_capture() {
+        let err = run_command(
+            &["true".into()],
+            Some(Path::new("~")),
+            None,
+            None,
+            Duration::from_millis(10),
+            false,
+        )
+        .expect_err("tilde cwd");
+        assert!(err.to_string().contains("unexpanded ~ cwd"), "{err}");
+
+        let policy = RunOutputPolicy {
+            per_stream_capture_bytes: MAX_SHELL_CAPTURE_BYTES + 1,
+            spill_threshold_bytes: 1024,
+            spill_dir: None,
+        };
+        let err = run_command_with_policy(
+            &["true".into()],
+            None,
+            None,
+            None,
+            Duration::from_millis(10),
+            false,
+            policy,
+        )
+        .expect_err("oversize capture");
+        assert!(err.to_string().contains("hard max"), "{err}");
+
+        let policy = RunOutputPolicy {
+            per_stream_capture_bytes: 1024,
+            spill_threshold_bytes: 512,
+            spill_dir: Some(PathBuf::from("~/spills")),
+        };
+        let err = run_command_with_policy(
+            &["true".into()],
+            None,
+            None,
+            None,
+            Duration::from_millis(10),
+            false,
+            policy,
+        )
+        .expect_err("tilde spill");
+        assert!(err.to_string().contains("unexpanded ~ spill"), "{err}");
+    }
+}
