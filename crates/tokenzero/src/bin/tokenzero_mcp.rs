@@ -123,22 +123,41 @@ Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only 
     run_fastmcp_stdio(config);
 }
 
-fn parse_flag(args: &[String], name: &str) -> Option<String> {
+/// Parse `--name VALUE` or `--name=VALUE`. Missing or flag-shaped values fail
+/// loud so `install --prefix --binary …` cannot treat `--binary` as a path.
+fn parse_flag(args: &[String], name: &str) -> Result<Option<String>, String> {
     let mut i = 0;
     while i < args.len() {
         if args[i] == name {
-            return args.get(i + 1).cloned();
+            return match args.get(i + 1) {
+                Some(value) if !value.starts_with('-') => Ok(Some(value.clone())),
+                Some(value) => Err(format!("{name} requires a value (got {value:?})")),
+                None => Err(format!("{name} requires a value")),
+            };
         }
         if let Some(rest) = args[i].strip_prefix(&format!("{name}=")) {
-            return Some(rest.to_string());
+            if rest.is_empty() {
+                return Err(format!("{name} requires a value"));
+            }
+            return Ok(Some(rest.to_string()));
         }
         i += 1;
     }
-    None
+    Ok(None)
+}
+
+fn flag_or_exit(args: &[String], name: &str) -> Option<String> {
+    match parse_flag(args, name) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("tokenzero-mcp: {error}");
+            process::exit(2);
+        }
+    }
 }
 
 fn run_install(args: &[String]) {
-    if let Some(requested) = parse_flag(args, "--surface") {
+    if let Some(requested) = flag_or_exit(args, "--surface") {
         if PackageSurface::parse(&requested).ok() != Some(SURFACE) {
             eprintln!(
                 "tokenzero-mcp: install --surface must be 'mcp' for this artifact (got {requested:?})"
@@ -146,10 +165,10 @@ fn run_install(args: &[String]) {
             process::exit(2);
         }
     }
-    let prefix = parse_flag(args, "--prefix")
+    let prefix = flag_or_exit(args, "--prefix")
         .map(PathBuf::from)
         .unwrap_or_else(default_install_prefix);
-    let binary = parse_flag(args, "--binary")
+    let binary = flag_or_exit(args, "--binary")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_exe().unwrap_or_else(|_| PathBuf::from("tokenzero-mcp")));
     match install_surface(SURFACE, &prefix, &binary) {
@@ -171,7 +190,7 @@ fn run_install(args: &[String]) {
 }
 
 fn run_uninstall(args: &[String]) {
-    let prefix = parse_flag(args, "--prefix")
+    let prefix = flag_or_exit(args, "--prefix")
         .map(PathBuf::from)
         .unwrap_or_else(default_install_prefix);
     match uninstall_surface(&prefix) {
@@ -187,3 +206,82 @@ fn run_uninstall(args: &[String]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flag;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_flag_absent_is_none() {
+        assert_eq!(
+            parse_flag(&args(&["tokenzero-mcp", "install"]), "--prefix").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_flag_space_and_equals_forms() {
+        assert_eq!(
+            parse_flag(
+                &args(&["tokenzero-mcp", "install", "--prefix", "/tmp/tz"]),
+                "--prefix"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("/tmp/tz")
+        );
+        assert_eq!(
+            parse_flag(
+                &args(&["tokenzero-mcp", "install", "--prefix=/tmp/tz"]),
+                "--prefix"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("/tmp/tz")
+        );
+    }
+
+    #[test]
+    fn parse_flag_rejects_missing_or_flag_shaped_values() {
+        let missing = parse_flag(&args(&["tokenzero-mcp", "install", "--prefix"]), "--prefix")
+            .expect_err("bare --prefix must fail loud");
+        assert!(missing.contains("requires a value"), "{missing}");
+
+        let empty = parse_flag(&args(&["tokenzero-mcp", "install", "--prefix="]), "--prefix")
+            .expect_err("empty --prefix= must fail loud");
+        assert!(empty.contains("requires a value"), "{empty}");
+
+        let stolen = parse_flag(
+            &args(&[
+                "tokenzero-mcp",
+                "install",
+                "--prefix",
+                "--binary",
+                "/tmp/bin",
+            ]),
+            "--prefix",
+        )
+        .expect_err("--prefix must not swallow the next flag");
+        assert!(stolen.contains("--binary"), "{stolen}");
+        assert_eq!(
+            parse_flag(
+                &args(&[
+                    "tokenzero-mcp",
+                    "install",
+                    "--prefix",
+                    "--binary",
+                    "/tmp/bin",
+                ]),
+                "--binary"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("/tmp/bin")
+        );
+    }
+}
+
