@@ -1,11 +1,19 @@
 //! RACC actions-v2 memory verbs as the TokenZero working-set policy surface.
 //!
 //! The substrate stays deterministic (`WorkingSet` admit/evict/touch). These
-//! verbs are the named interface a hub policy may drive later. This module is
-//! the type stub: it names every verb and the existing primitive it maps onto.
-//! It does not run a trained policy.
+//! verbs are the named interface a hub policy may drive. Policy does not live
+//! here. `describe_memory_verb` names a target without mutating it;
+//! `apply_memory_verb` runs the mapped primitive and reports `applied: true`
+//! only after a visible mutation.
 
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::SystemTime;
+
+use crate::working_set::{SpanAnchor, WorkingSet};
+use crate::{RecoveryError, RecoveryStore};
 
 /// Six RACC actions-v2 memory-management verbs (tokenzero-fmeo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,9 +60,30 @@ impl MemoryVerb {
             Self::LinkRefs => "working_set.evicted_refs",
         }
     }
+
+    /// Parse a product verb name. Unknown names fail loud.
+    pub fn from_name(name: &str) -> Result<Self, MemoryVerbError> {
+        match name {
+            "store" => Ok(Self::Store),
+            "commit_session" => Ok(Self::CommitSession),
+            "update_capsule" => Ok(Self::UpdateCapsule),
+            "forget_visible" => Ok(Self::ForgetVisible),
+            "promote_anchor" => Ok(Self::PromoteAnchor),
+            "link_refs" => Ok(Self::LinkRefs),
+            other => Err(MemoryVerbError::UnknownVerb(other.to_string())),
+        }
+    }
 }
 
-/// Policy-facing request. Fields are optional because stubs do not execute.
+impl FromStr for MemoryVerb {
+    type Err = MemoryVerbError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::from_name(name)
+    }
+}
+
+/// Policy-facing request. Apply fails loud when a verb's required fields are missing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryVerbRequest {
     pub verb: MemoryVerb,
@@ -66,13 +95,22 @@ pub struct MemoryVerbRequest {
     pub label: Option<String>,
 }
 
-/// Describe-only effect: names the substrate target without mutating it.
+/// Effect of a describe or apply. `applied` is true only after a visible mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryVerbEffect {
     pub verb: MemoryVerb,
     pub substrate: String,
-    /// Stubs never apply; a later bead wires execution.
     pub applied: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryVerbError {
+    #[error("unknown memory verb: {0}")]
+    UnknownVerb(String),
+    #[error("memory verb {verb} did not mutate: {reason}")]
+    NotApplied { verb: &'static str, reason: String },
+    #[error(transparent)]
+    Recovery(#[from] RecoveryError),
 }
 
 /// Map a request onto the deterministic substrate. Does not mutate state.
@@ -82,6 +120,140 @@ pub fn describe_memory_verb(request: &MemoryVerbRequest) -> MemoryVerbEffect {
         substrate: request.verb.substrate_target().to_string(),
         applied: false,
     }
+}
+
+/// Run the mapped substrate primitive. `applied` is true only after a visible
+/// mutation. Unknown names must go through `MemoryVerb::from_name` (fail loud).
+/// Missing fields, missing spans, and no-op primitives return `Err`, never
+/// `Ok` with `applied: false`.
+pub fn apply_memory_verb(
+    working_set: &mut WorkingSet,
+    store: &mut RecoveryStore,
+    request: &MemoryVerbRequest,
+) -> Result<MemoryVerbEffect, MemoryVerbError> {
+    match request.verb {
+        MemoryVerb::Store => {
+            let (text, anchor) = payload_anchor(request)?;
+            working_set.admit(store, text, anchor)?;
+        }
+        MemoryVerb::CommitSession => {
+            let path = store.persistence_path.clone().ok_or_else(|| {
+                not_applied(
+                    request.verb,
+                    "commit_session requires a recovery persist path",
+                )
+            })?;
+            let before = persist_fingerprint(&path);
+            store.persist_pending()?;
+            let after = persist_fingerprint(&path);
+            if before == after {
+                return Err(not_applied(
+                    request.verb,
+                    "commit_session persist did not mutate the recovery store",
+                ));
+            }
+        }
+        MemoryVerb::UpdateCapsule => {
+            let text = request.payload.clone().ok_or_else(|| {
+                not_applied(request.verb, "payload is required")
+            })?;
+            let label = request.label.as_deref().ok_or_else(|| {
+                not_applied(request.verb, "label (span path) is required")
+            })?;
+            let Some(anchor) = working_set.anchor_for_path(Path::new(label)) else {
+                return Err(not_applied(
+                    request.verb,
+                    format!("no capsule at {label}"),
+                ));
+            };
+            working_set.rewrite_render(store, text, anchor)?;
+        }
+        MemoryVerb::ForgetVisible => {
+            let id = span_id(request)?;
+            if working_set.evict(store, id)?.is_none() {
+                return Err(not_applied(
+                    request.verb,
+                    format!("forget_visible did not page out span {id}"),
+                ));
+            }
+        }
+        MemoryVerb::PromoteAnchor => {
+            let id = span_id(request)?;
+            if !working_set.touch(id) {
+                return Err(not_applied(
+                    request.verb,
+                    format!("promote_anchor did not touch span {id}"),
+                ));
+            }
+        }
+        MemoryVerb::LinkRefs => {
+            let (source, alias) = link_pair(request)?;
+            if !working_set.link_refs(source, alias) {
+                return Err(not_applied(
+                    request.verb,
+                    format!("link_refs did not record {source} -> {alias}"),
+                ));
+            }
+        }
+    }
+    Ok(MemoryVerbEffect {
+        verb: request.verb,
+        substrate: request.verb.substrate_target().to_string(),
+        applied: true,
+    })
+}
+
+fn not_applied(verb: MemoryVerb, reason: impl Into<String>) -> MemoryVerbError {
+    MemoryVerbError::NotApplied {
+        verb: verb.as_str(),
+        reason: reason.into(),
+    }
+}
+
+fn payload_anchor(request: &MemoryVerbRequest) -> Result<(String, SpanAnchor), MemoryVerbError> {
+    let text = request.payload.clone().ok_or_else(|| {
+        not_applied(request.verb, "payload is required")
+    })?;
+    let path = request.label.as_deref().ok_or_else(|| {
+        not_applied(request.verb, "label (span path) is required")
+    })?;
+    let end_line = text.lines().count().max(1);
+    Ok((
+        text,
+        SpanAnchor {
+            path: PathBuf::from(path),
+            symbol: None,
+            start_line: 1,
+            end_line,
+        },
+    ))
+}
+
+fn span_id(request: &MemoryVerbRequest) -> Result<u64, MemoryVerbError> {
+    let raw = request.ref_ids.first().ok_or_else(|| {
+        not_applied(request.verb, "ref_ids[0] span id is required")
+    })?;
+    raw.parse::<u64>().map_err(|_| {
+        not_applied(
+            request.verb,
+            format!("ref_ids[0] is not a span id: {raw}"),
+        )
+    })
+}
+
+fn link_pair(request: &MemoryVerbRequest) -> Result<(&str, &str), MemoryVerbError> {
+    match request.ref_ids.as_slice() {
+        [source, alias, ..] => Ok((source.as_str(), alias.as_str())),
+        _ => Err(not_applied(
+            request.verb,
+            "link_refs requires ref_ids[0] source and ref_ids[1] alias",
+        )),
+    }
+}
+
+fn persist_fingerprint(path: &Path) -> Option<(u64, Option<SystemTime>)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()))
 }
 
 #[cfg(test)]

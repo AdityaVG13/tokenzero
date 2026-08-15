@@ -512,6 +512,54 @@ impl WorkingSet {
         true
     }
 
+    /// Page out one resident span: drop visible text, keep the exact blob ref.
+    /// Returns `None` when `id` is missing or already evicted (no mutation).
+    pub fn evict(
+        &mut self,
+        store: &mut RecoveryStore,
+        id: u64,
+    ) -> Result<Option<EvictedSpan>, RecoveryError> {
+        let Some(victim) = self.spans.iter().position(|span| {
+            span.id == id && matches!(span.body, SpanBody::Resident(_))
+        }) else {
+            return Ok(None);
+        };
+        self.page_out_at(store, victim).map(Some)
+    }
+
+    pub fn evicted_refs(&self) -> &HashMap<String, Vec<u64>> {
+        &self.evicted_refs
+    }
+
+    pub fn anchor_for_path(&self, path: &Path) -> Option<SpanAnchor> {
+        self.spans
+            .iter()
+            .find(|span| span.anchor.path == path)
+            .map(|span| span.anchor.clone())
+    }
+
+    /// Record that `alias` recovers the same spans as `source`.
+    /// Returns false when `source` is unknown, equal to `alias`, or the map is unchanged.
+    pub fn link_refs(&mut self, source: &str, alias: &str) -> bool {
+        if source == alias {
+            return false;
+        }
+        let Some(ids) = self.evicted_refs.get(source).cloned() else {
+            return false;
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let entry = self.evicted_refs.entry(alias.to_string()).or_default();
+        let before = entry.len();
+        for id in ids {
+            if !entry.contains(&id) {
+                entry.push(id);
+            }
+        }
+        entry.len() > before
+    }
+
     pub fn used_tokens(&self) -> usize {
         self.spans.iter().map(ResidentSpan::visible_tokens).sum()
     }
@@ -644,48 +692,55 @@ impl WorkingSet {
                 })
                 .map(|candidate| candidate.0);
             let Some(victim) = victim else { break };
-
-            let (bytes, anchor, id) = {
-                let span = &self.spans[victim];
-                let SpanBody::Resident(text) = &span.body else {
-                    unreachable!()
-                };
-                (text, &span.anchor, span.id)
-            };
-            let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
-            let replacement = format_ref_line(ref_id.clone(), anchor);
-            let bytes_evicted = bytes.len();
-            let tokens_evicted = count_tokens(bytes) as u64;
-            self.evicted_tokens_total = self.evicted_tokens_total.saturating_add(tokens_evicted);
-            self.max_evicted_tokens = self.max_evicted_tokens.max(tokens_evicted);
-            self.spans[victim].body = SpanBody::Evicted {
-                ref_id: ref_id.clone(),
-                replacement: replacement.clone(),
-            };
-            self.evicted_refs
-                .entry(ref_id.clone())
-                .or_default()
-                .push(id);
-            self.telemetry.evictions = self.telemetry.evictions.saturating_add(1);
-            self.telemetry.churn = self.telemetry.churn.saturating_add(1);
-            self.telemetry.bytes_evicted = self
-                .telemetry
-                .bytes_evicted
-                .saturating_add(bytes_evicted as u64);
-            self.telemetry.refs_created = self.telemetry.refs_created.saturating_add(1);
-            self.refresh_rates();
-            evicted.push(EvictedSpan {
-                id,
-                ref_id,
-                replacement,
-                bytes_evicted,
-            });
+            evicted.push(self.page_out_at(store, victim)?);
         }
         // Best-effort: spans already reduced to their eviction markers cannot
         // shrink further, so a budget below the marker floor is served at the
         // floor rather than failing the admission (which would strand the full
         // inline text at the caller - the exact opposite of paging out).
         Ok(evicted)
+    }
+
+    fn page_out_at(
+        &mut self,
+        store: &mut RecoveryStore,
+        victim: usize,
+    ) -> Result<EvictedSpan, RecoveryError> {
+        let (bytes, anchor, id) = {
+            let span = &self.spans[victim];
+            let SpanBody::Resident(text) = &span.body else {
+                unreachable!("page_out_at requires a resident span")
+            };
+            (text, &span.anchor, span.id)
+        };
+        let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
+        let replacement = format_ref_line(ref_id.clone(), anchor);
+        let bytes_evicted = bytes.len();
+        let tokens_evicted = count_tokens(bytes) as u64;
+        self.evicted_tokens_total = self.evicted_tokens_total.saturating_add(tokens_evicted);
+        self.max_evicted_tokens = self.max_evicted_tokens.max(tokens_evicted);
+        self.spans[victim].body = SpanBody::Evicted {
+            ref_id: ref_id.clone(),
+            replacement: replacement.clone(),
+        };
+        self.evicted_refs
+            .entry(ref_id.clone())
+            .or_default()
+            .push(id);
+        self.telemetry.evictions = self.telemetry.evictions.saturating_add(1);
+        self.telemetry.churn = self.telemetry.churn.saturating_add(1);
+        self.telemetry.bytes_evicted = self
+            .telemetry
+            .bytes_evicted
+            .saturating_add(bytes_evicted as u64);
+        self.telemetry.refs_created = self.telemetry.refs_created.saturating_add(1);
+        self.refresh_rates();
+        Ok(EvictedSpan {
+            id,
+            ref_id,
+            replacement,
+            bytes_evicted,
+        })
     }
 }
 
