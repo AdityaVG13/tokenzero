@@ -8,7 +8,7 @@ use crate::PulseEvent;
 /// Digest mismatch is fail-closed: no fragment bytes are returned once the
 /// on-disk blob hash diverges from the requested identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FragmentServeError {
+pub(crate) enum FragmentServeError {
     NotFound,
     Io(String),
     DigestMismatch { expected: String, actual: String },
@@ -43,7 +43,7 @@ impl std::error::Error for FragmentServeError {}
 /// Order is deliberate: digest is computed and compared before any fragment
 /// bytes are returned. Corrupt on-disk bytes therefore fail closed as
 /// [`FragmentServeError::DigestMismatch`] with no slice leak.
-pub fn serve_fragment_after_digest(
+pub(crate) fn serve_fragment_after_digest(
     store: &zero_store::SharedCas,
     hash: &str,
     byte_range: Range<usize>,

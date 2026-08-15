@@ -14,8 +14,7 @@ use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
 mod eprocess;
 pub use eprocess::{
-    AnytimeFailureMonitor, EProcessSnapshot, FragmentServeError, MonitorConfigError,
-    serve_fragment_after_digest,
+    AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError,
 };
 
 trait IntoIo<T> {
