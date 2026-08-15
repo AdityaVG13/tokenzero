@@ -159,10 +159,13 @@ impl HotPathProfileCard {
         self.attribution_pct(path) >= MT8_MIN_ATTRIBUTION_PCT
     }
 
-    /// Export JSON including counts and attribution percentages for harness consumers.
+    /// Export JSON including counts and enter-count attribution percentages.
+    ///
+    /// `expand_pct` / `read_pct` / `capsule_pct` are `100 * count / total`,
+    /// not wall-time shares. The `attribution` field is the discriminator.
     pub fn to_export_json(&self) -> String {
         format!(
-            r#"{{"expand":{},"read":{},"capsule":{},"total":{},"expand_pct":{:.6},"read_pct":{:.6},"capsule_pct":{:.6},"mt8_min_pct":{}}}"#,
+            r#"{{"attribution":"enter_count","expand":{},"read":{},"capsule":{},"total":{},"expand_pct":{:.6},"read_pct":{:.6},"capsule_pct":{:.6},"mt8_min_pct":{}}}"#,
             self.snapshot.expand,
             self.snapshot.read,
             self.snapshot.capsule,

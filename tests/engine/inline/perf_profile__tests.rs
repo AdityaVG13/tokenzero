@@ -99,6 +99,21 @@ fn hot_path_profile_card_reads_snapshot_delta_after_n_calls() {
     assert!(snap_json.contains("\"capsule\":1"));
     assert!(snap_json.contains("\"total\":21"));
     let card_json = card.to_export_json();
+    assert!(
+        card_json.contains("\"attribution\":\"enter_count\""),
+        "MT8 percents are enter counts, not wall-time: {card_json}"
+    );
     assert!(card_json.contains("\"expand_pct\":"));
     assert!(card_json.contains("\"mt8_min_pct\":0.1"));
+    assert!(
+        !card_json.contains("wall") && !card_json.contains("latency"),
+        "{card_json}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&card_json).expect("card JSON must parse");
+    assert_eq!(parsed["attribution"], "enter_count");
+    let expand_pct = parsed["expand_pct"].as_f64().expect("expand_pct");
+    let total = parsed["total"].as_u64().expect("total");
+    let expand = parsed["expand"].as_u64().expect("expand");
+    assert!((expand_pct - 100.0 * expand as f64 / total as f64).abs() < 1e-5);
 }
