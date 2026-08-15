@@ -454,8 +454,9 @@ impl WorkingSet {
         let (resident_id, resident_anchor) = if partial {
             let relative_start = effective_start.unwrap_or(1).max(1);
             let returned_lines = result.content.lines().count().max(1);
-            let requested_end =
-                effective_end.unwrap_or_else(|| relative_start + returned_lines - 1);
+            let requested_end = effective_end.unwrap_or_else(|| {
+                relative_start.saturating_add(returned_lines.saturating_sub(1))
+            });
             let relative_end = requested_end.max(relative_start);
             let absolute_start = source_anchor
                 .start_line

@@ -275,11 +275,14 @@ pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
     if !dry_run && marker_fresh(&marker, AUTO_MAINTENANCE_COALESCE) {
         return json!({"coalesced": true, "skipped": "recent_cross_process"});
     }
+    drop(guard);
     let report = cache_maintenance(cache_path, dry_run);
     if !dry_run {
         let _ = atomic_touch(&marker);
     }
-    *guard = Some((cache_path.to_path_buf(), Instant::now()));
+    if let Ok(mut guard) = auto_maintenance_state().lock() {
+        *guard = Some((cache_path.to_path_buf(), Instant::now()));
+    }
     report
 }
 

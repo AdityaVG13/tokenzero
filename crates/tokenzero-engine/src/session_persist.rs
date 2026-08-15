@@ -115,7 +115,7 @@ impl SessionPersistence {
         let delta = PersistedDelta {
             version: STATE_VERSION,
             scope_id: self.scope_id.clone(),
-            records: snapshot.records.clone(),
+            records: snapshot.changed.clone(),
             rollup: snapshot.rollup.clone(),
             session_hwm: snapshot.session_hwm,
         };
@@ -140,7 +140,7 @@ impl SessionPersistence {
             .is_none_or(|state| state.version < STATE_VERSION)
         {
             let mut state = base.unwrap_or_default();
-            let mut records = snapshot.records.clone();
+            let mut records = snapshot.all_records.clone();
             normalize_records(&mut records);
             state.version = STATE_VERSION;
             state.scopes.insert(
@@ -250,10 +250,11 @@ struct PersistedDelta {
     session_hwm: u64,
 }
 
-/// Changed records plus rollup/hwm captured under the session mutex.
-/// Persist merges this into on-disk state under the flock only.
+/// Changed records (journal) plus full live records (rewrite) captured
+/// under the session mutex. Persist merges under the flock only.
 pub(crate) struct SessionPersistSnapshot {
-    records: Vec<PersistedRecordEntry>,
+    changed: Vec<PersistedRecordEntry>,
+    all_records: Vec<PersistedRecordEntry>,
     rollup: SessionRollup,
     session_hwm: u64,
 }
@@ -261,7 +262,7 @@ pub(crate) struct SessionPersistSnapshot {
 impl SessionPersistSnapshot {
     pub(crate) fn from_memory(memory: &SessionMemory, changed_keys: &[ServeKey]) -> Self {
         let live = memory.records_snapshot();
-        let records = changed_keys
+        let changed = changed_keys
             .iter()
             .filter_map(|key| {
                 live.get(key).map(|record| PersistedRecordEntry {
@@ -271,8 +272,17 @@ impl SessionPersistSnapshot {
                 })
             })
             .collect();
+        let all_records = live
+            .iter()
+            .map(|(key, record)| PersistedRecordEntry {
+                key: key.clone(),
+                record: record.clone(),
+                seq: 0,
+            })
+            .collect();
         Self {
-            records,
+            changed,
+            all_records,
             rollup: memory.persisted_rollup(),
             session_hwm: memory.session_hwm(),
         }

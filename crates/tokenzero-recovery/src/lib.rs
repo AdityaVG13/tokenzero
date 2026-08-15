@@ -2164,8 +2164,10 @@ impl RecoveryStore {
     /// Persists immediately so a subsequent process restart can expand the short form.
     pub fn ensure_session_visible_alias(&mut self, ref_id: &str) -> String {
         let short = self.register_session_visible_alias(ref_id);
-        let _ = self.persist_pending();
-        short
+        match self.persist_pending() {
+            Ok(()) => short,
+            Err(_) => ref_id.to_string(),
+        }
     }
 
     /// Rewrite full-hash blob refs in text to session-visible short aliases,

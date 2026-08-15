@@ -433,7 +433,11 @@ impl TokenZeroEngine {
         };
 
         if self.config.session_dedup {
-            pending.push(self.pending_expand_record(key, &params, &target.content, &mut store));
+            if let Some(record) =
+                self.pending_expand_record(key, &params, &target.content, &mut store)
+            {
+                pending.push(record);
+            }
         }
         let mut response = expansion_response(target, store.recovery_tokens);
         if response.error.is_none() {
@@ -524,7 +528,11 @@ impl TokenZeroEngine {
             summary.note_diff(telemetry, 0);
         }
         if self.config.session_dedup {
-            pending.push(self.pending_expand_record(key, params, &target.content, store));
+            if let Some(record) =
+                self.pending_expand_record(key, params, &target.content, store)
+            {
+                pending.push(record);
+            }
         }
         let mut response = success_response(
             "expand",
@@ -570,7 +578,7 @@ impl TokenZeroEngine {
         params: &ExpandParams,
         content: &str,
         store: &mut RecoveryStore,
-    ) -> (ServeKey, ServedRecord) {
+    ) -> Option<(ServeKey, ServedRecord)> {
         let stored = store.store_payload_deferred_batch(
             content,
             ContentType::Unknown,
@@ -578,8 +586,8 @@ impl TokenZeroEngine {
             params.start_line,
             params.end_line,
         );
-        let _ = store.persist_pending();
-        (key, served_record(content, &stored))
+        store.persist_pending().ok()?;
+        Some((key, served_record(content, &stored)))
     }
 
     pub fn expand(
