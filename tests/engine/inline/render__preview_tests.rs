@@ -12,7 +12,7 @@ use tokenzero_recovery::{ExpansionResult, RecoveryStore};
 use super::{
     EngineConfig, LocalPayloadPolicy, RecoveryStoreLease, TokenZeroEngine, expansion_response,
     local_payload_policy, path_not_allowed, preview, render_text, render_text_with_complete_read,
-    rewrite_full_refs_if_strictly_cheaper,
+    rewrite_full_refs_if_strictly_cheaper, unique_edit_tmp, write_atomic,
 };
 
 struct ColdStorePause {
@@ -641,5 +641,81 @@ fn path_not_allowed_names_active_root_and_relative_repair() {
     assert!(
         repair.contains("secret.txt") && repair.contains("re-root"),
         "repair must suggest a relative path or re-root: {repair}"
+    );
+}
+
+#[test]
+fn write_atomic_tmp_names_differ_for_two_publishers() {
+    let dir = tempdir().unwrap();
+    let a = unique_edit_tmp(dir.path(), "target.txt");
+    let b = unique_edit_tmp(dir.path(), "target.txt");
+    assert_ne!(
+        a, b,
+        "T1 and T2 must not share .target.txt.tz-edit-{{pid}} for the same dest"
+    );
+    let pid = std::process::id().to_string();
+    for path in [&a, &b] {
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with(".target.txt.tz-edit-") && name.contains(&pid),
+            "tmp must stay a dest sibling: {name}"
+        );
+        assert_ne!(
+            name,
+            format!(".target.txt.tz-edit-{pid}"),
+            "pid-only tmp is the colliding formula"
+        );
+    }
+}
+
+#[test]
+fn write_atomic_does_not_reuse_pid_only_tmp() {
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("target.txt");
+    let stale = dir
+        .path()
+        .join(format!(".target.txt.tz-edit-{}", std::process::id()));
+    std::fs::write(&stale, b"stale-pid-only").unwrap();
+    write_atomic(&dest, b"published").unwrap();
+    assert_eq!(
+        std::fs::read(&stale).unwrap(),
+        b"stale-pid-only",
+        "T1 leftover .target.txt.tz-edit-{{pid}} must not be T2's tmp"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"published");
+}
+
+#[test]
+fn write_atomic_concurrent_publishers_publish_one_complete_payload() {
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("target.txt");
+    let payload_a = vec![b'A'; 64 * 1024];
+    let payload_b = vec![b'B'; 64 * 1024];
+    let barrier = Arc::new(Barrier::new(2));
+    let t1 = {
+        let dest = dest.clone();
+        let payload = payload_a.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            write_atomic(&dest, &payload)
+        })
+    };
+    let t2 = {
+        let dest = dest.clone();
+        let payload = payload_b.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            write_atomic(&dest, &payload)
+        })
+    };
+    t1.join().unwrap().expect("T1 write_atomic");
+    t2.join().unwrap().expect("T2 write_atomic");
+    let got = std::fs::read(&dest).unwrap();
+    assert!(
+        got == payload_a || got == payload_b,
+        "shared pid-only tmp lets T1 rename publish T2's partial mix; dest must be one complete payload ({} bytes)",
+        got.len()
     );
 }

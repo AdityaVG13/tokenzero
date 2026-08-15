@@ -1,4 +1,5 @@
 use crate::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct PersistResult {
     pub(crate) refs_complete: bool,
@@ -825,6 +826,17 @@ pub fn closest_line_hint(text: &str, find: &str) -> Option<String> {
     Some(format!("closest line {}: {shown}{ellipsis}", number + 1))
 }
 
+/// Sibling temp for [`write_atomic`]. Pid-only `.{file}.tz-edit-{pid}` is the
+/// same path for every publisher in this process.
+fn unique_edit_tmp(directory: &Path, file_name: &str) -> PathBuf {
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+    directory.join(format!(
+        ".{file_name}.tz-edit-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
 /// Write via a temp file in the same directory plus rename so a crash or
 /// concurrent reader never observes a half-written file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -836,7 +848,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "tz-edit".to_string());
-    let temp_path = directory.join(format!(".{file_name}.tz-edit-{}", std::process::id()));
+    // SAFETY: no persist gate (flock/mutex) covers this publish. T1 and T2
+    // concurrent `edit` of the same dest both computed
+    // `.{file}.tz-edit-{pid}`; T2's fs::write truncated T1's tmp, then T1
+    // renamed and published T2's partial or mixed bytes. Pid+nonce makes
+    // each publisher's tmp unique; last rename still wins with a complete
+    // file. Kill-mid-rename leftover is a distinct class (orphan tmp).
+    let temp_path = unique_edit_tmp(directory, &file_name);
     fs::write(&temp_path, bytes)?;
     match fs::rename(&temp_path, path) {
         Ok(()) => Ok(()),
