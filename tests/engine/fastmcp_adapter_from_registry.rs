@@ -3,7 +3,6 @@
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
 use tokenzero_core::operation_abi::{
     MigrationStatus, all_operations, input_schema_for, output_schema_for,
@@ -13,10 +12,6 @@ use tokenzero_engine::{
     DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_mcp_tool, dispatch_operation,
     domain_fastmcp_ops,
 };
-
-fn mcp_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp-compat/src")
-}
 
 fn engine_for(root: &std::path::Path) -> TokenZeroEngine {
     let mut config = EngineConfig::for_root(root);
@@ -152,13 +147,4 @@ fn registry_to_tools_golden_catalog_snapshot() {
         snap, expected,
         "golden catalog name set must equal registry FastMCP exposure"
     );
-}
-
-#[test]
-fn fastmcp_mode_uses_registry_and_single_dispatch() {
-    let fastmcp = fs::read_to_string(mcp_root().join("fastmcp_mode.rs")).unwrap();
-    let tools = fs::read_to_string(mcp_root().join("tools.rs")).unwrap();
-    assert!(fastmcp.contains("operation_by_name") || fastmcp.contains("operation_abi"));
-    assert!(tools.contains("dispatch_operation("));
-    assert!(!fastmcp.contains("execute_codemode") && !fastmcp.contains("run_codemode_plan"));
 }

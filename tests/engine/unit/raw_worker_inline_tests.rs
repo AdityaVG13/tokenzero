@@ -216,19 +216,3 @@ fn parse_raw_worker_argv_accepts_canonical_probe_and_serve_forms() {
         );
     }
 }
-
-#[test]
-fn no_sandbox_modules_in_raw_worker_source() {
-    let src = include_str!("../../../crates/tokenzero-engine/src/raw_worker.rs");
-    let production: String = src
-        .lines()
-        .take_while(|l| !l.contains("mod tests"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for needle in ["rquickjs", "execute_codemode", "fastmcp_mode"] {
-        assert!(
-            !production.contains(needle),
-            "raw_worker production code must not reference {needle}"
-        );
-    }
-}

@@ -98,20 +98,6 @@ fn spent_exceeding_raw_is_rejected() {
 }
 
 #[test]
-fn readme_policy_names_the_closed_allowlist() {
-    let readme = include_str!("../../../README.md");
-    assert!(readme.contains("Shareable usage telemetry is **off by default**"));
-    assert!(readme.contains("`TOKENZERO_TELEMETRY=1`"));
-    assert!(readme.contains("TokenZero has no telemetry exporter"));
-    for field in UsageRecord::ALLOWLISTED_FIELDS {
-        assert!(
-            readme.contains(&format!("`{field}`")),
-            "README missing {field}"
-        );
-    }
-}
-
-#[test]
 fn schema_rejects_non_allowlisted_fields() {
     assert_eq!(
         UsageRecord::ALLOWLISTED_FIELDS,

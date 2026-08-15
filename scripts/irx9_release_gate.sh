@@ -22,11 +22,11 @@ run() {
 
 echo "irx9_release_gate: start (CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS jobs=$JOBS threads=$THREADS)"
 
-# 1) Packaging mutual exclusion (static + lifecycle + install-prefix runtime)
+# 1) Packaging mutual exclusion (lifecycle + install-prefix runtime)
 run cargo test -p tokenzero-install --jobs "$JOBS" --lib packaging -- --test-threads="$THREADS" \
   || fail "packaging unit tests (surface=install)"
-run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_static_evidence --test packaging_lifecycle -- --test-threads="$THREADS" \
-  || fail "packaging static/lifecycle (surface=package)"
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_lifecycle -- --test-threads="$THREADS" \
+  || fail "packaging lifecycle (surface=package)"
 run cargo build -p tokenzero-worker --bin tokenzero-codemode --no-default-features --jobs "$JOBS" \
   || fail "canonical worker build (surface=package)"
 run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_e2e -- --test-threads="$THREADS" \

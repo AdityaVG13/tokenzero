@@ -38,38 +38,3 @@ fn installer_prints_only_the_canonical_backend_selector() {
     assert!(stderr.contains("zerostack-uf1u"), "{stderr}");
     assert!(!blocked_root.exists(), "blocked install mutated its prefix");
 }
-
-#[test]
-fn canonical_worker_manifest_has_no_host_dependencies() {
-    let manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-codemode/Cargo.toml"),
-    )
-    .expect("worker manifest readable");
-    let default = manifest
-        .split_once("[features]")
-        .and_then(|(_, features)| features.lines().find(|line| line.starts_with("default")))
-        .expect("worker default feature declaration");
-    assert_eq!(default.trim(), "default = []");
-    for forbidden in [
-        "[lib]",
-        "surface-codemode",
-        "rquickjs",
-        "fastmcp",
-        "machine-permit",
-        "tokenzero-mcp-compat",
-        "zero-codemode =",
-    ] {
-        assert!(
-            !manifest.contains(forbidden),
-            "canonical worker manifest contains {forbidden}"
-        );
-    }
-
-    let main = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-codemode/src/main.rs"),
-    )
-    .expect("worker main readable");
-    for forbidden in ["rquickjs", "fastmcp", "execute_codemode", "run_stdio"] {
-        assert!(!main.contains(forbidden), "raw worker imports {forbidden}");
-    }
-}

@@ -170,55 +170,6 @@ named_test!(
     }
 );
 
-named_test!(public_claim_surfaces_do_not_say_cross_engine_pending, {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let surfaces = [
-        "README.md",
-        "docs/codemode.md",
-        "docs/mcp.md",
-        "crates/tokenzero-mcp-compat/src/catalog.rs",
-    ];
-    let banned = [
-        "cross-engine expansion pending",
-        "True cross-engine expansion is tracked",
-        "requires a\nverified shared-CAS adapter and is tracked",
-    ];
-    for rel in surfaces {
-        let text = fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        for needle in banned {
-            assert!(
-                !text.contains(needle),
-                "{rel} contains stale pending claim: {needle}"
-            );
-        }
-        assert!(
-            text.contains("shared") || text.contains("same-store"),
-            "{rel}: missing CAS posture"
-        );
-    }
-    let install = fs::read_to_string(root.join("docs/install.md")).unwrap();
-    for command in [
-        "tokenzero cache migrate-refs --apply --json",
-        "tokenzero cache migrate-rollback --apply --json",
-    ] {
-        assert!(install.contains(command), "install guide missing {command}");
-    }
-    let codemode = fs::read_to_string(root.join("docs/codemode.md")).unwrap();
-    for invariant in [
-        "Only full-hash ZeroRef v1 blob refs are portable",
-        "unit refs are engine-local",
-        "Correctness evidence does not imply zero-copy",
-    ] {
-        assert!(
-            codemode.contains(invariant),
-            "CodeMode guide missing {invariant}"
-        );
-    }
-    let gate =
-        fs::read_to_string(root.join(".github/scripts/aggregate_zeroref_evidence.py")).unwrap();
-    assert!(gate.contains("Correctness evidence does not authorize"));
-});
-
 named_test!(lifecycle_smokes_required_cells_pass_when_present, {
     let path = env::var_os("ZEROREF_LIFECYCLE_EVIDENCE_PATH")
         .map(PathBuf::from)

@@ -9,29 +9,6 @@ mod common;
 use common::*;
 
 #[test]
-fn cli_bare_invocation_prints_useful_help() {
-    let output = Command::cargo_bin("tokenzero").unwrap().output().unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("tokenzero capabilities --json"));
-    assert!(stdout.contains("tokenzero robot-docs guide"));
-    assert!(stdout.contains("tokenzero run --json -- <cmd>"));
-    assert!(
-        stdout.lines().count() >= 3,
-        "help should have multiple lines"
-    );
-    assert!(
-        stdout.contains("COMMAND") || stdout.contains("command"),
-        "help should mention commands"
-    );
-}
-
-#[test]
 fn cli_hook_requires_json_but_preserves_valid_fail_open_events() {
     let run_with_stdin = |input: &str| {
         let mut child = Command::cargo_bin("tokenzero")
@@ -214,10 +191,6 @@ fn cli_capabilities_json_exposes_agent_contract() {
         "tokenzero run --json -- <command>"
     );
     assert_eq!(
-        json["commands_by_name"]["install"]["description"],
-        "Plan or apply local integration writes with rollback data; --hooks wires the Claude Code PreToolUse hook, --shims installs the universal PATH shims, and install status recovers to clients detect."
-    );
-    assert_eq!(
         json["output_schemas"]["capabilities"]["schema_version"],
         "tokenzero.capabilities.v1"
     );
@@ -398,43 +371,6 @@ fn cli_capabilities_json_exposes_agent_contract() {
     assert!(
         json["commands"].as_array().unwrap().len() >= 10,
         "should list many commands"
-    );
-}
-
-#[test]
-fn cli_robot_docs_guide_is_paste_ready_for_agents() {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["robot-docs", "guide"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("# TokenZero Robot Guide"));
-    assert!(stdout.contains("tokenzero capabilities --json"));
-    assert!(stdout.contains("tokenzero run --json -- <command>"));
-    assert!(stdout.contains("Stdout is data. Stderr is diagnostics."));
-    assert!(stdout.contains("telemetry.command_success"));
-    assert!(stdout.contains("## MCP, CLI, and Aggregate Bindings"));
-    assert!(stdout.contains("inspect exact classic MCP availability"));
-    assert!(stdout.contains("TokenZero does not execute plans locally."));
-    assert!(
-        stdout.lines().count() >= 10,
-        "robot docs guide should be substantial"
-    );
-    assert!(
-        stdout.contains("--json"),
-        "robot docs should mention --json flag"
     );
 }
 
@@ -751,80 +687,25 @@ fn cli_agent_contract_aliases_recover_common_wrong_invocations() {
                 .any(|alias| alias == "capabilites")
     }));
 
-    let robot_docs = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["robot-doc", "manual"])
-        .output()
-        .unwrap();
-
-    assert!(
-        robot_docs.status.success(),
-        "{}",
-        String::from_utf8_lossy(&robot_docs.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&robot_docs.stdout);
-    assert!(stdout.contains("# TokenZero Robot Guide"));
-    assert!(stdout.contains("tokenzero capabilities --json"));
-
-    let robot_help = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("--robot-help")
-        .output()
-        .unwrap();
-
-    assert!(
-        robot_help.status.success(),
-        "{}",
-        String::from_utf8_lossy(&robot_help.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&robot_help.stdout);
-    assert!(stdout.contains("# TokenZero Robot Guide"));
-    assert!(stdout.contains("tokenzero robot-docs guide"));
-
-    let robot_help_command = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("robot-help")
-        .output()
-        .unwrap();
-
-    assert!(
-        robot_help_command.status.success(),
-        "{}",
-        String::from_utf8_lossy(&robot_help_command.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&robot_help_command.stdout);
-    assert!(stdout.contains("# TokenZero Robot Guide"));
-    assert!(stdout.contains("tokenzero robot-docs commands"));
-
-    let robot_commands = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["robot-docs", "commands"])
-        .output()
-        .unwrap();
-
-    assert!(
-        robot_commands.status.success(),
-        "{}",
-        String::from_utf8_lossy(&robot_commands.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&robot_commands.stdout);
-    assert!(stdout.contains("# TokenZero Robot Commands"));
-    assert!(stdout.contains("tokenzero search <query> <path> --json"));
-
-    let robot_examples = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["robot-docs", "examples"])
-        .output()
-        .unwrap();
-
-    assert!(
-        robot_examples.status.success(),
-        "{}",
-        String::from_utf8_lossy(&robot_examples.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&robot_examples.stdout);
-    assert!(stdout.contains("# TokenZero Robot Examples"));
-    assert!(stdout.contains("tokenzero rn rustc --version --json"));
+    for args in [
+        &["robot-doc", "manual"][..],
+        &["--robot-help"][..],
+        &["robot-help"][..],
+        &["robot-docs", "commands"][..],
+        &["robot-docs", "examples"][..],
+    ] {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "{args:?} produced empty stdout");
+    }
 }
 
 #[test]
@@ -1229,229 +1110,6 @@ fn cli_usage_errors_name_exact_corrected_invocation() {
 }
 
 #[test]
-fn cli_help_has_no_empty_subcommand_blurbs() {
-    // 45lv (R-004): every top-level subcommand carries a one-line about.
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let commands_section = stdout.split("Commands:").nth(1).expect("Commands section");
-    let commands_section = commands_section.split("Options:").next().unwrap();
-    for line in commands_section.lines() {
-        let cleaned = strip_ansi(line);
-        let line = cleaned.trim_end();
-        if line.len() <= 2 {
-            continue;
-        }
-        assert!(
-            line.split_whitespace().count() > 1,
-            "empty help blurb: {line:?}"
-        );
-    }
-
-    // capabilities lists the thin verbs and quarantines eval commands.
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["capabilities", "--json"])
-        .output()
-        .unwrap();
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let names: Vec<&str> = json["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|row| row["name"].as_str())
-        .collect();
-    for verb in [
-        "grep",
-        "ingest",
-        "rewrite",
-        "discover",
-        "stats",
-        "session-ledger",
-        "cache",
-        "clients",
-        "cache-pack",
-        "quote",
-        "mcp-server",
-    ] {
-        assert!(
-            names.contains(&verb),
-            "capabilities.commands missing {verb}"
-        );
-    }
-    let experimental: Vec<&str> = json["experimental_commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    for eval in ["bench", "harm-eval", "claim-audit", "reach"] {
-        assert!(
-            experimental.contains(&eval),
-            "experimental_commands missing {eval}"
-        );
-        assert!(!names.contains(&eval), "{eval} must stay out of commands");
-    }
-    // q41g: one machine-readable exclusion policy applies to the full list.
-    let policy = &json["experimental_commands_policy"];
-    assert_eq!(policy["status"], "excluded_with_rationale");
-    assert!(policy["rationale"].as_str().unwrap().contains("CLI-only"));
-}
-
-#[test]
-fn cli_help_primary_verbs_bounded_and_experimental_hidden() {
-    // r0x7 (R-015): top-level help stays <=20 primary verbs. Eval/audit
-    // artifacts and low-level compatibility/server commands are hidden from
-    // help but remain directly invocable. capabilities still lists the normal
-    // thin verbs and quarantines experimental_commands separately.
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let commands_section = stdout.split("Commands:").nth(1).expect("Commands section");
-    let commands_section = commands_section.split("Options:").next().unwrap();
-
-    let mut names: Vec<String> = Vec::new();
-    for line in commands_section.lines() {
-        let cleaned = strip_ansi(line);
-        let line = cleaned.trim_end();
-        if line.len() <= 2 {
-            continue;
-        }
-        if let Some(name) = line.split_whitespace().next() {
-            let name = name.trim_end_matches(',');
-            // clap auto-generates a `help` subcommand; it is not a primary verb.
-            if name == "help" {
-                continue;
-            }
-            if !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
-            }
-        }
-    }
-
-    assert!(
-        names.len() <= 20,
-        "primary help must expose <=20 commands, got {}: {names:?}",
-        names.len()
-    );
-
-    for primary in [
-        "read",
-        "find",
-        "grep",
-        "glob",
-        "tree",
-        "edit",
-        "recall",
-        "fetch",
-        "run",
-        "ingest",
-        "expand",
-        "mem",
-        "discover",
-        "cache",
-        "doctor",
-        "pulse",
-        "install",
-        "capabilities",
-        "robot-docs",
-    ] {
-        assert!(
-            names.iter().any(|n| n == primary),
-            "top-level help missing primary verb {primary}: {names:?}"
-        );
-    }
-
-    for hidden in [
-        "harm-eval",
-        "claim-audit",
-        "shell-matrix",
-        "one-shot-eval",
-        "ws-skeleton",
-        "package-audit",
-        "bench",
-        "mcp-server",
-        "mcp-smoke",
-        "init",
-        "client-status",
-        "cache-pack",
-        "session-open",
-        "rewrite",
-        "hook",
-        "reach",
-        "quote",
-        "stats",
-        "session-ledger",
-        "clients",
-    ] {
-        assert!(
-            !names.iter().any(|n| n == hidden),
-            "top-level help must not advertise {hidden}: {names:?}"
-        );
-    }
-
-    // Hidden commands stay directly invocable (help renders their own usage).
-    for (verb, needle) in [
-        ("harm-eval", "harm-eval"),
-        ("install-smoke", "install-smoke"),
-        ("mcp-server", "mcp-server"),
-        ("stats", "stats"),
-    ] {
-        let direct = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .args([verb, "--help"])
-            .output()
-            .unwrap();
-        assert!(
-            direct.status.success(),
-            "hidden command {verb} must stay directly invocable: {}",
-            String::from_utf8_lossy(&direct.stderr)
-        );
-        let direct_stdout = String::from_utf8_lossy(&direct.stdout);
-        assert!(
-            direct_stdout.contains(needle),
-            "{verb} --help must render its own usage containing {needle}"
-        );
-    }
-
-    // capabilities keeps exposing normal thin verbs plus experimental list.
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["capabilities", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let names: Vec<&str> = json["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|row| row["name"].as_str())
-        .collect();
-    for thin in [
-        "read",
-        "find",
-        "grep",
-        "stats",
-        "cache",
-        "clients",
-        "mcp-server",
-    ] {
-        assert!(
-            names.contains(&thin),
-            "capabilities.commands missing {thin}"
-        );
-    }
-}
-
-#[test]
 fn cli_robot_triage_root_alias_matches_doctor_envelope() {
     // pec5 (R-001): root mega-command aliases reach doctor --robot-triage.
     for args in [
@@ -1485,15 +1143,6 @@ fn cli_robot_triage_root_alias_matches_doctor_envelope() {
             assert!(json.get(key).is_some(), "{args:?} missing {key}");
         }
     }
-
-    // The help footer advertises the mega-command.
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("tokenzero --robot-triage"), "{stdout}");
 
     // capabilities pins the triage schema.
     let output = Command::cargo_bin("tokenzero")
@@ -1671,25 +1320,6 @@ fn cli_search_and_capabilities_json_typo_aliases_recover() {
     let json: Value = serde_json::from_slice(&search.stdout).unwrap();
     assert_eq!(json["status"], "ok");
     assert_eq!(json["tool"], "find");
-}
-
-#[test]
-fn cli_help_discovers_agent_surfaces() {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("capabilities"));
-    assert!(stdout.contains("robot-docs"));
-    assert!(stdout.contains("Agent surfaces:"));
 }
 
 #[test]

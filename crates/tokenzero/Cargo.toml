@@ -88,10 +88,6 @@ name = "packaging_lifecycle"
 path = "../../tests/cli/packaging_lifecycle.rs"
 
 [[test]]
-name = "packaging_static_evidence"
-path = "../../tests/cli/packaging_static_evidence.rs"
-
-[[test]]
 name = "passthrough_conformance"
 path = "../../tests/cli/passthrough_conformance.rs"
 

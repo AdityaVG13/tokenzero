@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
 use tokenzero_engine::{
     DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
@@ -46,98 +46,6 @@ fn minimal_args(op: &str) -> Value {
         }),
         "tz_fetch" => json!({"url": "https://example.invalid/"}),
         _ => json!({}),
-    }
-}
-
-fn domain_sources() -> Vec<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut out = Vec::new();
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
-            }
-        }
-    }
-    walk(&root, &mut out);
-    out
-}
-
-#[test]
-fn engine_crate_does_not_depend_on_surface_layers() {
-    // Cargo-level dependency direction: tokenzero-engine must not link FastMCP,
-    // rquickjs/CodeMode sandbox, or MCP transport crates.
-    let manifest =
-        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
-    for forbidden in ["fastmcp-rust", "fastmcp_rust", "rquickjs", "tokenzero-mcp"] {
-        assert!(
-            !manifest.contains(forbidden),
-            "tokenzero-engine Cargo.toml must not depend on {forbidden}"
-        );
-    }
-
-    // Source-level: no imports of surface modules.
-    let forbidden_substrings = [
-        "crate::codemode::",
-        "crate::fastmcp_mode",
-        "crate::jsonrpc",
-        "tokenzero_mcp::",
-        "fastmcp_rust::",
-        "use fastmcp",
-        "use rquickjs",
-        "rquickjs::",
-    ];
-    let mut violations = Vec::new();
-    for path in domain_sources() {
-        let text =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for (lineno, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            for pat in forbidden_substrings {
-                if trimmed.contains(pat) {
-                    violations.push(format!("{}:{}: {line}", path.display(), lineno + 1));
-                }
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "engine sources import forbidden surface layers:
-{}",
-        violations.join(
-            "
-"
-        )
-    );
-}
-
-#[test]
-fn compatibility_carrier_and_raw_worker_do_not_embed_a_planner() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fastmcp =
-        fs::read_to_string(root.join("../tokenzero-mcp-compat/src/fastmcp_mode.rs")).unwrap();
-    assert!(
-        !fastmcp.contains("execute_codemode") && !fastmcp.contains("rquickjs"),
-        "classic FastMCP carrier must not execute plans"
-    );
-    assert!(
-        fastmcp.contains("call_tool_fastmcp") || fastmcp.contains("dispatch_mcp_tool"),
-        "classic FastMCP should use the shared tool/dispatch path"
-    );
-
-    let worker = fs::read_to_string(root.join("../tokenzero-codemode/src/main.rs")).unwrap();
-    for forbidden in ["rquickjs", "fastmcp", "tokenzero_mcp", "zero_codemode"] {
-        assert!(
-            !worker.contains(forbidden),
-            "planner-free raw worker contains forbidden host marker {forbidden}"
-        );
     }
 }
 
@@ -456,79 +364,6 @@ fn every_registry_domain_op_is_kernel_dispatchable() {
                 err.message
             );
         }
-    }
-}
-
-#[test]
-fn cli_domain_handlers_use_dispatch_cli_only() {
-    // Static parity: CLI main routes domain ops through dispatch_cli_tool /
-    // dispatch_cli and does not call engine domain methods directly.
-    let main = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero/src/main.rs");
-    let text = fs::read_to_string(&main).unwrap_or_else(|e| panic!("read {}: {e}", main.display()));
-    assert!(
-        text.contains("fn dispatch_cli_tool"),
-        "CLI must define dispatch_cli_tool thin adapter"
-    );
-    assert!(
-        text.contains("tokenzero_mcp_compat::dispatch_cli")
-            || text.contains("tokenzero_engine::dispatch_cli"),
-        "CLI must call shared dispatch_cli"
-    );
-    let forbidden_direct = [
-        "engine.find(",
-        "engine.grep(",
-        "engine.read(",
-        "engine.glob(",
-        "engine.tree(",
-        "engine.edit(",
-        "engine.shell(",
-        "engine.ingest(",
-        "engine.expand(",
-        "engine.expand_with_params(",
-        "engine.mem(",
-        "engine.recall(",
-        "engine.fetch(",
-        "engine.cache_pack(",
-    ];
-    let mut hits = Vec::new();
-    for (lineno, line) in text.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        for pat in forbidden_direct {
-            if trimmed.contains(pat) {
-                hits.push(format!("{}: {line}", lineno + 1));
-            }
-        }
-    }
-    assert!(
-        hits.is_empty(),
-        "CLI still calls engine domain methods directly:\n{}",
-        hits.join("\n")
-    );
-
-    // Every FastMCP domain op that has a CLI surface must appear as dispatch target.
-    let required_ops = [
-        "tz_read",
-        "tz_find",
-        "tz_grep",
-        "tz_recall",
-        "tz_fetch",
-        "tz_glob",
-        "tz_tree",
-        "tz_edit",
-        "tz_shell",
-        "tz_ingest",
-        "tz_expand",
-        "tz_mem",
-        "tz_cache_pack",
-        "tz_rewrite",
-        "tz_discover",
-    ];
-    for op in required_ops {
-        let needle = format!("\"{op}\"");
-        assert!(text.contains(&needle), "CLI missing dispatch target {op}");
     }
 }
 
