@@ -195,7 +195,14 @@ pub fn structured_shell_view(command: &str, stdout: &str, stderr: &str) -> Strin
             return out;
         }
     }
-    summarize_lines(&combined, 20, 12, "")
+    if let Some((tool, count)) = requested_output_lines(command) {
+        let take = count.min(MAX_HONORED_HEAD_LINES);
+        return match tool {
+            "tail" => summarize_lines(&combined, 0, take, ""),
+            _ => summarize_lines(&combined, take, 0, ""),
+        };
+    }
+    summarize_lines(&combined, 40, 16, "")
 }
 
 /// True only when EVERY top-level segment is a search command or a pure
@@ -247,14 +254,14 @@ pub(crate) fn shell_command_basename(command: &str) -> String {
 
 pub(crate) fn is_search_no_match(
     command: &str,
-    stdout: &str,
-    stderr: &str,
+    _stdout: &str,
+    _stderr: &str,
     exit_code: Option<i32>,
 ) -> bool {
-    exit_code == Some(1)
-        && stdout.trim().is_empty()
-        && stderr.trim().is_empty()
-        && is_search_shell_command(command)
+    // rg/grep exit 1 is "no match" (or a partial run with some hits plus a
+    // permission warning). Empty-stream was too strict: any stderr line
+    // turned a search into policy: diagnostic and buried stdout.
+    exit_code == Some(1) && is_search_shell_command(command)
 }
 
 pub(crate) fn is_expected_false_exit(
@@ -375,6 +382,54 @@ pub(crate) fn git_subcommand_index(words: &[String]) -> Option<usize> {
     None
 }
 
+const DEFAULT_SEARCH_SAMPLE_LINES: usize = 80;
+const MAX_HONORED_HEAD_LINES: usize = 256;
+
+/// `head -n N` / `tail -n N` / `head -N`. The caller asked for these lines;
+/// a 20-line sample hid the overflow at line 218 of a `head -n 200` dump.
+pub(crate) fn requested_output_lines(command: &str) -> Option<(&'static str, usize)> {
+    let words = split_shell_words(command);
+    let first = words.first().map(|word| shell_command_basename(word))?;
+    let tool = match first.as_str() {
+        "head" => "head",
+        "tail" => "tail",
+        _ => return None,
+    };
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "-n" || word == "--lines" {
+            let count = words.get(index + 1)?.trim_end_matches(['k', 'K', 'm', 'M']);
+            return count.parse().ok().map(|n| (tool, n));
+        }
+        if let Some(inline) = word
+            .strip_prefix("-n")
+            .or_else(|| word.strip_prefix("--lines="))
+        {
+            if !inline.is_empty() {
+                return inline
+                    .trim_end_matches(['k', 'K', 'm', 'M'])
+                    .parse()
+                    .ok()
+                    .map(|n| (tool, n));
+            }
+        }
+        if tool == "head" || tool == "tail" {
+            if let Some(digits) = word.strip_prefix('-').filter(|rest| {
+                !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+            }) {
+                return digits.parse().ok().map(|n| (tool, n));
+            }
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    None
+}
+
 /// Largest `-A`/`-B`/`-C` value in a search command, if any.
 ///
 /// A bare `grep pattern file` yields one line per match, so a 20-line sample is
@@ -430,10 +485,10 @@ pub(crate) fn search_shell_view(command: &str, stdout: &str, stderr: &str) -> St
         }
     }
     // Honor an explicit context request: show enough lines to cover the
-    // context the caller asked for, rather than a flat 20.
+    // context the caller asked for, rather than a flat sample cap.
     let limit = match requested_context_lines(command) {
-        Some(context) => 20.max((context + 1) * 4),
-        None => 20,
+        Some(context) => DEFAULT_SEARCH_SAMPLE_LINES.max((context + 1) * 4),
+        None => DEFAULT_SEARCH_SAMPLE_LINES,
     };
     if !matches.is_empty() {
         out.push_str("sample_matches:\n");

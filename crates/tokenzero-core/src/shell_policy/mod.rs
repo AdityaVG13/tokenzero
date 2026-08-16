@@ -1,5 +1,6 @@
 use crate::render::domain::{
     is_expected_false_exit, is_repo_inventory_command, is_search_no_match,
+    requested_output_lines,
 };
 use crate::shell_family::shell_family_with_combined;
 use crate::shell_parse::{
@@ -66,6 +67,8 @@ pub(crate) fn auto_shell_policy(
         ("structured", "search output")
     } else if expected_false_exit {
         ("structured", "expected false predicate exit")
+    } else if requested_output_lines(command).is_some() {
+        ("structured", "explicit head/tail line request")
     } else if is_diagnostic_shell_policy(family, combined, exit_code, status_hazard) {
         ("diagnostic", "failure or diagnostic family")
     } else if matches!(family, "search" | "structured" | "status") {

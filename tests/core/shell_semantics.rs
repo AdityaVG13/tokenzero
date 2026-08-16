@@ -130,6 +130,46 @@ compound_command_status_evidence_is_preserved {
     let command = "cd /tmp/tokenzero && grep -rn \"failed_segment\" crates/tokenzero-core/src/shell_parse.rs | head"; let rendered = success(command, "crates/tokenzero-core/src/shell_parse.rs:93:    if looks_masked_failure_evidence(stdout, stderr, Some(segment)) {\n", 0); no_masking(&rendered, command);
     let command = "rg -n 'error:' src"; let rendered = success(command, "src/lib.rs:10:error: legacy marker in comment\n", 0); no_masking(&rendered, command);
 }
+head_n_keeps_the_asked_line_instead_of_a_20_line_sample {
+    let stdout = (1..=220)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = success("head -n 200 pi-crash.log", &stdout, 0);
+    assert!(
+        rendered.visible.contains("line 200"),
+        "head -n 200 must keep the last asked line, got: {}",
+        rendered.visible
+    );
+    assert!(
+        !rendered.visible.contains("similar lines collapsed"),
+        "head -n 200 must not dedupe the asked window: {}",
+        rendered.visible
+    );
+}
+search_exit_one_is_success_even_with_stderr_or_hits {
+    let no_match = render(
+        "rg missing-token src",
+        "",
+        "rg: src/secret: Permission denied\n",
+        1,
+        true,
+    );
+    no_masking(&no_match, "rg missing-token src");
+    assert_eq!(no_match.policy.policy, "structured", "{no_match:?}");
+    let with_hits = render(
+        "rg needle src",
+        "src/a.rs:1:needle\n",
+        "rg: src/secret: Permission denied\n",
+        1,
+        true,
+    );
+    no_masking(&with_hits, "rg needle src");
+    assert!(
+        with_hits.visible.contains("src/a.rs:1:needle"),
+        "{with_hits:?}"
+    );
+}
 env_chdir_failure_is_not_reported_as_inner_shell_pipeline_failure {
     for command in ["env -C missing-dir bash -lc 'false | true'", "env --chdir=missing-dir bash -lc 'false | true'"] { let rendered = failure(command, "", "env: cannot change directory to 'missing-dir': No such file or directory\n", 125); assert_eq!(rendered.command_status.failed_segment.as_deref(), Some(command), "{command}: {rendered:?}"); no_masking(&rendered, command); assert_eq!(rendered.command_status.shell_syntax_summary, "argv/simple", "{command}: {rendered:?}"); }
 }
