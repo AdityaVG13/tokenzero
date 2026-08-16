@@ -253,6 +253,24 @@
     }
 
     #[test]
+    fn classic_tools_list_does_not_advertise_missing_strict_mode() {
+        let (_dir, engine) = test_engine();
+        engine.mark_lifecycle_ready_for_tests();
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let lower = listed.to_lowercase();
+        for needle in ["strict mode", "strict-mode", "strict_mode", "strictmode"] {
+            assert!(
+                !lower.contains(needle),
+                "Classic MCP tools/list advertises missing strict-mode as present ({needle:?}): {listed}"
+            );
+        }
+    }
+
+    #[test]
     fn advertised_prompts_capability_implements_prompts_get() {
         let (_dir, engine) = test_engine();
         let init = handle_jsonrpc(

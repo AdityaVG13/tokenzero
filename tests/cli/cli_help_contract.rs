@@ -46,6 +46,24 @@ fn assert_no_undispatched_authority_ads(haystack: &str, surface: &str) {
     }
 }
 
+/// F-TZ-011 is Missing. Ads must not invent a present strict-mode product flag.
+const MISSING_STRICT_MODE_ADS: &[&str] = &[
+    "strict mode",
+    "strict-mode",
+    "strict_mode",
+    "strictmode",
+];
+
+fn assert_no_missing_strict_mode_ads(haystack: &str, surface: &str) {
+    let lower = haystack.to_lowercase();
+    for needle in MISSING_STRICT_MODE_ADS {
+        assert!(
+            !lower.contains(needle),
+            "{surface} advertises missing strict-mode as present ({needle:?})"
+        );
+    }
+}
+
 #[test]
 fn cli_help_does_not_advertise_undispatched_decision_views() {
     let help = Command::cargo_bin("tokenzero")
@@ -91,6 +109,69 @@ fn cli_help_does_not_advertise_undispatched_decision_views() {
     assert_no_undispatched_authority_ads(
         &String::from_utf8_lossy(&capabilities.stdout),
         "tokenzero capabilities --json",
+    );
+}
+
+#[test]
+fn cli_help_does_not_advertise_missing_strict_mode() {
+    let help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert_no_missing_strict_mode_ads(
+        &String::from_utf8_lossy(&help.stdout),
+        "tokenzero --help",
+    );
+
+    let mcp_help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["mcp-server", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        mcp_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mcp_help.stderr)
+    );
+    assert_no_missing_strict_mode_ads(
+        &String::from_utf8_lossy(&mcp_help.stdout),
+        "tokenzero mcp-server --help",
+    );
+
+    let capabilities = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        capabilities.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    let caps_text = String::from_utf8_lossy(&capabilities.stdout);
+    assert_no_missing_strict_mode_ads(&caps_text, "tokenzero capabilities --json");
+    let json: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    let flags = json["feature_flags"]
+        .as_object()
+        .expect("capabilities feature_flags");
+    assert!(
+        flags.keys().all(|key| !key.to_lowercase().contains("strict")),
+        "capabilities.feature_flags invented a strict-mode product flag: {flags:?}"
+    );
+    let features = json["features"].as_array().expect("capabilities features");
+    assert!(
+        features.iter().all(|feature| {
+            feature
+                .as_str()
+                .is_none_or(|name| !name.to_lowercase().contains("strict"))
+        }),
+        "capabilities.features invented a strict-mode product flag: {features:?}"
     );
 }
 

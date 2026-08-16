@@ -120,6 +120,67 @@ fn codemode_catalog_does_not_advertise_undispatched_decision_views() {
 }
 
 #[test]
+fn codemode_limits_are_call_ceilings_not_decision_view_headroom_plan() {
+    let catalog = codemode_method_catalog();
+    let limits = catalog
+        .get("limits")
+        .cloned()
+        .unwrap_or_else(|| CodeModeLimits::default().as_json());
+    assert_eq!(
+        limits["schema"], "tokenzero.codemode.limits.v1",
+        "advertised limits schema must stay the call-limit envelope"
+    );
+    assert_ne!(
+        limits["schema"], "DecisionViewHeadroomPlanV1",
+        "call-limit headroom must not be advertised as DecisionViewHeadroomPlanV1"
+    );
+    let haystack = limits.to_string().to_lowercase();
+    for needle in [
+        "decisionviewheadroomplanv1",
+        "decisionviewheadroom",
+        "remaining_input_headroom",
+        "reserved_reasoning_tokens",
+        "reserved_visible_output_tokens",
+        "admitted_input_ceiling",
+        "strict mode",
+        "strict-mode",
+        "strict_mode",
+        "strictmode",
+    ] {
+        assert!(
+            !haystack.contains(needle),
+            "CodeModeLimits JSON advertises {needle:?} as DecisionViewHeadroomPlanV1: {limits}"
+        );
+    }
+    for field in [
+        "max_wall_ms",
+        "hard_max_wall_ms",
+        "max_output_bytes",
+        "max_visible_tokens",
+    ] {
+        assert!(
+            limits.get(field).is_some(),
+            "call-limit field {field} missing from advertised limits: {limits}"
+        );
+    }
+    let catalog_text = catalog.to_string().to_lowercase();
+    assert!(
+        !catalog_text.contains("decisionviewheadroomplanv1"),
+        "CodeMode catalog advertises DecisionViewHeadroomPlanV1: {catalog}"
+    );
+    let limits_method = describe_method("codemode.limits");
+    let description = limits_method["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("sandbox, output, ref, and operation limits"),
+        "codemode.limits description must stay a call-limit, not a DV headroom plan: {description}"
+    );
+    assert!(
+        !description.to_lowercase().contains("decisionviewheadroom"),
+        "codemode.limits description advertises DecisionViewHeadroomPlanV1: {description}"
+    );
+}
+
+#[test]
 fn job_signature_publishes_long_poll_cursor_and_backoff_contract() {
     let method = describe_method("zero.token.job");
     let signature = method["signature"].as_str().unwrap();

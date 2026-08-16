@@ -157,6 +157,38 @@ fn classic_mcp_does_not_advertise_undispatched_decision_views() {
 }
 
 #[test]
+fn classic_mcp_does_not_advertise_missing_strict_mode() {
+    use crate::catalog::{tool_docs_for_surface, tool_specs};
+    use crate::fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions};
+
+    const NEEDLES: &[&str] = &[
+        "strict mode",
+        "strict-mode",
+        "strict_mode",
+        "strictmode",
+    ];
+    let haystacks = [
+        serde_json::to_string(&tool_specs()).expect("tool_specs serializable"),
+        serde_json::to_string(&tool_docs_for_surface(McpToolSurface::Classic))
+            .expect("classic tool docs serializable"),
+        CapabilityDescriptor::for_surface(McpToolSurface::Classic)
+            .to_json()
+            .to_string(),
+        fastmcp_instructions().to_string(),
+        fastmcp_codemode_instructions().to_string(),
+    ];
+    for (i, haystack) in haystacks.iter().enumerate() {
+        let lower = haystack.to_lowercase();
+        for needle in NEEDLES {
+            assert!(
+                !lower.contains(needle),
+                "Classic MCP catalog haystack {i} advertises missing strict-mode as present ({needle:?})"
+            );
+        }
+    }
+}
+
+#[test]
 fn classic_tools_resource_omits_codemode_exclusive_tools() {
     use crate::catalog::tool_docs_for_surface;
     let docs = tool_docs_for_surface(McpToolSurface::Classic);
