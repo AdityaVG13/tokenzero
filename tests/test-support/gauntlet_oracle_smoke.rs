@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokenzero_test_support::{
-    ExecutionEnvelope, GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle,
+    CrashBoundary, ExecutionEnvelope, GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle,
     SPEC_TAG_WIRES, SUBJECT_IDENTITY, ScenarioAgreement, SpecTagClass, assert_distinct, scenario,
 };
 
@@ -178,7 +178,16 @@ fn smoke_property_oracle_reuses_proptest() {
             Ok(())
         },
     );
-    assert_nonempty_file("tests/recovery/dual_store_fragment_proptest.rs");
+    let dual_bytes = assert_nonempty_file("tests/recovery/dual_store_fragment_proptest.rs");
+    let dual = String::from_utf8_lossy(&dual_bytes);
+    assert!(
+        dual.contains("GauntletIdentityPair::new(GauntletOracle::RoundTrip)"),
+        "live dual-store driver must stamp Subject vs RoundTrip"
+    );
+    assert!(
+        dual.contains("TokenZeroStore") && dual.contains("RecoveryStore"),
+        "dual-store proptest must name both stores"
+    );
 }
 
 #[test]
@@ -294,4 +303,40 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
             );
         }
     }
+}
+
+#[test]
+fn crash_boundaries_are_named_not_subprocess_armed() {
+    assert_eq!(CrashBoundary::ALL.len(), 8);
+    for boundary in CrashBoundary::ALL {
+        assert!(
+            !boundary.is_subprocess_armed(),
+            "{} must not be claimed subprocess-armed without arm_crash_boundary",
+            boundary.as_str()
+        );
+        let driver = boundary.existing_driver();
+        let bytes = assert_nonempty_file(driver.path);
+        let src = String::from_utf8_lossy(&bytes);
+        assert!(
+            src.contains(driver.test_fn),
+            "{} driver {} must contain test {}",
+            boundary.as_str(),
+            driver.path,
+            driver.test_fn
+        );
+    }
+}
+
+#[test]
+fn expand_fragment_differential_still_names_both_stores() {
+    let src_bytes = assert_nonempty_file("fuzz/fuzz_targets/expand_fragment_differential.rs");
+    let src = String::from_utf8_lossy(&src_bytes);
+    assert!(
+        src.contains("TokenZeroStore") && src.contains("RecoveryStore"),
+        "fuzz target must still name both stores"
+    );
+    assert!(
+        src.contains("reason_class_matches"),
+        "fuzz comparator must stay class-match, not message-string"
+    );
 }

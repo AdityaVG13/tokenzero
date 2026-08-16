@@ -2932,6 +2932,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokenzero-core",
+ "tokenzero-test-support",
  "zero-ref",
  "zero-store",
 ]

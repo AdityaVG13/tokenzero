@@ -118,6 +118,118 @@ pub fn is_forbidden_gauntlet_identity(identity: &str) -> bool {
         || identity.contains(FORBIDDEN_MCP_REGISTRY_ENGINE)
 }
 
+/// TokenZero persist / prune / WAL crash windows that already have tests.
+///
+/// Names are protocol events, not SQL `BeforeWalHeaderWrite`. Every variant
+/// maps to an existing test. **None are subprocess-armed** (`arm_crash_boundary`
+/// is not implemented). Do not treat `is_subprocess_armed() == false` as a pass
+/// on skill Pattern 65 injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashBoundary {
+    BeforePersistOnUnreadableSnapshot,
+    BeforePruneOnUnreadableSnapshot,
+    AfterJournalAppendBeforeSnapshotRewrite,
+    AfterWalAppendSession,
+    AfterWalTornTailKeepsComplete,
+    AfterTmpWriteBeforeRename,
+    PersistLockConcurrentWriters,
+    PersistLockTmpSweep,
+}
+
+/// How the existing test exercises the named window. Not an arming claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashWindowKind {
+    InProcessRefuse,
+    InProcessRoundTrip,
+    SimulatedKillBeforeRename,
+    ConcurrentLockCoverage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrashWindowDriver {
+    pub path: &'static str,
+    pub test_fn: &'static str,
+    pub kind: CrashWindowKind,
+}
+
+impl CrashBoundary {
+    pub const ALL: &[Self] = &[
+        Self::BeforePersistOnUnreadableSnapshot,
+        Self::BeforePruneOnUnreadableSnapshot,
+        Self::AfterJournalAppendBeforeSnapshotRewrite,
+        Self::AfterWalAppendSession,
+        Self::AfterWalTornTailKeepsComplete,
+        Self::AfterTmpWriteBeforeRename,
+        Self::PersistLockConcurrentWriters,
+        Self::PersistLockTmpSweep,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforePersistOnUnreadableSnapshot => "BeforePersistOnUnreadableSnapshot",
+            Self::BeforePruneOnUnreadableSnapshot => "BeforePruneOnUnreadableSnapshot",
+            Self::AfterJournalAppendBeforeSnapshotRewrite => {
+                "AfterJournalAppendBeforeSnapshotRewrite"
+            }
+            Self::AfterWalAppendSession => "AfterWalAppendSession",
+            Self::AfterWalTornTailKeepsComplete => "AfterWalTornTailKeepsComplete",
+            Self::AfterTmpWriteBeforeRename => "AfterTmpWriteBeforeRename",
+            Self::PersistLockConcurrentWriters => "PersistLockConcurrentWriters",
+            Self::PersistLockTmpSweep => "PersistLockTmpSweep",
+        }
+    }
+
+    /// Subprocess abort injection. Always false: do not invent armed.
+    pub const fn is_subprocess_armed(self) -> bool {
+        false
+    }
+
+    pub const fn existing_driver(self) -> CrashWindowDriver {
+        match self {
+            Self::BeforePersistOnUnreadableSnapshot => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/store_hygiene_prune_option_tests.rs",
+                test_fn: "persist_pending_refuses_unreadable_snapshot",
+                kind: CrashWindowKind::InProcessRefuse,
+            },
+            Self::BeforePruneOnUnreadableSnapshot => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/store_hygiene_prune_option_tests.rs",
+                test_fn: "prune_blob_sidecars_refuses_unreadable_snapshot",
+                kind: CrashWindowKind::InProcessRefuse,
+            },
+            Self::AfterJournalAppendBeforeSnapshotRewrite => CrashWindowDriver {
+                path: "tests/recovery/unit/store.rs",
+                test_fn: "second_process_persist_appends_journal_without_snapshot_rewrite",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterWalAppendSession => CrashWindowDriver {
+                path: "tests/recovery/inline/memory_verbs__tests.rs",
+                test_fn: "apply_commit_session_persists_and_missing_path_fails_loud",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterWalTornTailKeepsComplete => CrashWindowDriver {
+                path: "tests/recovery/unit/store.rs",
+                test_fn: "corrupt_journal_tail_keeps_complete_entries",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterTmpWriteBeforeRename => CrashWindowDriver {
+                path: "tests/engine/inline/ledger__ledger_tests.rs",
+                test_fn: "task_cost_report_kill_before_rename_keeps_previous_complete_files",
+                kind: CrashWindowKind::SimulatedKillBeforeRename,
+            },
+            Self::PersistLockConcurrentWriters => CrashWindowDriver {
+                path: "tests/recovery/unit/store.rs",
+                test_fn: "concurrent_persistence_preserves_all_thread_payloads",
+                kind: CrashWindowKind::ConcurrentLockCoverage,
+            },
+            Self::PersistLockTmpSweep => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/store_hygiene_prune_option_tests.rs",
+                test_fn: "sweep_stale_tmp_removes_expired_under_lock",
+                kind: CrashWindowKind::ConcurrentLockCoverage,
+            },
+        }
+    }
+}
+
 /// Greenfield scenario outcome. Both-error is agreement; mixed Ok/Err panics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScenarioAgreement<T, E> {

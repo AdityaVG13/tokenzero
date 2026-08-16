@@ -12,6 +12,17 @@ use proptest::prelude::*;
 use tokenzero_core::ContentType;
 use tokenzero_recovery::RecoveryStore;
 use tokenzero_recovery::embedded_store::TokenZeroStore;
+use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
+
+/// Live driver stamp: Subject vs RoundTrip oracle. Never MCP `EngineIdentity::TokenZero`.
+fn stamp_gauntlet_subject_ne_oracle() {
+    GauntletIdentityPair::new(GauntletOracle::RoundTrip).assert_distinct();
+}
+
+#[test]
+fn gauntlet_subject_is_not_roundtrip_oracle() {
+    stamp_gauntlet_subject_ne_oracle();
+}
 
 fn payload_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
@@ -104,6 +115,7 @@ proptest! {
         payload in payload_strategy(),
         fragment in fragment_strategy(),
     ) {
+        stamp_gauntlet_subject_ne_oracle();
         let embedded = embedded_expand(&payload, fragment.as_deref());
         let recovery = recovery_expand(&payload, fragment.as_deref());
         match (&embedded, &recovery) {

@@ -6,9 +6,10 @@ pub use zero_testkit::decode_worker_transcript;
 pub mod gauntlet;
 pub mod parity_taxonomy;
 pub use gauntlet::{
-    assert_distinct, scenario, CanonicalizationRules, EngineVersions, ExecutionEnvelope,
-    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass,
-    SpecTagWire, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+    assert_distinct, scenario, CanonicalizationRules, CrashBoundary, CrashWindowDriver,
+    CrashWindowKind, EngineVersions, ExecutionEnvelope, GauntletEngineIdentity,
+    GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass, SpecTagWire,
+    SPEC_TAG_WIRES, SUBJECT_IDENTITY,
 };
 pub use parity_taxonomy::{
     truncate_score, Feature, FeatureId, FeatureUniverse, LoaderError, ParityStatus, Stats,
