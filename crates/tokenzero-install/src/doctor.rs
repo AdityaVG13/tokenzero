@@ -1091,24 +1091,5 @@ pub(crate) fn doctor_run_id(root: &Path, cache: &Path) -> String {
 }
 
 #[cfg(test)]
-mod mcp_ready_tests {
-    use super::*;
-
-    #[test]
-    fn blocked_workspace_is_never_mcp_ready() {
-        assert!(!mcp_surface_ready(false));
-    }
-
-    #[test]
-    fn mcp_surface_value_rejects_unknown_launch_mode() {
-        assert!(mcp_tool_surface_value_ok("mcp"));
-        assert!(mcp_tool_surface_value_ok(""));
-        assert!(!mcp_tool_surface_value_ok("not-a-surface"));
-    }
-
-    #[test]
-    fn mcp_idle_timeout_value_rejects_non_integers() {
-        assert!(mcp_idle_timeout_value_ok("30"));
-        assert!(!mcp_idle_timeout_value_ok("nope"));
-    }
-}
+#[path = "../../../tests/unit/tokenzero-install/doctor_mcp_ready_tests.rs"]
+mod mcp_ready_tests;

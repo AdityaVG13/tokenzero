@@ -196,21 +196,9 @@ pub fn savings_ratio_typed(raw: Tok<Raw>, visible: Tok<Visible>) -> f64 {
 }
 
 #[cfg(test)]
-mod width_tests {
-    use super::*;
-
-    #[test]
-    fn savings_ratio_typed_does_not_truncate_u64_counts() {
-        let raw = Tok::<Raw>::new(u64::from(u32::MAX) + 100);
-        let visible = Tok::<Visible>::new(100);
-        let ratio = savings_ratio_typed(raw, visible);
-        assert!(
-            ratio > 0.999,
-            "u64 token counts must not collapse through usize: {ratio}"
-        );
-    }
-}
-
-#[cfg(test)]
 #[path = "../../../tests/core/inline/token_classes__token_class_tests.rs"]
 mod token_class_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/tokenzero-core/token_classes_width_tests.rs"]
+mod width_tests;
