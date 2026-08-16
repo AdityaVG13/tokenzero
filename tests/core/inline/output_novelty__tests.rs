@@ -110,6 +110,47 @@ fn coding_preserves_caller_order_and_accounts_exact_field_payloads() {
     );
 }
 
+/// [SPEC-TZ-NOV-002] Output novelty receipts do not carry recovery entity-novelty fields.
+#[test]
+fn output_novelty_receipt_schema_is_not_entity_novelty() {
+    let adapter = adapter();
+    let coding = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
+    let receipt_json = serde_json::to_value(coding.receipt()).unwrap();
+    let receipt_obj = receipt_json
+        .as_object()
+        .expect("OutputNoveltyReceiptV1 JSON is an object");
+    assert_eq!(
+        receipt_obj["schema_version"].as_str().unwrap(),
+        OUTPUT_NOVELTY_SCHEMA_V1
+    );
+    assert_ne!(
+        receipt_obj["schema_version"].as_str().unwrap(),
+        "zerostack.entity-novelty.v1"
+    );
+    for entity_only in [
+        "record_type",
+        "scope_key",
+        "entity_ids",
+        "producing_engine",
+        "updated_at",
+        "cas_digest",
+    ] {
+        assert!(
+            !receipt_obj.contains_key(entity_only),
+            "OutputNoveltyReceiptV1 JSON must not carry entity-novelty field {entity_only}"
+        );
+    }
+    let dumped = serde_json::to_string(&receipt_json).unwrap();
+    assert!(
+        !dumped.contains("zerostack.entity-novelty"),
+        "output novelty JSON must not carry the entity-novelty schema id"
+    );
+    assert!(
+        !dumped.contains("entity-novelty"),
+        "output novelty JSON must not carry entity-novelty record_type"
+    );
+}
+
 #[test]
 fn role_is_caller_authority_not_inferred_from_equal_bytes() {
     let adapter = adapter();

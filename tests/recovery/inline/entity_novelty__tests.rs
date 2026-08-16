@@ -1,5 +1,7 @@
 use super::*;
+use std::any::type_name;
 use tempfile::tempdir;
+use tokenzero_core::output_novelty::{OUTPUT_NOVELTY_SCHEMA_V1, OutputNoveltyReceiptV1};
 
 #[test]
 fn refuses_second_entity_namespace() {
@@ -69,4 +71,57 @@ fn rejects_scheme_prefix_in_entity_ids() {
         )
         .unwrap_err();
     assert!(matches!(err, NoveltyError::EntityId(_)));
+}
+
+/// [SPEC-TZ-NOV-002] Recovery entity novelty is not core output novelty.
+#[test]
+fn entity_novelty_record_is_not_output_novelty_receipt() {
+    assert_ne!(
+        type_name::<EntityNoveltyRecord>(),
+        type_name::<OutputNoveltyReceiptV1>(),
+        "EntityNoveltyRecord must not be an alias of OutputNoveltyReceiptV1"
+    );
+    assert_eq!(ENTITY_NOVELTY_SCHEMA_VERSION, "zerostack.entity-novelty.v1");
+    assert_eq!(OUTPUT_NOVELTY_SCHEMA_V1, "tokenzero.output-novelty/v1");
+    assert_ne!(ENTITY_NOVELTY_SCHEMA_VERSION, OUTPUT_NOVELTY_SCHEMA_V1);
+    assert_eq!(ENTITY_NOVELTY_RECORD_TYPE, "entity-novelty");
+
+    let record = EntityNoveltyRecord::empty("global", "tokenzero").unwrap();
+    let entity_json = serde_json::to_value(&record).unwrap();
+    let entity_obj = entity_json
+        .as_object()
+        .expect("EntityNoveltyRecord JSON is an object");
+    assert_eq!(
+        entity_obj["schema_version"].as_str().unwrap(),
+        ENTITY_NOVELTY_SCHEMA_VERSION
+    );
+    assert_eq!(
+        entity_obj["record_type"].as_str().unwrap(),
+        ENTITY_NOVELTY_RECORD_TYPE
+    );
+    assert!(entity_obj.contains_key("entity_ids"));
+    assert!(entity_obj.contains_key("producing_engine"));
+    assert!(entity_obj.contains_key("scope_key"));
+    for output_only in [
+        "selection_origin",
+        "classification_authority_digest",
+        "selected_effect_digest",
+        "verification_receipt_digest",
+        "tokenizer_identity_digest",
+        "encoding_digest",
+        "total_encoded_bytes",
+        "total_encoded_tokens",
+        "fields",
+        "totals",
+    ] {
+        assert!(
+            !entity_obj.contains_key(output_only),
+            "EntityNoveltyRecord JSON must not carry output-novelty field {output_only}"
+        );
+    }
+    let dumped = serde_json::to_string(&entity_json).unwrap();
+    assert!(
+        !dumped.contains(OUTPUT_NOVELTY_SCHEMA_V1),
+        "entity novelty JSON must not carry the output-novelty schema id"
+    );
 }

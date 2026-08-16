@@ -442,7 +442,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-NOV-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/recovery/inline/entity_novelty__tests.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-CONT-001",
