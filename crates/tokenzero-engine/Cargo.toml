@@ -35,6 +35,7 @@ zero-store.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+tokenzero-test-support = { path = "../tokenzero-test-support" }
 
 # Relocated standalone tests live under the workspace tests/ tree.
 [[test]]

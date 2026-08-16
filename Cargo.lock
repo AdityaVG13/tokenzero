@@ -2848,6 +2848,7 @@ dependencies = [
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
+ "tokenzero-test-support",
  "zero-abi",
  "zero-ledger",
  "zero-process",

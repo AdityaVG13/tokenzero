@@ -7,13 +7,22 @@
 //! harness-declared eligibility) are carried through verbatim and are never
 //! conflated with measured prefix overlap.
 
+use serde_json::Value;
 use tokenzero_engine::{
     ArmTrial, HistoryChunk, ProbeArm, ProbeFixture, ProbeReport, QualitySlot, replay_prefix_probe,
 };
+use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
+
+const PREFIX_PROBE_FIXTURE_JSON: &str = include_str!("fixtures/prefix-probe-replay.json");
+
+/// Live driver stamp: Subject vs Spec oracle. Never MCP `EngineIdentity::TokenZero`.
+fn stamp_gauntlet_subject_ne_oracle() {
+    GauntletIdentityPair::new(GauntletOracle::Spec).assert_distinct();
+}
 
 fn fixture() -> ProbeFixture {
-    serde_json::from_str(include_str!("fixtures/prefix-probe-replay.json"))
-        .expect("prefix-probe-replay.json must parse")
+    stamp_gauntlet_subject_ne_oracle();
+    serde_json::from_str(PREFIX_PROBE_FIXTURE_JSON).expect("prefix-probe-replay.json must parse")
 }
 
 fn report_by_arm<'a>(reports: &'a [ProbeReport], arm: ProbeArm) -> &'a ProbeReport {
@@ -24,9 +33,42 @@ fn report_by_arm<'a>(reports: &'a [ProbeReport], arm: ProbeArm) -> &'a ProbeRepo
 }
 
 #[test]
+fn gauntlet_subject_is_not_spec_oracle() {
+    stamp_gauntlet_subject_ne_oracle();
+}
+
+#[test]
 fn fixture_schema_is_prefix_probe_v1() {
     assert_eq!(fixture().schema, "tokenzero.prefix-probe.v1");
     assert_eq!(fixture().arms.len(), 3);
+}
+
+#[test]
+fn fixture_arms_keep_eligibility_and_hit_as_separate_declared_keys() {
+    stamp_gauntlet_subject_ne_oracle();
+    let raw: Value =
+        serde_json::from_str(PREFIX_PROBE_FIXTURE_JSON).expect("prefix-probe JSON must parse");
+    let arms = raw["arms"]
+        .as_array()
+        .expect("prefix-probe fixture must have an arms array");
+    assert!(!arms.is_empty(), "prefix-probe fixture must have arms");
+    for (index, arm) in arms.iter().enumerate() {
+        let object = arm
+            .as_object()
+            .unwrap_or_else(|| panic!("arm {index} must be a JSON object"));
+        assert!(
+            object.contains_key("eligibility_declared"),
+            "arm {index} is missing eligibility_declared as its own key (null is allowed; omission is not)"
+        );
+        assert!(
+            object.contains_key("hit_declared_by_provider"),
+            "arm {index} is missing hit_declared_by_provider as its own key (null is allowed; omission is not)"
+        );
+        assert!(
+            !object.contains_key("lcp_tokens"),
+            "arm {index}: fixture must not carry measured lcp_tokens; hit must not be derived from LCP"
+        );
+    }
 }
 
 #[test]
@@ -110,6 +152,7 @@ fn measured_overlap_never_implies_a_reported_hit() {
 
 #[test]
 fn degenerate_single_history_arm_reports_no_reuse() {
+    stamp_gauntlet_subject_ne_oracle();
     let fixture = ProbeFixture {
         schema: "tokenzero.prefix-probe.v1".to_string(),
         arms: vec![ArmTrial {

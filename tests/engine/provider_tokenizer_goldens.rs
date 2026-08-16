@@ -18,6 +18,13 @@
 
 use serde::Deserialize;
 use tokenzero_core::{TokenizerFamily, count_tokens_for_model, tokenizer_metadata};
+use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
+
+/// Live driver stamp: Subject vs ProviderTokenizer oracle. Never MCP
+/// `EngineIdentity::TokenZero`.
+fn stamp_gauntlet_subject_ne_oracle() {
+    GauntletIdentityPair::new(GauntletOracle::ProviderTokenizer).assert_distinct();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +55,7 @@ struct GoldenFixture {
 }
 
 fn fixture() -> GoldenFixture {
+    stamp_gauntlet_subject_ne_oracle();
     serde_json::from_str(include_str!("fixtures/provider-tokenizer-goldens.json"))
         .expect("provider-tokenizer-goldens.json must parse")
 }
@@ -64,9 +72,43 @@ fn expected_family(identity: &str) -> Option<TokenizerFamily> {
 }
 
 #[test]
+fn gauntlet_subject_is_not_provider_tokenizer_oracle() {
+    stamp_gauntlet_subject_ne_oracle();
+}
+
+#[test]
 fn fixture_schema_is_tokenizer_goldens_v1() {
     assert_eq!(fixture().schema, "tokenzero.tokenizer-goldens.v1");
     assert!(!fixture().entries.is_empty());
+}
+
+#[test]
+fn tokenizer_identity_mismatch_does_not_resolve_to_a_family() {
+    stamp_gauntlet_subject_ne_oracle();
+    assert_ne!(
+        expected_family("cl100k_base"),
+        expected_family("o200k_base"),
+        "cl100k and o200k identities must stay distinct"
+    );
+    assert_ne!(
+        expected_family("cl100k_base"),
+        expected_family("llama_sentencepiece_v3"),
+        "cl100k and sentencepiece identities must stay distinct"
+    );
+    // Forbidden MCP registry labels and unknown strings are not tokenizer
+    // families. They must not silently match a registered family.
+    for identity in [
+        "EngineIdentity::TokenZero",
+        "RegistryEngine::TokenZero",
+        "unknown_tokenizer_family",
+        "",
+    ] {
+        assert_eq!(
+            expected_family(identity),
+            None,
+            "{identity} must not map to a TokenizerFamily"
+        );
+    }
 }
 
 #[test]
