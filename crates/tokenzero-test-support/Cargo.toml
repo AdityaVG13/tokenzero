@@ -6,4 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 zero-testkit = { workspace = true, default-features = false }
+
+[[test]]
+name = "gauntlet_oracle_smoke"
+path = "../../tests/test-support/gauntlet_oracle_smoke.rs"
