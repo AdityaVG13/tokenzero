@@ -76,6 +76,50 @@ fn shell_contract_recommends_exact_mode_without_advertising_raw() {
 }
 
 #[test]
+fn codemode_catalog_does_not_advertise_undispatched_decision_views() {
+    let catalog = serde_json::to_string(&codemode_method_catalog()).expect("catalog serializable");
+    let lower = catalog.to_lowercase();
+    for needle in [
+        "decision view",
+        "decisionview",
+        "reasoning-state",
+        "opaque reasoning",
+        "output novelty",
+        "outputnovelty",
+        "continuation class",
+        "continuationkind",
+        "decisionviewheadroom",
+        "dv headroom",
+        "decision_view",
+        "decision-view",
+        "reasoning_state",
+        "output_novelty",
+        "continuation_class",
+        "headroom",
+    ] {
+        assert!(
+            !lower.contains(needle),
+            "CodeMode catalog advertises undispatched {needle:?}: {catalog}"
+        );
+    }
+    for path in method_paths() {
+        let path_l = path.to_lowercase();
+        for needle in [
+            "decision",
+            "reasoning",
+            "novelty",
+            "continuation",
+            "headroom",
+        ] {
+            assert!(
+                !path_l.contains(needle),
+                "CodeMode path {path} advertises undispatched {needle}"
+            );
+        }
+    }
+}
+
+#[test]
 fn job_signature_publishes_long_poll_cursor_and_backoff_contract() {
     let method = describe_method("zero.token.job");
     let signature = method["signature"].as_str().unwrap();

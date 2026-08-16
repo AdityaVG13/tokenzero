@@ -8,6 +8,92 @@ use tokenzero_core::operation_abi::all_operations;
 mod common;
 use common::*;
 
+/// Authority surfaces that exist in core but are not dispatched on CLI/MCP.
+/// Ads must not name them as available tools. Partial never rounds up.
+const UNDISPATCHED_AUTHORITY_ADS: &[&str] = &[
+    "decision view",
+    "decisionview",
+    "reasoning-state",
+    "opaque reasoning",
+    "output novelty",
+    "outputnovelty",
+    "continuation class",
+    "continuationkind",
+    "decisionviewheadroom",
+    "dv headroom",
+];
+
+fn assert_no_undispatched_authority_ads(haystack: &str, surface: &str) {
+    let lower = haystack.to_lowercase();
+    for needle in UNDISPATCHED_AUTHORITY_ADS {
+        assert!(
+            !lower.contains(needle),
+            "{surface} advertises undispatched authority {needle:?}"
+        );
+    }
+    for name_needle in [
+        "decision_view",
+        "decision-view",
+        "reasoning_state",
+        "output_novelty",
+        "continuation_class",
+        "headroom",
+    ] {
+        assert!(
+            !lower.contains(name_needle),
+            "{surface} advertises undispatched name {name_needle:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_help_does_not_advertise_undispatched_decision_views() {
+    let help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert_no_undispatched_authority_ads(
+        &String::from_utf8_lossy(&help.stdout),
+        "tokenzero --help",
+    );
+
+    let mcp_help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["mcp-server", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        mcp_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mcp_help.stderr)
+    );
+    assert_no_undispatched_authority_ads(
+        &String::from_utf8_lossy(&mcp_help.stdout),
+        "tokenzero mcp-server --help",
+    );
+
+    let capabilities = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        capabilities.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    assert_no_undispatched_authority_ads(
+        &String::from_utf8_lossy(&capabilities.stdout),
+        "tokenzero capabilities --json",
+    );
+}
+
 #[test]
 fn cli_hook_requires_json_but_preserves_valid_fail_open_events() {
     let run_with_stdin = |input: &str| {

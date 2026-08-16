@@ -218,6 +218,41 @@
     }
 
     #[test]
+    fn classic_tools_list_does_not_advertise_undispatched_decision_views() {
+        let (_dir, engine) = test_engine();
+        engine.mark_lifecycle_ready_for_tests();
+        let listed = handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let lower = listed.to_lowercase();
+        for needle in [
+            "decision view",
+            "decisionview",
+            "reasoning-state",
+            "opaque reasoning",
+            "output novelty",
+            "outputnovelty",
+            "continuation class",
+            "continuationkind",
+            "decisionviewheadroom",
+            "dv headroom",
+            "decision_view",
+            "decision-view",
+            "reasoning_state",
+            "output_novelty",
+            "continuation_class",
+            "headroom",
+        ] {
+            assert!(
+                !lower.contains(needle),
+                "Classic MCP tools/list advertises undispatched {needle:?}: {listed}"
+            );
+        }
+    }
+
+    #[test]
     fn advertised_prompts_capability_implements_prompts_get() {
         let (_dir, engine) = test_engine();
         let init = handle_jsonrpc(

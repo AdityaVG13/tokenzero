@@ -113,6 +113,50 @@ fn classic_descriptor_advertises_only_callable_classic_tools() {
 }
 
 #[test]
+fn classic_mcp_does_not_advertise_undispatched_decision_views() {
+    use crate::catalog::{tool_docs_for_surface, tool_specs};
+    use crate::fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions};
+
+    const NEEDLES: &[&str] = &[
+        "decision view",
+        "decisionview",
+        "reasoning-state",
+        "opaque reasoning",
+        "output novelty",
+        "outputnovelty",
+        "continuation class",
+        "continuationkind",
+        "decisionviewheadroom",
+        "dv headroom",
+        "decision_view",
+        "decision-view",
+        "reasoning_state",
+        "output_novelty",
+        "continuation_class",
+        "headroom",
+    ];
+    let haystacks = [
+        serde_json::to_string(&tool_specs()).expect("tool_specs serializable"),
+        serde_json::to_string(&tool_docs_for_surface(McpToolSurface::Classic))
+            .expect("classic tool docs serializable"),
+        CapabilityDescriptor::for_surface(McpToolSurface::Classic)
+            .to_json()
+            .to_string(),
+        fastmcp_instructions().to_string(),
+        fastmcp_codemode_instructions().to_string(),
+    ];
+    for (i, haystack) in haystacks.iter().enumerate() {
+        let lower = haystack.to_lowercase();
+        for needle in NEEDLES {
+            assert!(
+                !lower.contains(needle),
+                "Classic MCP catalog haystack {i} advertises undispatched {needle:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn classic_tools_resource_omits_codemode_exclusive_tools() {
     use crate::catalog::tool_docs_for_surface;
     let docs = tool_docs_for_surface(McpToolSurface::Classic);
