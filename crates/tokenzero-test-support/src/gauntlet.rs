@@ -118,6 +118,41 @@ pub fn is_forbidden_gauntlet_identity(identity: &str) -> bool {
         || identity.contains(FORBIDDEN_MCP_REGISTRY_ENGINE)
 }
 
+/// Dual-store / fuzz fragment-error comparator.
+///
+/// Distinct taxonomy classes must not match. The only alias is RecoveryStore
+/// `window-out-of-range` for embedded `fragment-out-of-range`. A Debug
+/// `Fragment(...)` wrapper is not itself a class: `fragment-malformed` vs
+/// `fragment-unknown-kind` is divergence.
+pub fn fragment_reason_class_matches(embedded: &str, recovery: &str) -> bool {
+    const CLASSES: &[&str] = &[
+        "fragment-out-of-range",
+        "fragment-not-utf8-boundary",
+        "fragment-unknown-kind",
+        "fragment-duplicate",
+        "fragment-malformed",
+        "fragment-reversed",
+        "non_utf8_line_fragment",
+        "non-utf8 line fragment",
+        "NonUtf8Line",
+    ];
+    let Some(class) = CLASSES.iter().copied().find(|c| embedded.contains(c)) else {
+        return false;
+    };
+    match class {
+        "fragment-out-of-range" => {
+            recovery.starts_with("fragment-out-of-range")
+                || recovery.starts_with("window-out-of-range")
+        }
+        "non_utf8_line_fragment" | "non-utf8 line fragment" | "NonUtf8Line" => {
+            recovery.starts_with("non_utf8_line_fragment")
+                || recovery.contains("NonUtf8Line")
+                || recovery.contains("non-utf8 line fragment")
+        }
+        class => recovery.starts_with(class),
+    }
+}
+
 /// TokenZero persist / prune / WAL crash windows that already have tests.
 ///
 /// Names are protocol events, not SQL `BeforeWalHeaderWrite`. Every variant
@@ -467,7 +502,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-NW-004",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("docs/benchmarks.md"),
+        existing_driver: Some("benchmarks/test_never_worse_gate.py"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-HUB-001",

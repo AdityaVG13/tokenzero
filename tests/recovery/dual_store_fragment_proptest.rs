@@ -10,8 +10,8 @@
 
 use proptest::prelude::*;
 use tokenzero_core::ContentType;
-use tokenzero_recovery::RecoveryStore;
 use tokenzero_recovery::embedded_store::TokenZeroStore;
+use tokenzero_recovery::RecoveryStore;
 use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
 
 /// Live driver stamp: Subject vs RoundTrip oracle. Never MCP `EngineIdentity::TokenZero`.
@@ -97,14 +97,7 @@ fn recovery_expand(payload: &str, fragment: Option<&str>) -> Outcome {
 /// portable_line_fragment_start_past_eof_remains_strict), which is the same
 /// out-of-range class as the embedded `fragment-out-of-range`.
 fn reason_class_matches(embedded: &str, recovery: &str) -> bool {
-    if embedded.contains("fragment-out-of-range") {
-        recovery.starts_with("fragment-out-of-range") || recovery.starts_with("window-out-of-range")
-    } else if embedded.contains("Fragment(") {
-        recovery.starts_with("fragment-")
-    } else {
-        // Whole-ref failures never expected here: both stores hold the blob.
-        false
-    }
+    tokenzero_test_support::fragment_reason_class_matches(embedded, recovery)
 }
 
 proptest! {

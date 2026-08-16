@@ -41,6 +41,10 @@ fn sums_to_one(sum: f64) -> bool {
     (sum - 1.0).abs() < WEIGHT_SUM_ABS_TOL
 }
 
+fn weight_is_positive(weight: f64) -> bool {
+    weight.is_finite() && weight > 0.0
+}
+
 fn canonical_unit_sum(sum: f64) -> f64 {
     if sums_to_one(sum) {
         truncate_score(1.0)
@@ -151,6 +155,10 @@ pub enum Violation {
         id: String,
         category: String,
     },
+    NonPositiveWeight {
+        id: String,
+        weight: String,
+    },
 }
 
 #[derive(Debug)]
@@ -199,6 +207,9 @@ impl fmt::Display for LoaderError {
                         }
                         Violation::MissingCategory { id, category } => {
                             write!(f, "{id} category {category} is not in [categories]")?
+                        }
+                        Violation::NonPositiveWeight { id, weight } => {
+                            write!(f, "weight for {id} is {weight} (must be finite and > 0)")?
                         }
                     }
                 }
@@ -299,11 +310,16 @@ impl FeatureUniverse {
     fn from_parsed(parsed: MatrixFile, origin: &str) -> Result<Self, LoaderError> {
         let mut features = BTreeMap::new();
         let mut violations = Vec::new();
-        let category_weights: BTreeMap<String, f64> = parsed
-            .categories
-            .iter()
-            .map(|(k, v)| (k.clone(), v.weight))
-            .collect();
+        let mut category_weights = BTreeMap::new();
+        for (name, cat) in &parsed.categories {
+            if !weight_is_positive(cat.weight) {
+                violations.push(Violation::NonPositiveWeight {
+                    id: format!("[categories.{name}]"),
+                    weight: cat.weight.to_string(),
+                });
+            }
+            category_weights.insert(name.clone(), cat.weight);
+        }
 
         for raw in parsed.features {
             if !category_weights.contains_key(&raw.category) {
@@ -319,6 +335,12 @@ impl FeatureUniverse {
                 });
                 continue;
             };
+            if !weight_is_positive(raw.weight) {
+                violations.push(Violation::NonPositiveWeight {
+                    id: raw.id.clone(),
+                    weight: raw.weight.to_string(),
+                });
+            }
             if status == ParityStatus::Excluded
                 && raw
                     .exclusion_rationale

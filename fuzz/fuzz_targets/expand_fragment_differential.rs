@@ -10,8 +10,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use tokenzero_core::ContentType;
-use tokenzero_recovery::RecoveryStore;
 use tokenzero_recovery::embedded_store::TokenZeroStore;
+use tokenzero_recovery::RecoveryStore;
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -81,14 +81,33 @@ fn recovery_expand(payload: &str, fragment: Option<&str>) -> Outcome {
 /// failures under its pinned `window-out-of-range` string, the same
 /// out-of-range class as embedded `fragment-out-of-range`.
 fn reason_class_matches(embedded: &str, recovery: &str) -> bool {
-    if embedded.contains("fragment-out-of-range") {
-        recovery.starts_with("fragment-out-of-range")
-            || recovery.starts_with("window-out-of-range")
-    } else if embedded.contains("Fragment(") {
-        recovery.starts_with("fragment-")
-    } else {
-        // Whole-ref failures never expected here: both stores hold the blob.
-        false
+    // Keep in lockstep with tokenzero_test_support::fragment_reason_class_matches.
+    // Fuzz stays free of the test-support crate.
+    const CLASSES: &[&str] = &[
+        "fragment-out-of-range",
+        "fragment-not-utf8-boundary",
+        "fragment-unknown-kind",
+        "fragment-duplicate",
+        "fragment-malformed",
+        "fragment-reversed",
+        "non_utf8_line_fragment",
+        "non-utf8 line fragment",
+        "NonUtf8Line",
+    ];
+    let Some(class) = CLASSES.iter().copied().find(|c| embedded.contains(c)) else {
+        return false;
+    };
+    match class {
+        "fragment-out-of-range" => {
+            recovery.starts_with("fragment-out-of-range")
+                || recovery.starts_with("window-out-of-range")
+        }
+        "non_utf8_line_fragment" | "non-utf8 line fragment" | "NonUtf8Line" => {
+            recovery.starts_with("non_utf8_line_fragment")
+                || recovery.contains("NonUtf8Line")
+                || recovery.contains("non-utf8 line fragment")
+        }
+        class => recovery.starts_with(class),
     }
 }
 

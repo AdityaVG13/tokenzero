@@ -188,6 +188,52 @@ status = "supported"
         );
     }
 
+
+    #[test]
+    fn load_rejects_non_positive_weight() {
+        let negative = r#"
+schema_version = "gauntlet.supported_surface_matrix.v1"
+[categories.tokenizer-identity]
+weight = 1.0
+[[features]]
+id = "F-TZ-001"
+title = "negative weight"
+category = "tokenizer-identity"
+weight = -0.5
+status = "supported"
+[[features]]
+id = "F-TZ-001-EST"
+title = "compensating"
+category = "tokenizer-identity"
+weight = 1.5
+status = "supported"
+"#;
+        let err = FeatureUniverse::load_from_str(negative, "negative-weight-test")
+            .expect_err("negative feature weight must be rejected even if the category sums to 1.0");
+        assert!(
+            err.to_string().contains("must be finite and > 0"),
+            "expected non-positive weight error, got: {err}"
+        );
+
+        let zero_cat = r#"
+schema_version = "gauntlet.supported_surface_matrix.v1"
+[categories.tokenizer-identity]
+weight = 0.0
+[[features]]
+id = "F-TZ-001"
+title = "zero category"
+category = "tokenizer-identity"
+weight = 1.0
+status = "supported"
+"#;
+        let err = FeatureUniverse::load_from_str(zero_cat, "zero-category-weight-test")
+            .expect_err("zero category weight must be rejected");
+        assert!(
+            err.to_string().contains("[categories.tokenizer-identity]"),
+            "expected category weight error, got: {err}"
+        );
+    }
+
     #[test]
     fn n_a_does_not_round_to_passing() {
         let na = r#"

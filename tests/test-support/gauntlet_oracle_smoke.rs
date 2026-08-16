@@ -2,13 +2,14 @@
 //! reimplement tokenizer matching, never-worse arithmetic, or golden replay.
 
 use std::fs;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokenzero_test_support::{
-    CrashBoundary, ExecutionEnvelope, GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle,
-    SPEC_TAG_WIRES, SUBJECT_IDENTITY, ScenarioAgreement, SpecTagClass, assert_distinct, scenario,
+    assert_distinct, fragment_reason_class_matches, scenario, CrashBoundary, ExecutionEnvelope,
+    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass,
+    SPEC_TAG_WIRES, SUBJECT_IDENTITY,
 };
 
 fn repo_root() -> PathBuf {
@@ -32,34 +33,18 @@ fn assert_nonempty_file(relative: &str) -> Vec<u8> {
     bytes
 }
 
+/// Wrap-smoke: stamp Subject≠Oracle, then check a census artifact. This is
+/// not a live `scenario()` execution -- oracle `Ok(())` would be a hardcoded
+/// success path.
 fn run_wrap(
     name: &str,
     oracle: GauntletOracle,
     relative: &str,
     spec_check: impl FnOnce(&[u8]) -> Result<(), String>,
 ) {
-    let pair = GauntletIdentityPair::new(oracle);
-    let path = existing_artifact(relative);
-    let agreed = scenario(
-        name,
-        pair,
-        || {
-            let bytes = fs::read(&path).map_err(|err| err.to_string())?;
-            if bytes.is_empty() {
-                return Err(format!("{relative} is empty"));
-            }
-            Ok(bytes)
-        },
-        || Ok(()),
-    );
-    match agreed {
-        ScenarioAgreement::BothOk(bytes) => {
-            spec_check(&bytes).unwrap_or_else(|err| panic!("{name}: {err}"));
-        }
-        ScenarioAgreement::BothErr { subject, oracle } => {
-            panic!("{name}: unexpected both-error agreement: {subject:?} / {oracle:?}")
-        }
-    }
+    GauntletIdentityPair::new(oracle).assert_distinct();
+    let bytes = assert_nonempty_file(relative);
+    spec_check(&bytes).unwrap_or_else(|err| panic!("{name}: {err}"));
 }
 
 #[test]
@@ -77,6 +62,33 @@ fn identity_guard_rejects_self_comparison() {
     assert!(same_oracle.is_err(), "oracle==oracle must panic");
 
     GauntletIdentityPair::new(GauntletOracle::Spec).assert_distinct();
+}
+
+#[test]
+fn fragment_reason_classes_do_not_collapse() {
+    assert!(fragment_reason_class_matches(
+        r#"Fragment("fragment-out-of-range; start=2 end=9 len=4")"#,
+        "window-out-of-range; start=2 end=9 line_count=1"
+    ));
+    assert!(fragment_reason_class_matches(
+        r#"Fragment("fragment-malformed")"#,
+        "fragment-malformed"
+    ));
+    assert!(
+        !fragment_reason_class_matches(
+            r#"Fragment("fragment-malformed")"#,
+            "fragment-unknown-kind"
+        ),
+        "Fragment(...) must not match any fragment-* recovery string"
+    );
+    assert!(
+        !fragment_reason_class_matches(r#"Fragment("fragment-reversed")"#, "fragment-duplicate"),
+        "distinct fragment classes must diverge"
+    );
+    assert!(fragment_reason_class_matches(
+        "NonUtf8Line",
+        "non_utf8_line_fragment"
+    ));
 }
 
 #[test]
@@ -360,8 +372,8 @@ fn record_banned_prod_deps(
 #[test]
 fn prod_deps_do_not_include_fszero_or_graphzero_crates() {
     let workspace_rel = "Cargo.toml";
-    let workspace_src = String::from_utf8(assert_nonempty_file(workspace_rel))
-        .expect("workspace Cargo.toml utf-8");
+    let workspace_src =
+        String::from_utf8(assert_nonempty_file(workspace_rel)).expect("workspace Cargo.toml utf-8");
     let workspace: toml::Value =
         toml::from_str(&workspace_src).expect("workspace Cargo.toml parses");
 
@@ -413,5 +425,9 @@ fn expand_fragment_differential_still_names_both_stores() {
     assert!(
         src.contains("reason_class_matches"),
         "fuzz comparator must stay class-match, not message-string"
+    );
+    assert!(
+        src.contains("fragment-malformed") && src.contains("fragment-unknown-kind"),
+        "fuzz comparator must name distinct fragment classes (not Fragment( => any fragment-)"
     );
 }
