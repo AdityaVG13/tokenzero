@@ -472,7 +472,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-HUB-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/test-support/gauntlet_oracle_smoke.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-HUB-002",

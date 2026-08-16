@@ -327,6 +327,81 @@ fn crash_boundaries_are_named_not_subprocess_armed() {
     }
 }
 
+fn banned_peer_engine_crate_name(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "fszero" | "graphzero")
+}
+
+fn prod_dep_crate_names(table: &toml::Table) -> Vec<String> {
+    let mut names = Vec::new();
+    for (key, value) in table {
+        names.push(key.clone());
+        if let Some(package) = value.get("package").and_then(|v| v.as_str()) {
+            names.push(package.to_string());
+        }
+    }
+    names
+}
+
+fn record_banned_prod_deps(
+    relative: &str,
+    table_name: &str,
+    table: &toml::Table,
+    hits: &mut Vec<String>,
+) {
+    for name in prod_dep_crate_names(table) {
+        if banned_peer_engine_crate_name(&name) {
+            hits.push(format!("{relative} {table_name} crate `{name}`"));
+        }
+    }
+}
+
+/// SPEC-TZ-HUB-001: production Cargo deps must not import FSZero/GraphZero crates.
+/// Hub contracts (`zero-*`) remain allowed. `[dev-dependencies]` are not this gate.
+#[test]
+fn prod_deps_do_not_include_fszero_or_graphzero_crates() {
+    let workspace_rel = "Cargo.toml";
+    let workspace_src = String::from_utf8(assert_nonempty_file(workspace_rel))
+        .expect("workspace Cargo.toml utf-8");
+    let workspace: toml::Value =
+        toml::from_str(&workspace_src).expect("workspace Cargo.toml parses");
+
+    let mut hits = Vec::new();
+    if let Some(table) = workspace
+        .get("workspace")
+        .and_then(|v| v.get("dependencies"))
+        .and_then(|v| v.as_table())
+    {
+        record_banned_prod_deps(workspace_rel, "[workspace.dependencies]", table, &mut hits);
+    }
+
+    let members = workspace
+        .get("workspace")
+        .and_then(|v| v.get("members"))
+        .and_then(|v| v.as_array())
+        .expect("workspace.members");
+    assert!(
+        !members.is_empty(),
+        "workspace.members must list production crates"
+    );
+    for member in members {
+        let member = member.as_str().expect("workspace.members string");
+        let relative = format!("{member}/Cargo.toml");
+        let src = String::from_utf8(assert_nonempty_file(&relative))
+            .unwrap_or_else(|_| panic!("{relative} utf-8"));
+        let manifest: toml::Value =
+            toml::from_str(&src).unwrap_or_else(|err| panic!("{relative} parses: {err}"));
+        if let Some(table) = manifest.get("dependencies").and_then(|v| v.as_table()) {
+            record_banned_prod_deps(&relative, "[dependencies]", table, &mut hits);
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "production Cargo.toml deps must not include fszero or graphzero crates: {}",
+        hits.join("; ")
+    );
+}
+
 #[test]
 fn expand_fragment_differential_still_names_both_stores() {
     let src_bytes = assert_nonempty_file("fuzz/fuzz_targets/expand_fragment_differential.rs");
