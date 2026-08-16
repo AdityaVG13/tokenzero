@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 const GOLDEN_RELEASE_CANDIDATE_ID: &str = "golden-test";
@@ -249,17 +249,90 @@ fn scrub_temp_path(text: &str, temp_root: &Path) -> String {
     // literal and the runtime current_exe() can disagree by symlink
     // resolution. Replace both the literal and its canonical form with the
     // stable [WORKSPACE]/target placeholder.
+    //
+    // R1 (CONF-P10-H03): rch may rewrite CARGO_TARGET_DIR to
+    // `.rch-target-spark-*` even when the caller set
+    // `/tmp/rch_target_tokenzero`. JSON that names either directory (or a
+    // profile other than the compile-time CARGO_BIN_EXE spelling) must still
+    // collapse. Live read_json/run_failure goldens did not contain these
+    // strings; the extra CLI field was `tz://capsule/<digest>` (causal key
+    // includes the host path; RefScrubber now collapses that scheme).
     let current_exe = normalize_path(env!("CARGO_BIN_EXE_tokenzero"));
     let current_exe_canonical = std::fs::canonicalize(env!("CARGO_BIN_EXE_tokenzero"))
         .map(|p| normalize_path(&p.to_string_lossy()))
         .unwrap_or_else(|_| current_exe.clone());
-    normalize_path(text)
+    let mut out = normalize_path(text)
         .replace(&current_exe, "[WORKSPACE]/target/debug/tokenzero")
-        .replace(&current_exe_canonical, "[WORKSPACE]/target/debug/tokenzero")
-        .replace(&temp, "[TMP]")
+        .replace(&current_exe_canonical, "[WORKSPACE]/target/debug/tokenzero");
+    out = collapse_cargo_target_dir_binaries(&out);
+    out = collapse_rch_spark_binaries(&out);
+    out.replace(&temp, "[TMP]")
         .replace(&workspace, "[WORKSPACE]")
         .replace("/target/debug/tokenzero.exe", "/target/debug/tokenzero")
         .replace("/target/release/tokenzero.exe", "/target/release/tokenzero")
+}
+
+fn home_users_alt(path: &str) -> Option<String> {
+    path.strip_prefix("/Users/")
+        .map(|rest| format!("/home/{rest}"))
+        .or_else(|| {
+            path.strip_prefix("/home/")
+                .map(|rest| format!("/Users/{rest}"))
+        })
+}
+
+fn collapse_cargo_target_dir_binaries(text: &str) -> String {
+    const PLACEHOLDER: &str = "[WORKSPACE]/target/debug/tokenzero";
+    let mut dirs = Vec::new();
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        if !td.is_empty() {
+            dirs.push(normalize_path(&td));
+            if let Ok(canonical) = std::fs::canonicalize(&td) {
+                dirs.push(normalize_path(&canonical.to_string_lossy()));
+            }
+        }
+    }
+    dirs.push("/tmp/rch_target_tokenzero".to_string());
+    dirs.sort();
+    dirs.dedup();
+    let mut out = text.to_string();
+    for dir in dirs {
+        let mut alts = vec![dir.clone()];
+        if let Some(alt) = home_users_alt(&dir) {
+            alts.push(alt);
+        }
+        for alt in alts {
+            for profile in ["debug", "release", "release-perf"] {
+                out = out.replace(&format!("{alt}/{profile}/tokenzero"), PLACEHOLDER);
+            }
+        }
+    }
+    out
+}
+
+fn collapse_rch_spark_binaries(text: &str) -> String {
+    const NEEDLE: &str = ".rch-target-spark-";
+    const PLACEHOLDER: &str = "[WORKSPACE]/target/debug/tokenzero";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(NEEDLE) {
+        let prefix = &rest[..idx];
+        let abs_start = prefix
+            .rfind("/Users/")
+            .or_else(|| prefix.rfind("/home/"))
+            .unwrap_or(prefix.len());
+        out.push_str(&rest[..abs_start]);
+        let tail = &rest[idx + NEEDLE.len()..];
+        let after_hash = tail.find('/').map(|i| &tail[i..]).unwrap_or("");
+        let skipped = after_hash
+            .strip_prefix("/debug/tokenzero")
+            .or_else(|| after_hash.strip_prefix("/release/tokenzero"))
+            .or_else(|| after_hash.strip_prefix("/release-perf/tokenzero"));
+        out.push_str(PLACEHOLDER);
+        rest = skipped.unwrap_or(after_hash);
+    }
+    out.push_str(rest);
+    out
 }
 fn normalize_path(text: &str) -> String {
     text.replace('\\', "/")
@@ -409,6 +482,7 @@ struct RefScrubber {
     blob_count: usize,
     file_count: usize,
     search_count: usize,
+    capsule_count: usize,
 }
 impl RefScrubber {
     fn scrub(&mut self, text: &str) -> String {
@@ -446,6 +520,10 @@ impl RefScrubber {
                 self.search_count += 1;
                 format!("tz://search/[SEARCH_REF_{}]", self.search_count)
             }
+            RefKind::Capsule => {
+                self.capsule_count += 1;
+                format!("tz://capsule/[CAPSULE_REF_{}]", self.capsule_count)
+            }
         };
         self.replacements
             .insert(original.to_string(), replacement.clone());
@@ -457,12 +535,14 @@ enum RefKind {
     Blob,
     File,
     Search,
+    Capsule,
 }
 fn ref_end_and_kind(text: &str) -> Option<(usize, RefKind)> {
     for (prefix, kind) in [
         ("tz://blob/", RefKind::Blob),
         ("tz://file/", RefKind::File),
         ("tz://search/h", RefKind::Search),
+        ("tz://capsule/", RefKind::Capsule),
     ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             let digest_len = rest.chars().take_while(|ch| ch.is_ascii_hexdigit()).count();
@@ -473,6 +553,180 @@ fn ref_end_and_kind(text: &str) -> Option<(usize, RefKind)> {
     }
     None
 }
+/// K-9 first-divergence: line-oriented unified hunk of expected vs actual
+/// canonical JSON. Panic text must name `-p tokenzero-cli` (crate dir
+/// `crates/tokenzero`); `-p tokenzero` matches no package.
+fn first_divergence_unified(expected: &str, actual: &str) -> String {
+    let exp: Vec<&str> = expected.lines().collect();
+    let act: Vec<&str> = actual.lines().collect();
+    let n = exp.len().max(act.len());
+    let mut first = None;
+    for i in 0..n {
+        if exp.get(i).copied() != act.get(i).copied() {
+            first = Some(i);
+            break;
+        }
+    }
+    let Some(idx) = first else {
+        return "first_divergence: none (identical lines; trailing-newline or NUL mismatch)\n"
+            .to_string();
+    };
+    let ctx = 3usize;
+    let start = idx.saturating_sub(ctx);
+    let end = (idx + 16).min(n);
+    let mut out = format!(
+        "first_divergence: line {idx} (1-based {})\n--- expected (golden)\n+++ actual (canonical_json)\n@@ -{start} +{start} @@\n",
+        idx + 1
+    );
+    for i in start..end {
+        let e = exp.get(i).copied();
+        let a = act.get(i).copied();
+        if e == a {
+            if let Some(line) = e {
+                out.push_str(&format!(" {line}\n"));
+            }
+            continue;
+        }
+        match e {
+            Some(line) => out.push_str(&format!("-{line}\n")),
+            None => out.push_str("-<missing line>\n"),
+        }
+        match a {
+            Some(line) => out.push_str(&format!("+{line}\n")),
+            None => out.push_str("+<missing line>\n"),
+        }
+    }
+    let remaining = n.saturating_sub(end);
+    if remaining > 0 {
+        out.push_str(&format!(
+            "... ({remaining} more lines follow; json_pointer_diffs lists every field)\n"
+        ));
+    }
+    out
+}
+
+fn json_pointer_diffs(expected: &str, actual: &str) -> String {
+    let exp: Value = match serde_json::from_str(expected) {
+        Ok(v) => v,
+        Err(err) => return format!("json_pointer_diffs: expected not JSON: {err}"),
+    };
+    let act: Value = match serde_json::from_str(actual) {
+        Ok(v) => v,
+        Err(err) => return format!("json_pointer_diffs: actual not JSON: {err}"),
+    };
+    let mut rows = Vec::new();
+    walk_json_diffs(&mut rows, "", &exp, &act);
+    if rows.is_empty() {
+        return "json_pointer_diffs: none (line mismatch is whitespace/key-order only)\n"
+            .to_string();
+    }
+    let mut out = format!("json_pointer_diffs: {} field(s)\n", rows.len());
+    for row in rows {
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
+fn walk_json_diffs(rows: &mut Vec<String>, pointer: &str, expected: &Value, actual: &Value) {
+    if expected == actual {
+        return;
+    }
+    match (expected, actual) {
+        (Value::Object(exp), Value::Object(act)) => {
+            let mut keys: Vec<&str> = exp.keys().map(String::as_str).collect();
+            for key in act.keys() {
+                if !exp.contains_key(key) {
+                    keys.push(key.as_str());
+                }
+            }
+            keys.sort_unstable();
+            keys.dedup();
+            for key in keys {
+                let child = if pointer.is_empty() {
+                    format!("/{key}")
+                } else {
+                    format!("{pointer}/{key}")
+                };
+                match (exp.get(key), act.get(key)) {
+                    (Some(e), Some(a)) => walk_json_diffs(rows, &child, e, a),
+                    (Some(e), None) => rows.push(format!("{child}: expected {e} ; actual <missing>")),
+                    (None, Some(a)) => rows.push(format!("{child}: expected <missing> ; actual {a}")),
+                    (None, None) => {}
+                }
+            }
+        }
+        (Value::Array(exp), Value::Array(act)) => {
+            let n = exp.len().max(act.len());
+            for i in 0..n {
+                let child = format!("{pointer}/{i}");
+                match (exp.get(i), act.get(i)) {
+                    (Some(e), Some(a)) => walk_json_diffs(rows, &child, e, a),
+                    (Some(e), None) => rows.push(format!("{child}: expected {e} ; actual <missing>")),
+                    (None, Some(a)) => rows.push(format!("{child}: expected <missing> ; actual {a}")),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => rows.push(format!("{pointer}: expected {expected} ; actual {actual}")),
+    }
+}
+
+fn inherited_tokenizer_env_hint() -> String {
+    format!(
+        "inherited_tokenizer_env: TOKENZERO_MODEL={:?} OMP_MODEL={:?} OPENAI_MODEL={:?}",
+        std::env::var("TOKENZERO_MODEL").ok(),
+        std::env::var("OMP_MODEL").ok(),
+        std::env::var("OPENAI_MODEL").ok(),
+    )
+}
+
+fn leftover_host_path_hint(actual: &str) -> String {
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "<unset>".into());
+    format!(
+        "host_path_leftovers: /tmp/rch_target_tokenzero={} /home/={} /Users/={} .rch-target-spark={} raw_tz_capsule={} CARGO_TARGET_DIR={target_dir}",
+        actual.contains("/tmp/rch_target_tokenzero"),
+        actual.contains("/home/"),
+        actual.contains("/Users/"),
+        actual.contains(".rch-target-spark"),
+        actual.contains("tz://capsule/") && !actual.contains("tz://capsule/[CAPSULE_REF"),
+    )
+}
+
+fn dump_golden_actual(relative_path: &str, actual: &str, expected: &str) -> Vec<PathBuf> {
+    let stem = relative_path.replace('/', "_");
+    let mut dirs = Vec::new();
+    if let Some(td) = std::env::var_os("CARGO_TARGET_DIR") {
+        dirs.push(PathBuf::from(td).join("golden_mismatch"));
+    }
+    dirs.push(PathBuf::from("/tmp/rch_target_tokenzero/golden_mismatch"));
+    let mut dumped = Vec::new();
+    let mut seen = HashSet::new();
+    for dir in dirs {
+        if !seen.insert(dir.clone()) {
+            continue;
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let actual_path = dir.join(format!("{stem}.actual"));
+        let expected_path = dir.join(format!("{stem}.expected"));
+        let diff_path = dir.join(format!("{stem}.diff"));
+        let _ = std::fs::write(&actual_path, actual);
+        let _ = std::fs::write(&expected_path, expected);
+        let _ = std::fs::write(
+            &diff_path,
+            format!(
+                "{}\n{}",
+                first_divergence_unified(expected, actual),
+                json_pointer_diffs(expected, actual)
+            ),
+        );
+        dumped.push(actual_path);
+    }
+    dumped
+}
+
 fn assert_golden(relative_path: &str, actual: &str) {
     let golden_path = golden_root().join(relative_path);
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
@@ -481,15 +735,24 @@ fn assert_golden(relative_path: &str, actual: &str) {
         return;
     }
     let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|err| {
-        panic!("Golden file missing: {}\n{err}\nRun with UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs",
-            golden_path.display())
+        panic!(
+            "Golden file missing: {}\n{err}\nReplay: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_tokenzero cargo test -p tokenzero-cli --test golden_outputs -- --test-threads=1\nDo not UPDATE_GOLDENS=1 to force green.",
+            golden_path.display()
+        )
     });
     if actual != expected {
         let actual_path = golden_path.with_extension("actual");
         std::fs::write(&actual_path, actual).unwrap();
+        let dumped = dump_golden_actual(relative_path, actual, &expected);
         panic!(
-            "GOLDEN MISMATCH: {relative_path}\n\nTo update: UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs\nTo review: diff -u {} {}",
-            golden_path.display(),
+            "GOLDEN MISMATCH: {relative_path}\n\n{}\n{}\n{}\n{}\nCARGO_BIN_EXE={}\nCARGO_BIN_EXE_canonical={:?}\nworkspace_root={}\ndumped_actual={dumped:?}\nbeside_golden={}\n\nReplay: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_tokenzero cargo test -p tokenzero-cli --test golden_outputs -- --test-threads=1\nDo not UPDATE_GOLDENS=1 to force green.",
+            first_divergence_unified(&expected, actual),
+            json_pointer_diffs(&expected, actual),
+            leftover_host_path_hint(actual),
+            inherited_tokenizer_env_hint(),
+            env!("CARGO_BIN_EXE_tokenzero"),
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_tokenzero")).ok(),
+            workspace_root().display(),
             actual_path.display()
         );
     }
@@ -497,4 +760,68 @@ fn assert_golden(relative_path: &str, actual: &str) {
 fn golden_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/cli/golden")
+}
+
+#[test]
+fn golden_mismatch_first_divergence_names_first_differing_line() {
+    let expected = "{\n  \"cwd\": \"[TMP]\"\n}\n";
+    let actual = "{\n  \"cwd\": \"/tmp/rch_target_tokenzero/debug/tokenzero\"\n}\n";
+    let diff = first_divergence_unified(expected, actual);
+    assert!(
+        diff.contains("first_divergence: line 1 (1-based 2)"),
+        "{diff}"
+    );
+    assert!(diff.contains("-  \"cwd\": \"[TMP]\""), "{diff}");
+    assert!(
+        diff.contains("+  \"cwd\": \"/tmp/rch_target_tokenzero/debug/tokenzero\""),
+        "{diff}"
+    );
+    assert!(
+        leftover_host_path_hint(actual).contains("/tmp/rch_target_tokenzero=true"),
+        "{}",
+        leftover_host_path_hint(actual)
+    );
+    let pointers = json_pointer_diffs(expected, actual);
+    assert!(
+        pointers.contains("/cwd: expected \"[TMP]\" ; actual \"/tmp/rch_target_tokenzero/debug/tokenzero\""),
+        "{pointers}"
+    );
+}
+
+#[test]
+fn ref_scrubber_collapses_path_dependent_capsule_digest_refs() {
+    // Live rch read_json first_divergence: extra refs/2 tz://capsule/<64-hex>
+    // whose causal key includes the host temp path. Blob/file/search were
+    // already collapsed; capsule was not, so leftover_host_path_hint missed it.
+    let mut refs = RefScrubber::default();
+    let digest = "4e6c25a9d24500c74be779d6bfd0b4e7708211df8444ab76d9e9602fa6e864c4";
+    let input = format!("see tz://capsule/{digest} and again tz://capsule/{digest}");
+    let got = refs.scrub(&input);
+    assert_eq!(
+        got,
+        "see tz://capsule/[CAPSULE_REF_1] and again tz://capsule/[CAPSULE_REF_1]"
+    );
+    let second = refs.scrub("tz://capsule/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(second, "tz://capsule/[CAPSULE_REF_2]");
+}
+
+#[test]
+fn scrub_temp_path_collapses_cargo_target_dir_and_rch_spark_binaries() {
+    let temp = Path::new("/tmp/unused-golden-temp-root");
+    let law = "/tmp/rch_target_tokenzero/debug/tokenzero";
+    let spark = "/Users/aditya/AI/TokenZero/.rch-target-spark-1672-pool-deadbeef/debug/tokenzero";
+    let spark_home =
+        "/home/aditya/AI/tokenzero/.rch-target-spark-1672-pool-deadbeef/release-perf/tokenzero";
+    assert_eq!(
+        scrub_temp_path(law, temp),
+        "[WORKSPACE]/target/debug/tokenzero"
+    );
+    assert_eq!(
+        scrub_temp_path(spark, temp),
+        "[WORKSPACE]/target/debug/tokenzero"
+    );
+    assert_eq!(
+        scrub_temp_path(spark_home, temp),
+        "[WORKSPACE]/target/debug/tokenzero"
+    );
 }
