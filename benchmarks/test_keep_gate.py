@@ -26,6 +26,10 @@ def _doc(groups: list[dict], **extra: object) -> dict:
         "benchmark_id": "tokenzero-core.hotpaths",
         "primary": "count_tokens",
         "label": "fixture-seed",
+        "note": (
+            "Synthetic fixture-seed baseline for the keep-gate ratchet. "
+            "Not a live unlabeled measurement percentage."
+        ),
         "groups": groups,
     }
     body.update(extra)
@@ -41,6 +45,9 @@ class KeepGateUnitTests(unittest.TestCase):
         self.assertEqual(keep_gate.KEEP_GATE_GEOMEAN_PCT, 3.0)
         self.assertEqual(keep_gate.KEEP_GATE_PASS_PCT, 5.0)
         self.assertEqual(keep_gate.CV_PCT_QUARANTINE, 5.0)
+        self.assertEqual(
+            keep_gate.ALLOWED_LABELS, frozenset({"fixture-seed", "live"})
+        )
         # persist + keep share KEEP_GATE_GEOMEAN_PCT (not a leftover 25%).
         params = inspect.signature(keep_gate.persist_gate).parameters
         self.assertEqual(
@@ -131,6 +138,49 @@ class KeepGateUnitTests(unittest.TestCase):
             keep_gate.compare_to_history(current, history)
         self.assertIn("history groups missing from current", str(ctx.exception))
         self.assertIn("render_shell", str(ctx.exception))
+
+    def test_unlabeled_history_refuses_as_live(self) -> None:
+        groups = [{"name": "stable", "samples": [100.0, 100.0, 100.0]}]
+        labeled = _doc(groups)
+        unlabeled = _doc(groups)
+        del unlabeled["label"]
+        unlabeled.pop("note", None)
+        with self.assertRaises(keep_gate.KeepGateError) as persist_ctx:
+            keep_gate.persist_gate(unlabeled, labeled)
+        persist_msg = str(persist_ctx.exception).lower()
+        self.assertIn("unlabeled", persist_msg)
+        self.assertIn("live", persist_msg)
+        with self.assertRaises(keep_gate.KeepGateError) as compare_ctx:
+            keep_gate.compare_to_history(unlabeled, labeled)
+        self.assertIn("unlabeled", str(compare_ctx.exception).lower())
+
+        missing_note = _doc(groups)
+        missing_note["note"] = ""
+        with self.assertRaises(keep_gate.KeepGateError) as note_ctx:
+            keep_gate.persist_gate(missing_note, labeled)
+        self.assertIn("missing note", str(note_ctx.exception).lower())
+
+    def test_q99_identity_refuses(self) -> None:
+        groups = [{"name": "stable", "samples": [100.0, 100.0, 100.0]}]
+        q99 = _doc(groups, note="Q99-Input estimator disguised as latency")
+        labeled = _doc(groups)
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.compare_to_history(q99, labeled)
+        self.assertIn("Q99", str(ctx.exception))
+
+    def test_persist_refuses_live_over_fixture_seed(self) -> None:
+        groups = [{"name": "stable", "samples": [100.0, 100.0, 100.0]}]
+        history = _doc(groups)
+        current = _doc(
+            groups,
+            label="live",
+            note="live Criterion release-perf sibling; not fixture-seed",
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.persist_gate(current, history)
+        message = str(ctx.exception)
+        self.assertIn("fixture-seed", message)
+        self.assertIn("sibling", message)
 
     def test_benchmark_id_mismatch_fails_closed(self) -> None:
         history = _doc([{"name": "stable", "samples": [100.0, 100.0, 100.0]}])
@@ -266,6 +316,32 @@ class KeepGateCliTests(unittest.TestCase):
                 persist_bad.returncode, 1, persist_bad.stderr + persist_bad.stdout
             )
             self.assertIn("KEEP_GATE_GEOMEAN_PCT", persist_bad.stdout)
+
+    def test_cli_persist_unlabeled_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unlabeled = json.loads(json.dumps(keep_gate.load_history(HISTORY)))
+            unlabeled.pop("label", None)
+            unlabeled.pop("note", None)
+            path = root / "unlabeled.json"
+            _write(path, unlabeled)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "persist",
+                    "--current",
+                    str(path),
+                    "--history",
+                    str(HISTORY),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+            self.assertIn("unlabeled", result.stderr.lower())
+            self.assertIn("live", result.stderr.lower())
 
 
 if __name__ == "__main__":

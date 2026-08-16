@@ -19,9 +19,10 @@ from typing import Any
 SCHEMA = "tokenzero.bench-history/v1"
 
 # Single source for persist + keep compare bands (CC2-R5 / F-010).
-KEEP_GATE_GEOMEAN_PCT = 3.0  # also persist-gate
+KEEP_GATE_GEOMEAN_PCT = 3.0  # also persist-gate; stricter than skill geomean 5% (KNOWN, do not widen)
 KEEP_GATE_PASS_PCT = 5.0
 CV_PCT_QUARANTINE = 5.0
+ALLOWED_LABELS = frozenset({"fixture-seed", "live"})
 
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGICS = {
@@ -124,6 +125,47 @@ def quarantine_groups(
     return kept, quarantined
 
 
+def _identity_haystack(document: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("label", "note", "benchmark_id", "primary", "unit_id", "unit"):
+        value = document.get(key)
+        if value is not None:
+            parts.append(str(value))
+    groups = document.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if isinstance(group, dict) and group.get("name") is not None:
+                parts.append(str(group["name"]))
+    return " ".join(parts)
+
+
+def require_measurement_identity(document: dict[str, Any], *, role: str) -> str:
+    """Refuse unlabeled / Q99 documents as live keep-gate measurements."""
+    label = document.get("label")
+    if not isinstance(label, str) or not label.strip():
+        raise KeepGateError(
+            f"refuse: {role} unlabeled bench-history cannot persist as live "
+            "(need label=fixture-seed or label=live)"
+        )
+    label = label.strip()
+    if label not in ALLOWED_LABELS:
+        raise KeepGateError(
+            f"refuse: {role} label {label!r} is not a keep-gate measurement label "
+            f"(allowed: {sorted(ALLOWED_LABELS)})"
+        )
+    note = document.get("note")
+    if not isinstance(note, str) or not note.strip():
+        raise KeepGateError(
+            f"refuse: {role} missing note; unlabeled bench-history cannot persist as live"
+        )
+    if "Q99" in _identity_haystack(document).upper():
+        raise KeepGateError(
+            f"refuse: {role} Q99 is not a keep-gate unit "
+            "(keep-gate measures labeled latency ns, not Q99-Input)"
+        )
+    return label
+
+
 def load_history(path: Path) -> dict[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -140,6 +182,7 @@ def load_history(path: Path) -> dict[str, Any]:
     groups = document.get("groups")
     if not isinstance(groups, list) or not groups:
         raise KeepGateError(f"{path}: groups must be a non-empty list")
+    require_measurement_identity(document, role=str(path))
     return document
 
 
@@ -183,6 +226,15 @@ def compare_to_history(
     if current_id != history_id:
         raise KeepGateError(
             f"refuse: benchmark_id mismatch current={current_id!r} history={history_id!r}"
+        )
+
+    current_label = require_measurement_identity(current, role="current")
+    history_label = require_measurement_identity(history, role="history")
+    if current_label != history_label:
+        raise KeepGateError(
+            f"refuse: cannot treat {history_label} history as {current_label} baseline "
+            f"(current={current_label!r} history={history_label!r}; "
+            "write a labeled sibling, do not overwrite fixture-seed latest.json)"
         )
 
     hist_names = _index_by_name(list(history_groups))
@@ -377,6 +429,7 @@ def _cmd_dry_run(_args: argparse.Namespace) -> int:
     print(f"KEEP_GATE_GEOMEAN_PCT={KEEP_GATE_GEOMEAN_PCT}")
     print(f"KEEP_GATE_PASS_PCT={KEEP_GATE_PASS_PCT}")
     print(f"CV_PCT_QUARANTINE={CV_PCT_QUARANTINE}")
+    print(f"ALLOWED_LABELS={sorted(ALLOWED_LABELS)}")
     print(
         "cargo bench: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_tokenzero "
         "cargo bench -p tokenzero-core --bench hotpaths --profile release-perf"
