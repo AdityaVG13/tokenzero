@@ -4,10 +4,14 @@ pub use zero_testkit;
 pub use zero_testkit::decode_worker_transcript;
 
 pub mod gauntlet;
+pub mod parity_taxonomy;
 pub use gauntlet::{
-    CanonicalizationRules, EngineVersions, ExecutionEnvelope, GauntletEngineIdentity,
-    GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY, ScenarioAgreement,
-    SpecTagClass, SpecTagWire, assert_distinct, scenario,
+    assert_distinct, scenario, CanonicalizationRules, EngineVersions, ExecutionEnvelope,
+    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass,
+    SpecTagWire, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+};
+pub use parity_taxonomy::{
+    truncate_score, Feature, FeatureId, FeatureUniverse, LoaderError, ParityStatus, Stats,
 };
 
 #[cfg(test)]
