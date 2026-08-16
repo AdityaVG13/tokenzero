@@ -385,7 +385,7 @@ LARGE_REF=""
 GREP_RAW_TOK=0
 
 # 1. Small file pass-through (capsule-never-costs-more guarantee)
-SMALL_FILE="crates/tokenzero/Cargo.toml"
+SMALL_FILE="crates/tokenzero-cli/Cargo.toml"
 if [[ -f "$SMALL_FILE" ]]; then
     echo "[1/7] small read  : $SMALL_FILE"
     slurp "$SMALL_FILE"

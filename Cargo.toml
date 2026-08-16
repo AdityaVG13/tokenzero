@@ -9,7 +9,7 @@ members = [
     "crates/tokenzero-codemode",
     "crates/tokenzero-mcp-compat",
     "crates/tokenzero-test-support",
-    "crates/tokenzero",
+    "crates/tokenzero-cli",
     "crates/tokenzero-install",
     "crates/tokenzero-pulse",
     "tests",

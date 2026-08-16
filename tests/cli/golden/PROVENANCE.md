@@ -27,5 +27,5 @@ Review workflow:
 ```bash
 cargo test -p tokenzero --test golden_outputs
 UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs
-git diff crates/tokenzero/tests/golden/
+git diff crates/tokenzero-cli/tests/golden/
 ```

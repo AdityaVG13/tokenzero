@@ -1291,8 +1291,8 @@ fn report_pins_source_and_artifact_digests() {
         "schema": "tokenzero.raw_worker_v2_conformance.v1",
         "artifact": {"path": artifact.display().to_string(), "sha256": artifact_sha},
         "sources": {
-            "fixture": {"path": "crates/tokenzero/tests/golden/raw_worker_v2/frames.json", "sha256": fixture_sha},
-            "test": {"path": "crates/tokenzero/tests/raw_worker_v2_packaged_conformance.rs", "sha256": test_sha}
+            "fixture": {"path": "crates/tokenzero-cli/tests/golden/raw_worker_v2/frames.json", "sha256": fixture_sha},
+            "test": {"path": "crates/tokenzero-cli/tests/raw_worker_v2_packaged_conformance.rs", "sha256": test_sha}
         },
         "binding": bound.ack["ack"]["binding"],
         "protocol_digest": bound.ack["ack"]["protocol_digest"],

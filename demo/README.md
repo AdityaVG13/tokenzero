@@ -33,7 +33,7 @@ Seven real scenarios run against this repository's own source tree:
 
 | # | Scenario | What you should see |
 | -: | :-- | :-- |
-| 1 | small read (`crates/tokenzero/Cargo.toml`)        | pass-through; capsule never costs more than raw |
+| 1 | small read (`crates/tokenzero-cli/Cargo.toml`)        | pass-through; capsule never costs more than raw |
 | 2 | large read (`crates/tokenzero-mcp/src/lib.rs`)    | heavy savings + a `tz://blob/...` ref |
 | 3 | re-read same large file                            | seen-set dedup: visible tokens drop sharply against the same cache |
 | 4 | grep `fn ` across `crates\`                       | recoverable hit set; raw is the full `rg` dump |
