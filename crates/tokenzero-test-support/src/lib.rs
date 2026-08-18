@@ -1,8 +1,5 @@
 //! TokenZero-specific tests plus the shared ZeroStack test contract.
 
-pub use zero_testkit;
-pub use zero_testkit::decode_worker_transcript;
-
 pub mod gauntlet;
 pub mod parity_taxonomy;
 pub use gauntlet::{

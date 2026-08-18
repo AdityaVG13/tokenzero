@@ -48,15 +48,14 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76" }
-zero-testkit = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76", default-features = false }
+zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
+zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
+zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
+zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
+zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
+zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558" }
 # Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
-zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "be8867ee99a14fc78a75db220358096bf3874c76", features = ["fastmcp"] }
+zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "fda6e17f81c9c63b8fd0350e72765a889d5ed558", features = ["fastmcp"] }
 
 [profile.release-perf]
 inherits = "release"

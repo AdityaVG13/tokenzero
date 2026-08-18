@@ -443,26 +443,28 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=fda6e17f81c9c63b8fd0350e72765a889d5ed558#fda6e17f81c9c63b8fd0350e72765a889d5ed558"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zero-ref",
 ]
 
 [[package]]
 name = "zero-gauge"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=fda6e17f81c9c63b8fd0350e72765a889d5ed558#fda6e17f81c9c63b8fd0350e72765a889d5ed558"
 dependencies = [
  "serde",
  "serde_json",
+ "zero-abi",
 ]
 
 [[package]]
 name = "zero-ledger"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=fda6e17f81c9c63b8fd0350e72765a889d5ed558#fda6e17f81c9c63b8fd0350e72765a889d5ed558"
 dependencies = [
  "serde",
  "serde_json",
@@ -472,7 +474,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=fda6e17f81c9c63b8fd0350e72765a889d5ed558#fda6e17f81c9c63b8fd0350e72765a889d5ed558"
 dependencies = [
  "serde",
  "sha2",
@@ -481,7 +483,7 @@ dependencies = [
 [[package]]
 name = "zero-store"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=fda6e17f81c9c63b8fd0350e72765a889d5ed558#fda6e17f81c9c63b8fd0350e72765a889d5ed558"
 dependencies = [
  "serde",
  "serde_json",

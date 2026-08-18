@@ -22,10 +22,11 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
-use tokenzero_test_support::decode_worker_transcript;
+use tokenzero_engine::raw_worker::raw_worker_protocol::{
+    decode_response_frame, raw_worker_protocol_digest_hex,
+};
 
 const PROTOCOL_VERSION: &str = "zerostack.raw_worker";
-const PROTOCOL_DIGEST: &str = "e2daca4d95cbd2780f2e10b30b823e9398747bfe15e38ca0810f634a387aeace";
 const MAX_FRAME_BYTES: usize = 1_048_576;
 
 fn repo_root() -> PathBuf {
@@ -189,7 +190,7 @@ impl Worker {
             .lines
             .recv_timeout(Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("{what}: no worker frame within 60s ({e})"));
-        decode_worker_transcript(line.as_bytes())
+        decode_response_frame(line.as_bytes(), MAX_FRAME_BYTES)
             .unwrap_or_else(|e| panic!("{what}: worker violated shared response codec ({e})"));
         serde_json::from_str(&line)
             .unwrap_or_else(|e| panic!("{what}: worker emitted non-JSON line ({e}): {line:?}"))
@@ -962,7 +963,7 @@ fn advertised_capabilities_and_limits_are_behaviorally_true() {
     let ack = &bound.ack["ack"];
 
     assert_eq!(ack["protocol_version"], PROTOCOL_VERSION);
-    assert_eq!(ack["protocol_digest"], PROTOCOL_DIGEST);
+    assert_eq!(ack["protocol_digest"], raw_worker_protocol_digest_hex());
     assert_eq!(ack["binding"]["engine"], "tokenzero");
     assert_eq!(ack["binding"]["ref_scheme"], "tz://");
     // Claimed capabilities: cancellation/deadlines have behavioral tests in
@@ -1344,7 +1345,7 @@ fn report_pins_source_and_artifact_digests() {
         assert_eq!(hex.len(), 64, "digest must be sha256 hex: {hex}");
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{hex}");
     }
-    assert_eq!(parsed["protocol_digest"], PROTOCOL_DIGEST);
+    assert_eq!(parsed["protocol_digest"], raw_worker_protocol_digest_hex());
 
     bound.worker.send(&shutdown_frame("report complete"));
     assert_eq!(bound.worker.recv("report shutdown")["kind"], "shutdown_ack");
