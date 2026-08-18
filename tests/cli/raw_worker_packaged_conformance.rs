@@ -9,7 +9,7 @@
 //! invariant is paired with a mutation that must turn this gate red.
 //! `report_pins_source_and_artifact_digests` pins fixture, test-source, and
 //! packaged-artifact SHA-256 digests plus the live binding digests into
-//! target/raw_worker_v2_conformance_report.json.
+//! target/raw_worker_conformance_report.json.
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 use tokenzero_test_support::decode_worker_transcript;
 
-const PROTOCOL_VERSION: &str = "zerostack.raw_worker.v2";
+const PROTOCOL_VERSION: &str = "zerostack.raw_worker";
 const PROTOCOL_DIGEST: &str = "e2daca4d95cbd2780f2e10b30b823e9398747bfe15e38ca0810f634a387aeace";
 const MAX_FRAME_BYTES: usize = 1_048_576;
 
@@ -39,7 +39,7 @@ fn repo_root() -> PathBuf {
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/cli/golden/raw_worker_v2/frames.json")
+        .join("../../tests/cli/golden/raw_worker/frames.json")
 }
 
 fn load_fixture() -> Vec<Value> {
@@ -1112,7 +1112,7 @@ fn protocol_invariant_mutations_fail_closed() {
     let base = handshake_request(&root, "s-mut", &cap, None);
     let mut mutations: Vec<(&str, Value, &str)> = Vec::new();
     let mut m = base.clone();
-    m["request"]["protocol_version"] = json!("zerostack.raw_worker.v1");
+    m["request"]["protocol_version"] = json!("zerostack.raw_worker");
     mutations.push(("protocol_version", m, "contract_mismatch"));
     let mut m = base.clone();
     m["request"]["root"] = json!("");
@@ -1280,7 +1280,7 @@ fn report_pins_source_and_artifact_digests() {
     let artifact_sha = sha256_hex(&fs::read(&artifact).expect("artifact readable"));
     let fixture_sha = sha256_hex(&fs::read(fixture_path()).expect("fixture readable"));
     let test_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/cli/raw_worker_v2_packaged_conformance.rs");
+        .join("../../tests/cli/raw_worker_packaged_conformance.rs");
     let test_sha = sha256_hex(&fs::read(&test_source).expect("test source readable"));
 
     let dir = tempdir().unwrap();
@@ -1288,11 +1288,11 @@ fn report_pins_source_and_artifact_digests() {
     let mut bound = spawn_bound(dir.path(), "s-report", &cap);
 
     let report = json!({
-        "schema": "tokenzero.raw_worker_v2_conformance.v1",
+        "schema": "tokenzero.raw_worker_conformance.v1",
         "artifact": {"path": artifact.display().to_string(), "sha256": artifact_sha},
         "sources": {
-            "fixture": {"path": "crates/tokenzero-cli/tests/golden/raw_worker_v2/frames.json", "sha256": fixture_sha},
-            "test": {"path": "crates/tokenzero-cli/tests/raw_worker_v2_packaged_conformance.rs", "sha256": test_sha}
+            "fixture": {"path": "crates/tokenzero-cli/tests/golden/raw_worker/frames.json", "sha256": fixture_sha},
+            "test": {"path": "crates/tokenzero-cli/tests/raw_worker_packaged_conformance.rs", "sha256": test_sha}
         },
         "binding": bound.ack["ack"]["binding"],
         "protocol_digest": bound.ack["ack"]["protocol_digest"],
@@ -1312,7 +1312,7 @@ fn report_pins_source_and_artifact_digests() {
         },
         "invariant_mutations": [
             {"invariant": "handshake binding", "mutation": "fixture placeholders verbatim", "expected": "binding_mismatch"},
-            {"invariant": "protocol version", "mutation": "zerostack.raw_worker.v1", "expected": "binding_mismatch"},
+            {"invariant": "protocol version", "mutation": "zerostack.raw_worker", "expected": "binding_mismatch"},
             {"invariant": "non-empty root", "mutation": "root==''", "expected": "binding_mismatch"},
             {"invariant": "engine identity", "mutation": "expected_engine=fszero", "expected": "binding_mismatch"},
             {"invariant": "contract digest", "mutation": "deadbeef", "expected": "binding_mismatch"},
@@ -1327,14 +1327,14 @@ fn report_pins_source_and_artifact_digests() {
             {"invariant": "frame bound", "mutation": "frame > max_frame_bytes", "expected": "frame_too_large"}
         ]
     });
-    let out = repo_root().join("target/raw_worker_v2_conformance_report.json");
+    let out = repo_root().join("target/raw_worker_conformance_report.json");
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).ok();
     }
     fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("report writable");
 
     let parsed: Value = serde_json::from_slice(&fs::read(&out).unwrap()).unwrap();
-    assert_eq!(parsed["schema"], "tokenzero.raw_worker_v2_conformance.v1");
+    assert_eq!(parsed["schema"], "tokenzero.raw_worker_conformance.v1");
     for digest in [
         &parsed["artifact"]["sha256"],
         &parsed["sources"]["fixture"]["sha256"],

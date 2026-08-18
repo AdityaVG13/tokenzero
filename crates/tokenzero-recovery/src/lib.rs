@@ -436,7 +436,7 @@ pub(crate) fn fragment_error_reason(err: FragmentError) -> &'static str {
 
 /// Parsed components of a ZeroRef v1 portable blob ref.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ZeroRefV1Blob {
+pub struct ZeroRefBlob {
     pub scheme: String,
     pub hash: String,
     pub fragment: Option<ZeroRefFragment>,
@@ -463,7 +463,7 @@ pub enum ZeroRefFragment {
 pub fn parse_zeroref_v1_blob(
     ref_id: &str,
     byte_length: Option<usize>,
-) -> Result<ZeroRefV1Blob, ZeroRefError> {
+) -> Result<ZeroRefBlob, ZeroRefError> {
     let (bare, fragment) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
@@ -487,7 +487,7 @@ pub fn parse_zeroref_v1_blob(
     {
         return Err(ZeroRefError::Malformed);
     }
-    Ok(ZeroRefV1Blob {
+    Ok(ZeroRefBlob {
         scheme: scheme.to_string(),
         hash: hash.to_string(),
         fragment,
@@ -500,7 +500,7 @@ fn parse_portable_or_lenient_fragment(
     ref_id: &str,
     fragment: &str,
 ) -> Result<ZeroRefFragment, ZeroRefError> {
-    if let Ok(parsed) = zero_ref::ZeroRefV1::parse(ref_id) {
+    if let Ok(parsed) = zero_ref::ZeroRef::parse(ref_id) {
         return match parsed.fragment {
             zero_ref::ZeroFragment::Bytes { start, end } => Ok(ZeroRefFragment::Byte {
                 start: usize::try_from(start).map_err(|_| ZeroRefError::Malformed)?,
@@ -3160,7 +3160,7 @@ fn resolve_to_expand_content(
         RefResolve::NotFound => Err(ref_not_found_reason(kind)),
     }
 }
-fn parse_expand_portable(ref_id: &str) -> Result<Option<ZeroRefV1Blob>, String> {
+fn parse_expand_portable(ref_id: &str) -> Result<Option<ZeroRefBlob>, String> {
     match parse_zeroref_v1_blob(ref_id, None) {
         Ok(parsed) => Ok(Some(parsed)),
         Err(ZeroRefError::Unsupported) => Ok(None),

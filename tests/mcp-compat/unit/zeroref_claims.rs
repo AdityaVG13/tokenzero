@@ -131,7 +131,7 @@ named_test!(retained_evidence_is_green_or_pending_with_sibling_shas, {
 named_test!(
     capability_descriptor_gates_cross_engine_until_multi_os_evidence,
     {
-        let z = CapabilityDescriptor::for_surface(McpToolSurface::Classic).zeroref_v1;
+        let z = CapabilityDescriptor::for_surface(McpToolSurface::Classic).zeroref;
         require! {
             "descriptor.enabled" => z.enabled,
             "descriptor.shared_cas" => z.shared_cas,

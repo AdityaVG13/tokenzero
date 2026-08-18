@@ -1,4 +1,4 @@
-//! zerostack.surface.v1 capability handshake (tokenzero-irx9.4).
+//! zerostack.surface capability handshake (tokenzero-irx9.4).
 //!
 //! Additive capability record for trusted composition: selected surface,
 //! semantic contract version/digest, plan forms, ref protocol, limits, and
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokenzero_core::operation_abi::{SEMANTIC_CONTRACT_VERSION, contract_digest_hex};
 
 /// Shared family capability schema name (identical field names across engines).
-pub const SURFACE_CAPABILITY_SCHEMA: &str = "zerostack.surface.v1";
+pub const SURFACE_CAPABILITY_SCHEMA: &str = "zerostack.surface";
 
 /// Canonical private raw-worker protocol advertised in the handshake.
 pub const RAW_WORKER_PROTOCOL_VERSION: &str = zero_abi::RAW_WORKER_PROTOCOL_VERSION;

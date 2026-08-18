@@ -14,7 +14,7 @@ use zero_process::VerifiedChild;
 pub(crate) const MAX_OUTPUT_BYTES: usize = 65_536;
 
 #[derive(Default)]
-pub struct RawWorkerV2Session {
+pub struct RawWorkerSession {
     binding: Option<Binding>,
     shutdown: bool,
     expected_root: Option<String>,
@@ -33,7 +33,7 @@ struct Binding {
     contract: String,
 }
 
-impl RawWorkerV2Session {
+impl RawWorkerSession {
     pub fn for_binding(root: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
             binding: None,
@@ -248,7 +248,7 @@ fn forbidden(op: &str) -> bool {
         || op.starts_with("mcp.")
 }
 
-impl RawWorkerV2Session {
+impl RawWorkerSession {
     fn register_cancel(&mut self, id: &str) -> Arc<CancelState> {
         let cancel = Arc::new(CancelState::default());
         self.cancel_registry.insert(id.to_string(), cancel.clone());
@@ -360,8 +360,8 @@ fn worker_token_accounting(
     op: &str,
     args: &Value,
     value: &Value,
-) -> Result<raw_worker_v2_protocol::WorkerTokenAccountingV1, String> {
-    let is_job = op == zero_abi::TOKEN_JOB_OPERATION_V1;
+) -> Result<raw_worker_protocol::WorkerTokenAccounting, String> {
+    let is_job = op == zero_abi::TOKEN_JOB_OPERATION;
     let is_background_shell = is_shell_op(op) && args["background"] == true;
     let accounting_optional = is_job || is_background_shell;
     let accounting = value
@@ -402,10 +402,10 @@ fn worker_token_accounting(
         .map(|accounting| checked_u64_count("cached_tokens", accounting.cached_tokens))
         .transpose()?
         .unwrap_or(0);
-    let worker = raw_worker_v2_protocol::WorkerTokenAccountingV1 {
+    let worker = raw_worker_protocol::WorkerTokenAccounting {
         tokenizer_version_digest: None,
         tokenizer_id: "conservative:utf8-json-bytes-v1".to_string(),
-        count_kind: raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound,
+        count_kind: raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound,
         raw_tokens,
         visible_tokens: output_bytes,
         recovery_tokens: recovery_bytes,
@@ -415,7 +415,7 @@ fn worker_token_accounting(
         // that fact rather than forwarding the domain estimator as exact.
         exact_ref_tokens: None,
     };
-    zero_abi::validate_worker_token_accounting_v1(&worker)
+    zero_abi::validate_worker_token_accounting(&worker)
         .map_err(|error| format!("invalid worker token accounting: {error}"))?;
     Ok(worker)
 }
@@ -428,9 +428,9 @@ fn attach_engine_timeline(
     if requested {
         let duration_ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
         let duration_ns = duration_ns.max(1);
-        let timeline = raw_worker_v2_protocol::EngineStageTimelineV1 {
+        let timeline = raw_worker_protocol::EngineStageTimeline {
             total_ns: duration_ns,
-            spans: vec![raw_worker_v2_protocol::EngineStageSpanV1 {
+            spans: vec![raw_worker_protocol::EngineStageSpan {
                 stage: "tokenzero.raw_worker_call".to_string(),
                 start_ns: 0,
                 duration_ns,
@@ -462,9 +462,9 @@ enum RoutedFrame {
     Dispatch(CallCtx),
 }
 
-pub fn execute_raw_worker_v2_frame(
+pub fn execute_raw_worker_frame(
     engine: &TokenZeroEngine,
-    session: &mut RawWorkerV2Session,
+    session: &mut RawWorkerSession,
     line: &[u8],
 ) -> Vec<u8> {
     match route_frame(session, line) {
@@ -488,10 +488,10 @@ pub fn execute_raw_worker_v2_frame(
 /// Frame routing without dispatch: control frames (handshake/shutdown/cancel)
 /// and validation failures produce an encoded response; valid calls come back
 /// for dispatch so the serve loop can run them off the read loop.
-fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
-    if let Err(e) = raw_worker_v2_protocol::decode_request_frame(
+fn route_frame(session: &mut RawWorkerSession, line: &[u8]) -> RoutedFrame {
+    if let Err(e) = raw_worker_protocol::decode_request_frame(
         line,
-        raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
+        raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES,
     ) {
         return RoutedFrame::Respond(encode(error(None, e.kind(), e.to_string(), None)));
     }
@@ -531,7 +531,7 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
             .and_then(Value::as_str)
             .is_some_and(|v| v != rev);
         let mismatch = request["protocol_version"].as_str()
-            != Some(raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION)
+            != Some(raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION)
             || root.is_empty()
             || session_id.is_empty()
             || session
@@ -574,13 +574,13 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
             contract: contract.into(),
         });
         return RoutedFrame::Respond(encode(json!({"kind":"handshake_ack","ack":{
-            "protocol_version":raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION,
+            "protocol_version":raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION,
             "binding":{"engine":"tokenzero","root":root,"session_id":session_id,"worker_revision":rev,
                 "semantic_contract_version":cap["semantic_contract_version"],"semantic_contract_digest":contract,
                 "operation_registry_digest":registry,"ref_scheme":"tz://"},
             "capabilities":{"cancellation":true,"deadlines":true,"approvals":false,"revert":false,"snapshots":false},
             "limits":{"max_frame_bytes":1048576,"max_output_bytes":MAX_OUTPUT_BYTES,"max_in_flight":1,"default_deadline_ms":DEFAULT_DEADLINE_MS},
-            "protocol_digest":raw_worker_v2_protocol::raw_worker_protocol_digest_hex()
+            "protocol_digest":raw_worker_protocol::raw_worker_protocol_digest_hex()
         }})));
     }
     if kind == "shutdown" {
@@ -824,7 +824,7 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
     let mut owned_refs = Vec::new();
     // Job tails are arbitrary shell bytes. A line beginning with `tz://` is
     // content, not a minted ref, so job results never contribute ownership.
-    if ctx.op != zero_abi::TOKEN_JOB_OPERATION_V1 {
+    if ctx.op != zero_abi::TOKEN_JOB_OPERATION {
         refs(&value, &mut owned_refs);
     }
     let mut frame = json!({"kind":"result","request_id":ctx.id.clone(),"result":{"value":value,"metadata":{
@@ -852,7 +852,7 @@ fn write_response(writer: &Mutex<std::io::Stdout>, response: &[u8]) -> std::io::
     out.flush()
 }
 
-fn terminate_raw_worker_v2_session(session: &Mutex<RawWorkerV2Session>) {
+fn terminate_raw_worker_session(session: &Mutex<RawWorkerSession>) {
     let teardown = {
         let mut guard = session.lock().unwrap_or_else(|poison| poison.into_inner());
         guard.cancel_all();
@@ -873,13 +873,13 @@ fn terminate_raw_worker_v2_session(session: &Mutex<RawWorkerV2Session>) {
 /// shutdown, and cancel — cancellation must reach active work, so it can
 /// never queue behind a running call) while calls dispatch on a single worker
 /// thread, preserving the advertised `max_in_flight: 1` execution bound.
-pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
+pub fn run_raw_worker_protocol_serve(opts: &RawWorkerServeOptions) -> i32 {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let writer = Arc::new(Mutex::new(std::io::stdout()));
     let session_id =
         std::env::var("ZEROSTACK_SESSION_ID").unwrap_or_else(|_| "tokenzero-raw-worker".into());
-    let session = Arc::new(Mutex::new(RawWorkerV2Session::for_binding(
+    let session = Arc::new(Mutex::new(RawWorkerSession::for_binding(
         opts.root.to_string_lossy().into_owned(),
         session_id,
     )));
@@ -911,7 +911,7 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
         })
     };
     let exit_code = loop {
-        match read_bounded_frame(&mut input, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES) {
+        match read_bounded_frame(&mut input, raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES) {
             Ok(BoundedFrame::Eof) => break 0,
             Ok(BoundedFrame::TooLarge) => {
                 let response = encode(error(
@@ -954,7 +954,7 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
             Err(_) => break 2,
         }
     };
-    terminate_raw_worker_v2_session(&session);
+    terminate_raw_worker_session(&session);
     drop(tx);
     // Raw-worker entrypoints immediately pass this code to `process::exit`.
     // Joining here would let disconnected work retain the dedicated process
@@ -1009,5 +1009,5 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, maximum: usize) -> std::io::Re
 }
 
 #[cfg(test)]
-#[path = "../../../tests/engine/inline/raw_worker_v2_impl__tests.rs"]
+#[path = "../../../tests/engine/inline/raw_worker_impl__tests.rs"]
 mod tests;

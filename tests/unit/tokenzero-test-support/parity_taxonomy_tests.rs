@@ -163,7 +163,7 @@
     #[test]
     fn load_rejects_weight_sum_not_one() {
         let bad = r#"
-schema_version = "gauntlet.supported_surface_matrix.v1"
+schema_version = "gauntlet.supported_surface_matrix"
 [categories.tokenizer-identity]
 weight = 1.0
 [[features]]
@@ -192,7 +192,7 @@ status = "supported"
     #[test]
     fn load_rejects_non_positive_weight() {
         let negative = r#"
-schema_version = "gauntlet.supported_surface_matrix.v1"
+schema_version = "gauntlet.supported_surface_matrix"
 [categories.tokenizer-identity]
 weight = 1.0
 [[features]]
@@ -216,7 +216,7 @@ status = "supported"
         );
 
         let zero_cat = r#"
-schema_version = "gauntlet.supported_surface_matrix.v1"
+schema_version = "gauntlet.supported_surface_matrix"
 [categories.tokenizer-identity]
 weight = 0.0
 [[features]]
@@ -237,7 +237,7 @@ status = "supported"
     #[test]
     fn n_a_does_not_round_to_passing() {
         let na = r#"
-schema_version = "gauntlet.supported_surface_matrix.v1"
+schema_version = "gauntlet.supported_surface_matrix"
 [categories.tokenizer-identity]
 weight = 1.0
 [[features]]

@@ -4,20 +4,20 @@
 //! by this module. Metadata binds them to the exact provider/model/backend,
 //! reasoning contract, session, position, sampler, and lineage. Exact replay is
 //! refused unless every binding matches. Headroom arithmetic delegates to the
-//! canonical ZeroStack [`ReasoningContractV1`] contract.
+//! canonical ZeroStack [`ReasoningContract`] contract.
 
 use crate::decision_view::{DecisionView, DecisionViewIdentity};
 use serde::Serialize;
 use std::{error::Error, fmt};
 use zero_abi::{
-    DigestV1, NativeStatePolicyV1, ReasoningContractErrorV1, ReasoningContractV1, sha256,
+    Sha256Digest, NativeStatePolicy, ReasoningContractError, ReasoningContract, sha256,
 };
 
 pub const MAX_OPAQUE_REASONING_STATE_BYTES: usize = 16 * 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OpaqueReasoningStateKindV1 {
+pub enum OpaqueReasoningStateKind {
     ProviderReasoningItems,
     SignedThinkingBlocks,
     EncryptedReasoningContent,
@@ -28,7 +28,7 @@ pub enum OpaqueReasoningStateKindV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReasoningContinuationStatusV1 {
+pub enum ReasoningContinuationStatus {
     Exact,
     ScopedCertificate,
     Approximate,
@@ -38,7 +38,7 @@ pub enum ReasoningContinuationStatusV1 {
     IdentityMismatch,
 }
 
-impl ReasoningContinuationStatusV1 {
+impl ReasoningContinuationStatus {
     const fn carries_payload(self) -> bool {
         matches!(
             self,
@@ -49,7 +49,7 @@ impl ReasoningContinuationStatusV1 {
 
 #[derive(Debug)]
 pub enum ReasoningStateError {
-    ReasoningContract(ReasoningContractErrorV1),
+    ReasoningContract(ReasoningContractError),
     ZeroIdentity(&'static str),
     MissingSamplerIdentity,
     EmptyPayload,
@@ -69,12 +69,12 @@ pub enum ReasoningStateError {
     TokenizerIdentityMismatch,
     ToolSchemaIdentityMismatch,
     NativeStatePolicyMismatch {
-        policy: NativeStatePolicyV1,
-        status: ReasoningContinuationStatusV1,
+        policy: NativeStatePolicy,
+        status: ReasoningContinuationStatus,
     },
     BindingMismatch,
     OrderMismatch,
-    NotExact(ReasoningContinuationStatusV1),
+    NotExact(ReasoningContinuationStatus),
     Expired,
     ContentDigestMismatch,
 }
@@ -154,38 +154,38 @@ impl Error for ReasoningStateError {
     }
 }
 
-impl From<ReasoningContractErrorV1> for ReasoningStateError {
-    fn from(error: ReasoningContractErrorV1) -> Self {
+impl From<ReasoningContractError> for ReasoningStateError {
+    fn from(error: ReasoningContractError) -> Self {
         Self::ReasoningContract(error)
     }
 }
 
 /// Complete execution binding for provider-native reasoning bytes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ReasoningStateBindingV1 {
-    provider_identity: DigestV1,
-    model_identity: DigestV1,
-    backend_identity: DigestV1,
-    tokenizer_identity: DigestV1,
-    decoder_identity: DigestV1,
-    tool_schema_digest: DigestV1,
-    reasoning_contract_digest: DigestV1,
-    native_state_policy: NativeStatePolicyV1,
-    position_identity: DigestV1,
-    session_identity: DigestV1,
+pub struct ReasoningStateBinding {
+    provider_identity: Sha256Digest,
+    model_identity: Sha256Digest,
+    backend_identity: Sha256Digest,
+    tokenizer_identity: Sha256Digest,
+    decoder_identity: Sha256Digest,
+    tool_schema_digest: Sha256Digest,
+    reasoning_contract_digest: Sha256Digest,
+    native_state_policy: NativeStatePolicy,
+    position_identity: Sha256Digest,
+    session_identity: Sha256Digest,
     sampler_identity_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sampler_identity: Option<DigestV1>,
+    sampler_identity: Option<Sha256Digest>,
 }
 
-impl ReasoningStateBindingV1 {
+impl ReasoningStateBinding {
     pub fn new(
-        provider_identity: DigestV1,
-        contract: &ReasoningContractV1,
-        position_identity: DigestV1,
-        session_identity: DigestV1,
+        provider_identity: Sha256Digest,
+        contract: &ReasoningContract,
+        position_identity: Sha256Digest,
+        session_identity: Sha256Digest,
         sampler_identity_required: bool,
-        sampler_identity: Option<DigestV1>,
+        sampler_identity: Option<Sha256Digest>,
     ) -> Result<Self, ReasoningStateError> {
         contract.validate()?;
         for (field, digest) in [
@@ -217,61 +217,61 @@ impl ReasoningStateBindingV1 {
         })
     }
 
-    pub const fn provider_identity(&self) -> DigestV1 {
+    pub const fn provider_identity(&self) -> Sha256Digest {
         self.provider_identity
     }
-    pub const fn model_identity(&self) -> DigestV1 {
+    pub const fn model_identity(&self) -> Sha256Digest {
         self.model_identity
     }
-    pub const fn backend_identity(&self) -> DigestV1 {
+    pub const fn backend_identity(&self) -> Sha256Digest {
         self.backend_identity
     }
-    pub const fn tokenizer_identity(&self) -> DigestV1 {
+    pub const fn tokenizer_identity(&self) -> Sha256Digest {
         self.tokenizer_identity
     }
-    pub const fn decoder_identity(&self) -> DigestV1 {
+    pub const fn decoder_identity(&self) -> Sha256Digest {
         self.decoder_identity
     }
-    pub const fn tool_schema_digest(&self) -> DigestV1 {
+    pub const fn tool_schema_digest(&self) -> Sha256Digest {
         self.tool_schema_digest
     }
-    pub const fn reasoning_contract_digest(&self) -> DigestV1 {
+    pub const fn reasoning_contract_digest(&self) -> Sha256Digest {
         self.reasoning_contract_digest
     }
-    pub const fn native_state_policy(&self) -> NativeStatePolicyV1 {
+    pub const fn native_state_policy(&self) -> NativeStatePolicy {
         self.native_state_policy
     }
-    pub const fn position_identity(&self) -> DigestV1 {
+    pub const fn position_identity(&self) -> Sha256Digest {
         self.position_identity
     }
-    pub const fn session_identity(&self) -> DigestV1 {
+    pub const fn session_identity(&self) -> Sha256Digest {
         self.session_identity
     }
     pub const fn sampler_identity_required(&self) -> bool {
         self.sampler_identity_required
     }
-    pub const fn sampler_identity(&self) -> Option<DigestV1> {
+    pub const fn sampler_identity(&self) -> Option<Sha256Digest> {
         self.sampler_identity
     }
 }
 
 /// Monotonic provider ordering and exact parent lineage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub struct ReasoningStateOrderV1 {
+pub struct ReasoningStateOrder {
     sequence_index: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parent_content_digest: Option<DigestV1>,
+    parent_content_digest: Option<Sha256Digest>,
 }
 
-impl ReasoningStateOrderV1 {
+impl ReasoningStateOrder {
     pub fn new(
         sequence_index: u64,
-        parent_content_digest: Option<DigestV1>,
+        parent_content_digest: Option<Sha256Digest>,
     ) -> Result<Self, ReasoningStateError> {
         match (sequence_index, parent_content_digest) {
             (0, Some(_)) => return Err(ReasoningStateError::InvalidInitialOrder),
             (1.., None) => return Err(ReasoningStateError::MissingParentDigest),
-            (_, Some(digest)) if digest == DigestV1::ZERO => {
+            (_, Some(digest)) if digest == Sha256Digest::ZERO => {
                 return Err(ReasoningStateError::InvalidParentDigest);
             }
             _ => {}
@@ -285,37 +285,37 @@ impl ReasoningStateOrderV1 {
     pub const fn sequence_index(&self) -> u64 {
         self.sequence_index
     }
-    pub const fn parent_content_digest(&self) -> Option<DigestV1> {
+    pub const fn parent_content_digest(&self) -> Option<Sha256Digest> {
         self.parent_content_digest
     }
 }
 
 /// Serializable metadata only. It never contains provider-native reasoning bytes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct OpaqueReasoningStateRefV1 {
-    kind: OpaqueReasoningStateKindV1,
-    status: ReasoningContinuationStatusV1,
-    binding: ReasoningStateBindingV1,
-    order: ReasoningStateOrderV1,
-    content_digest: DigestV1,
+pub struct OpaqueReasoningStateRef {
+    kind: OpaqueReasoningStateKind,
+    status: ReasoningContinuationStatus,
+    binding: ReasoningStateBinding,
+    order: ReasoningStateOrder,
+    content_digest: Sha256Digest,
     byte_len: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    continuation_certificate_digest: Option<DigestV1>,
+    continuation_certificate_digest: Option<Sha256Digest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     valid_until_unix_ms: Option<u64>,
 }
 
-impl OpaqueReasoningStateRefV1 {
-    pub fn unavailable(binding: ReasoningStateBindingV1) -> Self {
+impl OpaqueReasoningStateRef {
+    pub fn unavailable(binding: ReasoningStateBinding) -> Self {
         Self {
-            kind: OpaqueReasoningStateKindV1::Unavailable,
-            status: ReasoningContinuationStatusV1::Unavailable,
+            kind: OpaqueReasoningStateKind::Unavailable,
+            status: ReasoningContinuationStatus::Unavailable,
             binding,
-            order: ReasoningStateOrderV1 {
+            order: ReasoningStateOrder {
                 sequence_index: 0,
                 parent_content_digest: None,
             },
-            content_digest: DigestV1::ZERO,
+            content_digest: Sha256Digest::ZERO,
             byte_len: 0,
             continuation_certificate_digest: None,
             valid_until_unix_ms: None,
@@ -323,14 +323,14 @@ impl OpaqueReasoningStateRefV1 {
     }
 
     pub fn rejected(
-        kind: OpaqueReasoningStateKindV1,
-        binding: ReasoningStateBindingV1,
-        order: ReasoningStateOrderV1,
-        content_digest: DigestV1,
+        kind: OpaqueReasoningStateKind,
+        binding: ReasoningStateBinding,
+        order: ReasoningStateOrder,
+        content_digest: Sha256Digest,
     ) -> Result<Self, ReasoningStateError> {
         terminal_ref(
             kind,
-            ReasoningContinuationStatusV1::Rejected,
+            ReasoningContinuationStatus::Rejected,
             binding,
             order,
             content_digest,
@@ -339,15 +339,15 @@ impl OpaqueReasoningStateRefV1 {
     }
 
     pub fn expired(
-        kind: OpaqueReasoningStateKindV1,
-        binding: ReasoningStateBindingV1,
-        order: ReasoningStateOrderV1,
-        content_digest: DigestV1,
+        kind: OpaqueReasoningStateKind,
+        binding: ReasoningStateBinding,
+        order: ReasoningStateOrder,
+        content_digest: Sha256Digest,
         valid_until_unix_ms: u64,
     ) -> Result<Self, ReasoningStateError> {
         terminal_ref(
             kind,
-            ReasoningContinuationStatusV1::Expired,
+            ReasoningContinuationStatus::Expired,
             binding,
             order,
             content_digest,
@@ -356,14 +356,14 @@ impl OpaqueReasoningStateRefV1 {
     }
 
     pub fn identity_mismatch(
-        kind: OpaqueReasoningStateKindV1,
-        binding: ReasoningStateBindingV1,
-        order: ReasoningStateOrderV1,
-        content_digest: DigestV1,
+        kind: OpaqueReasoningStateKind,
+        binding: ReasoningStateBinding,
+        order: ReasoningStateOrder,
+        content_digest: Sha256Digest,
     ) -> Result<Self, ReasoningStateError> {
         terminal_ref(
             kind,
-            ReasoningContinuationStatusV1::IdentityMismatch,
+            ReasoningContinuationStatus::IdentityMismatch,
             binding,
             order,
             content_digest,
@@ -371,25 +371,25 @@ impl OpaqueReasoningStateRefV1 {
         )
     }
 
-    pub const fn kind(&self) -> OpaqueReasoningStateKindV1 {
+    pub const fn kind(&self) -> OpaqueReasoningStateKind {
         self.kind
     }
-    pub const fn status(&self) -> ReasoningContinuationStatusV1 {
+    pub const fn status(&self) -> ReasoningContinuationStatus {
         self.status
     }
-    pub fn binding(&self) -> &ReasoningStateBindingV1 {
+    pub fn binding(&self) -> &ReasoningStateBinding {
         &self.binding
     }
-    pub const fn order(&self) -> ReasoningStateOrderV1 {
+    pub const fn order(&self) -> ReasoningStateOrder {
         self.order
     }
-    pub const fn content_digest(&self) -> DigestV1 {
+    pub const fn content_digest(&self) -> Sha256Digest {
         self.content_digest
     }
     pub const fn byte_len(&self) -> u64 {
         self.byte_len
     }
-    pub const fn continuation_certificate_digest(&self) -> Option<DigestV1> {
+    pub const fn continuation_certificate_digest(&self) -> Option<Sha256Digest> {
         self.continuation_certificate_digest
     }
     pub const fn valid_until_unix_ms(&self) -> Option<u64> {
@@ -398,23 +398,23 @@ impl OpaqueReasoningStateRefV1 {
 }
 
 /// In-memory opaque pass-through. `Debug` is redacted and `Serialize` is absent.
-pub struct OpaqueReasoningStateEnvelopeV1 {
-    reference: OpaqueReasoningStateRefV1,
+pub struct OpaqueReasoningStateEnvelope {
+    reference: OpaqueReasoningStateRef,
     opaque_bytes: Vec<u8>,
 }
 
-impl OpaqueReasoningStateEnvelopeV1 {
+impl OpaqueReasoningStateEnvelope {
     #[allow(clippy::too_many_arguments)]
     pub fn capture(
-        kind: OpaqueReasoningStateKindV1,
-        status: ReasoningContinuationStatusV1,
-        binding: ReasoningStateBindingV1,
-        order: ReasoningStateOrderV1,
-        continuation_certificate_digest: Option<DigestV1>,
+        kind: OpaqueReasoningStateKind,
+        status: ReasoningContinuationStatus,
+        binding: ReasoningStateBinding,
+        order: ReasoningStateOrder,
+        continuation_certificate_digest: Option<Sha256Digest>,
         valid_until_unix_ms: Option<u64>,
         opaque_bytes: Vec<u8>,
     ) -> Result<Self, ReasoningStateError> {
-        if kind == OpaqueReasoningStateKindV1::Unavailable {
+        if kind == OpaqueReasoningStateKind::Unavailable {
             return Err(ReasoningStateError::UnavailableKindHasPayload);
         }
         if !status.carries_payload() {
@@ -438,7 +438,7 @@ impl OpaqueReasoningStateEnvelopeV1 {
                 limit: MAX_OPAQUE_REASONING_STATE_BYTES,
             }
         })?;
-        let reference = OpaqueReasoningStateRefV1 {
+        let reference = OpaqueReasoningStateRef {
             kind,
             status,
             binding,
@@ -454,7 +454,7 @@ impl OpaqueReasoningStateEnvelopeV1 {
         })
     }
 
-    pub fn reference(&self) -> &OpaqueReasoningStateRefV1 {
+    pub fn reference(&self) -> &OpaqueReasoningStateRef {
         &self.reference
     }
 
@@ -468,11 +468,11 @@ impl OpaqueReasoningStateEnvelopeV1 {
 
     pub fn exact_replay_bytes(
         &self,
-        expected_binding: &ReasoningStateBindingV1,
-        expected_order: ReasoningStateOrderV1,
+        expected_binding: &ReasoningStateBinding,
+        expected_order: ReasoningStateOrder,
         now_unix_ms: u64,
     ) -> Result<&[u8], ReasoningStateError> {
-        if self.reference.status != ReasoningContinuationStatusV1::Exact {
+        if self.reference.status != ReasoningContinuationStatus::Exact {
             return Err(ReasoningStateError::NotExact(self.reference.status));
         }
         validate_native_state_policy(
@@ -499,9 +499,9 @@ impl OpaqueReasoningStateEnvelopeV1 {
     }
 }
 
-impl fmt::Debug for OpaqueReasoningStateEnvelopeV1 {
+impl fmt::Debug for OpaqueReasoningStateEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OpaqueReasoningStateEnvelopeV1")
+        f.debug_struct("OpaqueReasoningStateEnvelope")
             .field("reference", &self.reference)
             .field(
                 "opaque_bytes",
@@ -517,52 +517,52 @@ impl fmt::Debug for OpaqueReasoningStateEnvelopeV1 {
 /// and empirical evidence stay non-pointwise and never authorize exact replay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "class")]
-enum ModelStateContinuationClassV1 {
+enum ModelStateContinuationClass {
     ExactNeutral {
-        state_content_digest: DigestV1,
+        state_content_digest: Sha256Digest,
     },
     ScopedCertificate {
-        state_content_digest: DigestV1,
-        certificate_digest: DigestV1,
-        declared_scope_digest: DigestV1,
+        state_content_digest: Sha256Digest,
+        certificate_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
     },
     Empirical {
-        state_content_digest: DigestV1,
-        frozen_distribution_digest: DigestV1,
-        evaluation_receipt_digest: DigestV1,
-        declared_scope_digest: DigestV1,
+        state_content_digest: Sha256Digest,
+        frozen_distribution_digest: Sha256Digest,
+        evaluation_receipt_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
         evidence_valid_until_unix_ms: Option<u64>,
     },
     Unavailable {
-        reason: ModelStateUnavailableReasonV1,
+        reason: ModelStateUnavailableReason,
     },
 }
 
 /// Public discriminant for the validated continuation class. It is descriptive
-/// only; the unforgeable receipt is `ModelStateContinuationAssessmentV1`.
+/// only; the unforgeable receipt is `ModelStateContinuationAssessment`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelStateContinuationKindV1 {
+pub enum ModelStateContinuationKind {
     ExactNeutral,
     ScopedCertificate,
     Empirical,
     Unavailable,
 }
 
-impl ModelStateContinuationClassV1 {
-    const fn kind(&self) -> ModelStateContinuationKindV1 {
+impl ModelStateContinuationClass {
+    const fn kind(&self) -> ModelStateContinuationKind {
         match self {
-            Self::ExactNeutral { .. } => ModelStateContinuationKindV1::ExactNeutral,
-            Self::ScopedCertificate { .. } => ModelStateContinuationKindV1::ScopedCertificate,
-            Self::Empirical { .. } => ModelStateContinuationKindV1::Empirical,
-            Self::Unavailable { .. } => ModelStateContinuationKindV1::Unavailable,
+            Self::ExactNeutral { .. } => ModelStateContinuationKind::ExactNeutral,
+            Self::ScopedCertificate { .. } => ModelStateContinuationKind::ScopedCertificate,
+            Self::Empirical { .. } => ModelStateContinuationKind::Empirical,
+            Self::Unavailable { .. } => ModelStateContinuationKind::Unavailable,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelStateUnavailableReasonV1 {
+pub enum ModelStateUnavailableReason {
     ProviderUnavailable,
     StateExpired,
     StateRejected,
@@ -575,25 +575,25 @@ pub enum ModelStateUnavailableReasonV1 {
 /// Evidence supplied with an assessment. Evidence can only preserve the
 /// class already declared by the validated opaque-state reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelStateContinuationEvidenceV1 {
+pub enum ModelStateContinuationEvidence {
     None,
     Scoped {
-        certificate_digest: DigestV1,
-        declared_scope_digest: DigestV1,
+        certificate_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
     },
     Empirical {
-        frozen_distribution_digest: DigestV1,
-        evaluation_receipt_digest: DigestV1,
-        declared_scope_digest: DigestV1,
+        frozen_distribution_digest: Sha256Digest,
+        evaluation_receipt_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
         valid_until_unix_ms: Option<u64>,
     },
 }
 
-impl ModelStateContinuationEvidenceV1 {
+impl ModelStateContinuationEvidence {
     pub fn scoped(
-        certificate_digest: DigestV1,
-        declared_scope_digest: DigestV1,
-    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        certificate_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
+    ) -> Result<Self, ModelStateContinuationError> {
         require_continuation_digest("certificate", certificate_digest)?;
         require_continuation_digest("declared scope", declared_scope_digest)?;
         Ok(Self::Scoped {
@@ -603,16 +603,16 @@ impl ModelStateContinuationEvidenceV1 {
     }
 
     pub fn empirical(
-        frozen_distribution_digest: DigestV1,
-        evaluation_receipt_digest: DigestV1,
-        declared_scope_digest: DigestV1,
+        frozen_distribution_digest: Sha256Digest,
+        evaluation_receipt_digest: Sha256Digest,
+        declared_scope_digest: Sha256Digest,
         valid_until_unix_ms: Option<u64>,
-    ) -> Result<Self, ModelStateContinuationErrorV1> {
+    ) -> Result<Self, ModelStateContinuationError> {
         require_continuation_digest("frozen distribution", frozen_distribution_digest)?;
         require_continuation_digest("evaluation receipt", evaluation_receipt_digest)?;
         require_continuation_digest("declared scope", declared_scope_digest)?;
         if valid_until_unix_ms == Some(0) {
-            return Err(ModelStateContinuationErrorV1::InvalidEvidenceExpiry);
+            return Err(ModelStateContinuationError::InvalidEvidenceExpiry);
         }
         Ok(Self::Empirical {
             frozen_distribution_digest,
@@ -624,33 +624,33 @@ impl ModelStateContinuationEvidenceV1 {
 }
 
 /// Serializable raw Decision View recovery metadata. The exact bytes live only
-/// in `RawDecisionViewRecoveryEnvelopeV1` and never enter this receipt.
+/// in `RawDecisionViewRecoveryEnvelope` and never enter this receipt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct RawDecisionViewRecoveryRefV1 {
+pub struct RawDecisionViewRecoveryRef {
     decision_view_identity: DecisionViewIdentity,
-    decision_view_digest: DigestV1,
-    exact_token_map_digest: DigestV1,
-    raw_bytes_digest: DigestV1,
+    decision_view_digest: Sha256Digest,
+    exact_token_map_digest: Sha256Digest,
+    raw_bytes_digest: Sha256Digest,
     raw_byte_len: u64,
     total_tokens: u64,
-    caller_raw_baseline_identity_digest: DigestV1,
-    caller_hub_safepoint_digest: DigestV1,
+    caller_raw_baseline_identity_digest: Sha256Digest,
+    caller_hub_safepoint_digest: Sha256Digest,
 }
 
-impl RawDecisionViewRecoveryRefV1 {
+impl RawDecisionViewRecoveryRef {
     pub fn decision_view_identity(&self) -> &DecisionViewIdentity {
         &self.decision_view_identity
     }
 
-    pub const fn decision_view_digest(&self) -> DigestV1 {
+    pub const fn decision_view_digest(&self) -> Sha256Digest {
         self.decision_view_digest
     }
 
-    pub const fn exact_token_map_digest(&self) -> DigestV1 {
+    pub const fn exact_token_map_digest(&self) -> Sha256Digest {
         self.exact_token_map_digest
     }
 
-    pub const fn raw_bytes_digest(&self) -> DigestV1 {
+    pub const fn raw_bytes_digest(&self) -> Sha256Digest {
         self.raw_bytes_digest
     }
 
@@ -662,11 +662,11 @@ impl RawDecisionViewRecoveryRefV1 {
         self.total_tokens
     }
 
-    pub const fn caller_raw_baseline_identity_digest(&self) -> DigestV1 {
+    pub const fn caller_raw_baseline_identity_digest(&self) -> Sha256Digest {
         self.caller_raw_baseline_identity_digest
     }
 
-    pub const fn caller_hub_safepoint_digest(&self) -> DigestV1 {
+    pub const fn caller_hub_safepoint_digest(&self) -> Sha256Digest {
         self.caller_hub_safepoint_digest
     }
 }
@@ -676,17 +676,17 @@ impl RawDecisionViewRecoveryRefV1 {
 /// This type does not verify or create hub safepoints, persist CAS objects, or
 /// trigger deoptimization. It only binds caller-supplied hub identities to the
 /// exact canonical Decision View bytes and checks them before recovery.
-pub struct RawDecisionViewRecoveryEnvelopeV1 {
-    reference: RawDecisionViewRecoveryRefV1,
+pub struct RawDecisionViewRecoveryEnvelope {
+    reference: RawDecisionViewRecoveryRef,
     raw_decision_view_bytes: Vec<u8>,
 }
 
-impl RawDecisionViewRecoveryEnvelopeV1 {
+impl RawDecisionViewRecoveryEnvelope {
     pub fn capture(
         decision_view: &DecisionView,
-        caller_raw_baseline_identity_digest: DigestV1,
-        caller_hub_safepoint_digest: DigestV1,
-    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        caller_raw_baseline_identity_digest: Sha256Digest,
+        caller_hub_safepoint_digest: Sha256Digest,
+    ) -> Result<Self, ModelStateContinuationError> {
         require_continuation_digest(
             "caller raw-baseline identity",
             caller_raw_baseline_identity_digest,
@@ -694,8 +694,8 @@ impl RawDecisionViewRecoveryEnvelopeV1 {
         require_continuation_digest("caller hub safepoint", caller_hub_safepoint_digest)?;
         let raw_decision_view_bytes = decision_view.rendered().to_vec();
         let raw_byte_len = u64::try_from(raw_decision_view_bytes.len())
-            .map_err(|_| ModelStateContinuationErrorV1::RawByteLengthOverflow)?;
-        let reference = RawDecisionViewRecoveryRefV1 {
+            .map_err(|_| ModelStateContinuationError::RawByteLengthOverflow)?;
+        let reference = RawDecisionViewRecoveryRef {
             decision_view_identity: decision_view.identity().clone(),
             decision_view_digest: decision_view.digest(),
             exact_token_map_digest: decision_view.exact_token_map_digest(),
@@ -711,7 +711,7 @@ impl RawDecisionViewRecoveryEnvelopeV1 {
         })
     }
 
-    pub fn reference(&self) -> &RawDecisionViewRecoveryRefV1 {
+    pub fn reference(&self) -> &RawDecisionViewRecoveryRef {
         &self.reference
     }
 
@@ -719,43 +719,43 @@ impl RawDecisionViewRecoveryEnvelopeV1 {
     pub fn exact_raw_decision_view_bytes(
         &self,
         expected_decision_view_identity: &DecisionViewIdentity,
-        expected_decision_view_digest: DigestV1,
-        expected_exact_token_map_digest: DigestV1,
-        expected_raw_baseline_identity_digest: DigestV1,
-        expected_hub_safepoint_digest: DigestV1,
-    ) -> Result<&[u8], ModelStateContinuationErrorV1> {
+        expected_decision_view_digest: Sha256Digest,
+        expected_exact_token_map_digest: Sha256Digest,
+        expected_raw_baseline_identity_digest: Sha256Digest,
+        expected_hub_safepoint_digest: Sha256Digest,
+    ) -> Result<&[u8], ModelStateContinuationError> {
         if &self.reference.decision_view_identity != expected_decision_view_identity {
-            return Err(ModelStateContinuationErrorV1::DecisionViewIdentityMismatch);
+            return Err(ModelStateContinuationError::DecisionViewIdentityMismatch);
         }
         if self.reference.decision_view_digest != expected_decision_view_digest {
-            return Err(ModelStateContinuationErrorV1::DecisionViewDigestMismatch);
+            return Err(ModelStateContinuationError::DecisionViewDigestMismatch);
         }
         if self.reference.exact_token_map_digest != expected_exact_token_map_digest {
-            return Err(ModelStateContinuationErrorV1::ExactTokenMapDigestMismatch);
+            return Err(ModelStateContinuationError::ExactTokenMapDigestMismatch);
         }
         if self.reference.caller_raw_baseline_identity_digest
             != expected_raw_baseline_identity_digest
         {
-            return Err(ModelStateContinuationErrorV1::RawBaselineIdentityMismatch);
+            return Err(ModelStateContinuationError::RawBaselineIdentityMismatch);
         }
         if self.reference.caller_hub_safepoint_digest != expected_hub_safepoint_digest {
-            return Err(ModelStateContinuationErrorV1::HubSafepointDigestMismatch);
+            return Err(ModelStateContinuationError::HubSafepointDigestMismatch);
         }
         let actual_len = u64::try_from(self.raw_decision_view_bytes.len())
-            .map_err(|_| ModelStateContinuationErrorV1::RawByteLengthOverflow)?;
+            .map_err(|_| ModelStateContinuationError::RawByteLengthOverflow)?;
         if actual_len != self.reference.raw_byte_len {
-            return Err(ModelStateContinuationErrorV1::RawByteLengthMismatch);
+            return Err(ModelStateContinuationError::RawByteLengthMismatch);
         }
         if digest(&self.raw_decision_view_bytes) != self.reference.raw_bytes_digest {
-            return Err(ModelStateContinuationErrorV1::RawBytesDigestMismatch);
+            return Err(ModelStateContinuationError::RawBytesDigestMismatch);
         }
         Ok(&self.raw_decision_view_bytes)
     }
 }
 
-impl fmt::Debug for RawDecisionViewRecoveryEnvelopeV1 {
+impl fmt::Debug for RawDecisionViewRecoveryEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RawDecisionViewRecoveryEnvelopeV1")
+        f.debug_struct("RawDecisionViewRecoveryEnvelope")
             .field("reference", &self.reference)
             .field(
                 "raw_decision_view_bytes",
@@ -767,88 +767,88 @@ impl fmt::Debug for RawDecisionViewRecoveryEnvelopeV1 {
 
 /// Receipt-visible continuation classification plus an exact raw fallback.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ModelStateContinuationAssessmentV1 {
-    state_reference: OpaqueReasoningStateRefV1,
-    class: ModelStateContinuationClassV1,
-    raw_recovery: RawDecisionViewRecoveryRefV1,
+pub struct ModelStateContinuationAssessment {
+    state_reference: OpaqueReasoningStateRef,
+    class: ModelStateContinuationClass,
+    raw_recovery: RawDecisionViewRecoveryRef,
 }
 
-impl ModelStateContinuationAssessmentV1 {
+impl ModelStateContinuationAssessment {
     pub fn assess(
-        state_reference: &OpaqueReasoningStateRefV1,
-        evidence: ModelStateContinuationEvidenceV1,
-        raw_recovery: &RawDecisionViewRecoveryRefV1,
+        state_reference: &OpaqueReasoningStateRef,
+        evidence: ModelStateContinuationEvidence,
+        raw_recovery: &RawDecisionViewRecoveryRef,
         now_unix_ms: u64,
-    ) -> Result<Self, ModelStateContinuationErrorV1> {
+    ) -> Result<Self, ModelStateContinuationError> {
         validate_continuation_evidence_for_state(state_reference, &evidence)?;
         let view_identity = raw_recovery.decision_view_identity();
         if state_reference.binding().tokenizer_identity()
             != view_identity.tokenizer_identity_digest()
         {
-            return Err(ModelStateContinuationErrorV1::TokenizerIdentityMismatch);
+            return Err(ModelStateContinuationError::TokenizerIdentityMismatch);
         }
         if state_reference.binding().tool_schema_digest() != view_identity.tool_schema_digest() {
-            return Err(ModelStateContinuationErrorV1::ToolSchemaIdentityMismatch);
+            return Err(ModelStateContinuationError::ToolSchemaIdentityMismatch);
         }
         let expired = state_reference
             .valid_until_unix_ms()
             .is_some_and(|expiry| now_unix_ms >= expiry);
         let class = if expired {
-            ModelStateContinuationClassV1::Unavailable {
-                reason: ModelStateUnavailableReasonV1::StateExpired,
+            ModelStateContinuationClass::Unavailable {
+                reason: ModelStateUnavailableReason::StateExpired,
             }
         } else {
             match (state_reference.status(), evidence) {
-                (ReasoningContinuationStatusV1::Exact, ModelStateContinuationEvidenceV1::None) => {
-                    ModelStateContinuationClassV1::ExactNeutral {
+                (ReasoningContinuationStatus::Exact, ModelStateContinuationEvidence::None) => {
+                    ModelStateContinuationClass::ExactNeutral {
                         state_content_digest: state_reference.content_digest(),
                     }
                 }
                 (
-                    ReasoningContinuationStatusV1::ScopedCertificate,
-                    ModelStateContinuationEvidenceV1::Scoped {
+                    ReasoningContinuationStatus::ScopedCertificate,
+                    ModelStateContinuationEvidence::Scoped {
                         certificate_digest,
                         declared_scope_digest,
                     },
                 ) => {
                     if state_reference.continuation_certificate_digest() != Some(certificate_digest)
                     {
-                        return Err(ModelStateContinuationErrorV1::ScopedCertificateMismatch);
+                        return Err(ModelStateContinuationError::ScopedCertificateMismatch);
                     }
-                    ModelStateContinuationClassV1::ScopedCertificate {
+                    ModelStateContinuationClass::ScopedCertificate {
                         state_content_digest: state_reference.content_digest(),
                         certificate_digest,
                         declared_scope_digest,
                     }
                 }
                 (
-                    ReasoningContinuationStatusV1::ScopedCertificate,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::ScopedEvidenceAbsent,
+                    ReasoningContinuationStatus::ScopedCertificate,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::ScopedEvidenceAbsent,
                 },
                 (
-                    ReasoningContinuationStatusV1::Approximate,
-                    ModelStateContinuationEvidenceV1::Empirical {
+                    ReasoningContinuationStatus::Approximate,
+                    ModelStateContinuationEvidence::Empirical {
                         frozen_distribution_digest: _,
                         evaluation_receipt_digest: _,
                         declared_scope_digest: _,
                         valid_until_unix_ms,
                     },
                 ) if valid_until_unix_ms.is_some_and(|expiry| now_unix_ms >= expiry) => {
-                    ModelStateContinuationClassV1::Unavailable {
-                        reason: ModelStateUnavailableReasonV1::EmpiricalEvidenceExpired,
+                    ModelStateContinuationClass::Unavailable {
+                        reason: ModelStateUnavailableReason::EmpiricalEvidenceExpired,
                     }
                 }
                 (
-                    ReasoningContinuationStatusV1::Approximate,
-                    ModelStateContinuationEvidenceV1::Empirical {
+                    ReasoningContinuationStatus::Approximate,
+                    ModelStateContinuationEvidence::Empirical {
                         frozen_distribution_digest,
                         evaluation_receipt_digest,
                         declared_scope_digest,
                         valid_until_unix_ms,
                     },
-                ) => ModelStateContinuationClassV1::Empirical {
+                ) => ModelStateContinuationClass::Empirical {
                     state_content_digest: state_reference.content_digest(),
                     frozen_distribution_digest,
                     evaluation_receipt_digest,
@@ -856,36 +856,36 @@ impl ModelStateContinuationAssessmentV1 {
                     evidence_valid_until_unix_ms: valid_until_unix_ms,
                 },
                 (
-                    ReasoningContinuationStatusV1::Approximate,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::EmpiricalEvidenceAbsent,
+                    ReasoningContinuationStatus::Approximate,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::EmpiricalEvidenceAbsent,
                 },
                 (
-                    ReasoningContinuationStatusV1::Unavailable,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::ProviderUnavailable,
+                    ReasoningContinuationStatus::Unavailable,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::ProviderUnavailable,
                 },
                 (
-                    ReasoningContinuationStatusV1::Expired,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::StateExpired,
+                    ReasoningContinuationStatus::Expired,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::StateExpired,
                 },
                 (
-                    ReasoningContinuationStatusV1::Rejected,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::StateRejected,
+                    ReasoningContinuationStatus::Rejected,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::StateRejected,
                 },
                 (
-                    ReasoningContinuationStatusV1::IdentityMismatch,
-                    ModelStateContinuationEvidenceV1::None,
-                ) => ModelStateContinuationClassV1::Unavailable {
-                    reason: ModelStateUnavailableReasonV1::IdentityMismatch,
+                    ReasoningContinuationStatus::IdentityMismatch,
+                    ModelStateContinuationEvidence::None,
+                ) => ModelStateContinuationClass::Unavailable {
+                    reason: ModelStateUnavailableReason::IdentityMismatch,
                 },
-                _ => return Err(ModelStateContinuationErrorV1::EvidenceStatusMismatch),
+                _ => return Err(ModelStateContinuationError::EvidenceStatusMismatch),
             }
         };
         Ok(Self {
@@ -895,24 +895,24 @@ impl ModelStateContinuationAssessmentV1 {
         })
     }
 
-    pub fn state_reference(&self) -> &OpaqueReasoningStateRefV1 {
+    pub fn state_reference(&self) -> &OpaqueReasoningStateRef {
         &self.state_reference
     }
 
-    pub const fn class(&self) -> ModelStateContinuationKindV1 {
+    pub const fn class(&self) -> ModelStateContinuationKind {
         self.class.kind()
     }
 
-    pub const fn unavailable_reason(&self) -> Option<ModelStateUnavailableReasonV1> {
+    pub const fn unavailable_reason(&self) -> Option<ModelStateUnavailableReason> {
         match self.class {
-            ModelStateContinuationClassV1::Unavailable { reason } => Some(reason),
+            ModelStateContinuationClass::Unavailable { reason } => Some(reason),
             _ => None,
         }
     }
 
-    pub const fn scoped_evidence(&self) -> Option<(DigestV1, DigestV1)> {
+    pub const fn scoped_evidence(&self) -> Option<(Sha256Digest, Sha256Digest)> {
         match self.class {
-            ModelStateContinuationClassV1::ScopedCertificate {
+            ModelStateContinuationClass::ScopedCertificate {
                 certificate_digest,
                 declared_scope_digest,
                 ..
@@ -921,9 +921,9 @@ impl ModelStateContinuationAssessmentV1 {
         }
     }
 
-    pub const fn empirical_evidence(&self) -> Option<(DigestV1, DigestV1, DigestV1, Option<u64>)> {
+    pub const fn empirical_evidence(&self) -> Option<(Sha256Digest, Sha256Digest, Sha256Digest, Option<u64>)> {
         match self.class {
-            ModelStateContinuationClassV1::Empirical {
+            ModelStateContinuationClass::Empirical {
                 frozen_distribution_digest,
                 evaluation_receipt_digest,
                 declared_scope_digest,
@@ -939,13 +939,13 @@ impl ModelStateContinuationAssessmentV1 {
         }
     }
 
-    pub fn raw_recovery(&self) -> &RawDecisionViewRecoveryRefV1 {
+    pub fn raw_recovery(&self) -> &RawDecisionViewRecoveryRef {
         &self.raw_recovery
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelStateContinuationErrorV1 {
+pub enum ModelStateContinuationError {
     ZeroIdentity(&'static str),
     InvalidEvidenceExpiry,
     EvidenceStatusMismatch,
@@ -962,7 +962,7 @@ pub enum ModelStateContinuationErrorV1 {
     RawBytesDigestMismatch,
 }
 
-impl fmt::Display for ModelStateContinuationErrorV1 {
+impl fmt::Display for ModelStateContinuationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroIdentity(field) => {
@@ -1011,22 +1011,22 @@ impl fmt::Display for ModelStateContinuationErrorV1 {
     }
 }
 
-impl Error for ModelStateContinuationErrorV1 {}
+impl Error for ModelStateContinuationError {}
 
 fn validate_continuation_evidence_for_state(
-    state_reference: &OpaqueReasoningStateRefV1,
-    evidence: &ModelStateContinuationEvidenceV1,
-) -> Result<(), ModelStateContinuationErrorV1> {
+    state_reference: &OpaqueReasoningStateRef,
+    evidence: &ModelStateContinuationEvidence,
+) -> Result<(), ModelStateContinuationError> {
     match evidence {
-        ModelStateContinuationEvidenceV1::None => {}
-        ModelStateContinuationEvidenceV1::Scoped {
+        ModelStateContinuationEvidence::None => {}
+        ModelStateContinuationEvidence::Scoped {
             certificate_digest,
             declared_scope_digest,
         } => {
             require_continuation_digest("certificate", *certificate_digest)?;
             require_continuation_digest("declared scope", *declared_scope_digest)?;
         }
-        ModelStateContinuationEvidenceV1::Empirical {
+        ModelStateContinuationEvidence::Empirical {
             frozen_distribution_digest,
             evaluation_receipt_digest,
             declared_scope_digest,
@@ -1036,50 +1036,50 @@ fn validate_continuation_evidence_for_state(
             require_continuation_digest("evaluation receipt", *evaluation_receipt_digest)?;
             require_continuation_digest("declared scope", *declared_scope_digest)?;
             if *valid_until_unix_ms == Some(0) {
-                return Err(ModelStateContinuationErrorV1::InvalidEvidenceExpiry);
+                return Err(ModelStateContinuationError::InvalidEvidenceExpiry);
             }
         }
     }
     match (state_reference.status(), evidence) {
-        (ReasoningContinuationStatusV1::Exact, ModelStateContinuationEvidenceV1::None)
+        (ReasoningContinuationStatus::Exact, ModelStateContinuationEvidence::None)
         | (
-            ReasoningContinuationStatusV1::ScopedCertificate,
-            ModelStateContinuationEvidenceV1::None,
+            ReasoningContinuationStatus::ScopedCertificate,
+            ModelStateContinuationEvidence::None,
         )
-        | (ReasoningContinuationStatusV1::Approximate, ModelStateContinuationEvidenceV1::None)
+        | (ReasoningContinuationStatus::Approximate, ModelStateContinuationEvidence::None)
         | (
-            ReasoningContinuationStatusV1::Approximate,
-            ModelStateContinuationEvidenceV1::Empirical { .. },
+            ReasoningContinuationStatus::Approximate,
+            ModelStateContinuationEvidence::Empirical { .. },
         )
         | (
-            ReasoningContinuationStatusV1::Unavailable
-            | ReasoningContinuationStatusV1::Expired
-            | ReasoningContinuationStatusV1::Rejected
-            | ReasoningContinuationStatusV1::IdentityMismatch,
-            ModelStateContinuationEvidenceV1::None,
+            ReasoningContinuationStatus::Unavailable
+            | ReasoningContinuationStatus::Expired
+            | ReasoningContinuationStatus::Rejected
+            | ReasoningContinuationStatus::IdentityMismatch,
+            ModelStateContinuationEvidence::None,
         ) => Ok(()),
         (
-            ReasoningContinuationStatusV1::ScopedCertificate,
-            ModelStateContinuationEvidenceV1::Scoped {
+            ReasoningContinuationStatus::ScopedCertificate,
+            ModelStateContinuationEvidence::Scoped {
                 certificate_digest, ..
             },
         ) if state_reference.continuation_certificate_digest() == Some(*certificate_digest) => {
             Ok(())
         }
         (
-            ReasoningContinuationStatusV1::ScopedCertificate,
-            ModelStateContinuationEvidenceV1::Scoped { .. },
-        ) => Err(ModelStateContinuationErrorV1::ScopedCertificateMismatch),
-        _ => Err(ModelStateContinuationErrorV1::EvidenceStatusMismatch),
+            ReasoningContinuationStatus::ScopedCertificate,
+            ModelStateContinuationEvidence::Scoped { .. },
+        ) => Err(ModelStateContinuationError::ScopedCertificateMismatch),
+        _ => Err(ModelStateContinuationError::EvidenceStatusMismatch),
     }
 }
 
 fn require_continuation_digest(
     field: &'static str,
-    digest: DigestV1,
-) -> Result<(), ModelStateContinuationErrorV1> {
-    if digest == DigestV1::ZERO {
-        Err(ModelStateContinuationErrorV1::ZeroIdentity(field))
+    digest: Sha256Digest,
+) -> Result<(), ModelStateContinuationError> {
+    if digest == Sha256Digest::ZERO {
+        Err(ModelStateContinuationError::ZeroIdentity(field))
     } else {
         Ok(())
     }
@@ -1087,10 +1087,10 @@ fn require_continuation_digest(
 
 /// Receipt-visible proof that input rendering preserved all protected reserves.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct DecisionViewHeadroomPlanV1 {
-    reasoning_contract_digest: DigestV1,
-    decision_view_digest: DigestV1,
-    exact_token_map_digest: DigestV1,
+pub struct DecisionViewHeadroomPlan {
+    reasoning_contract_digest: Sha256Digest,
+    decision_view_digest: Sha256Digest,
+    exact_token_map_digest: Sha256Digest,
     context_capacity: u32,
     logical_input_tokens: u32,
     max_output_tokens: u32,
@@ -1102,9 +1102,9 @@ pub struct DecisionViewHeadroomPlanV1 {
     remaining_input_headroom: u32,
 }
 
-impl DecisionViewHeadroomPlanV1 {
+impl DecisionViewHeadroomPlan {
     pub fn plan(
-        contract: &ReasoningContractV1,
+        contract: &ReasoningContract,
         context_capacity: u32,
         reserved_tool_tokens: u32,
         view: &DecisionView,
@@ -1138,13 +1138,13 @@ impl DecisionViewHeadroomPlanV1 {
         })
     }
 
-    pub const fn reasoning_contract_digest(&self) -> DigestV1 {
+    pub const fn reasoning_contract_digest(&self) -> Sha256Digest {
         self.reasoning_contract_digest
     }
-    pub const fn decision_view_digest(&self) -> DigestV1 {
+    pub const fn decision_view_digest(&self) -> Sha256Digest {
         self.decision_view_digest
     }
-    pub const fn exact_token_map_digest(&self) -> DigestV1 {
+    pub const fn exact_token_map_digest(&self) -> Sha256Digest {
         self.exact_token_map_digest
     }
     pub const fn context_capacity(&self) -> u32 {
@@ -1177,19 +1177,19 @@ impl DecisionViewHeadroomPlanV1 {
 }
 
 fn terminal_ref(
-    kind: OpaqueReasoningStateKindV1,
-    status: ReasoningContinuationStatusV1,
-    binding: ReasoningStateBindingV1,
-    order: ReasoningStateOrderV1,
-    content_digest: DigestV1,
+    kind: OpaqueReasoningStateKind,
+    status: ReasoningContinuationStatus,
+    binding: ReasoningStateBinding,
+    order: ReasoningStateOrder,
+    content_digest: Sha256Digest,
     valid_until_unix_ms: Option<u64>,
-) -> Result<OpaqueReasoningStateRefV1, ReasoningStateError> {
-    if kind == OpaqueReasoningStateKindV1::Unavailable {
+) -> Result<OpaqueReasoningStateRef, ReasoningStateError> {
+    if kind == OpaqueReasoningStateKind::Unavailable {
         return Err(ReasoningStateError::UnavailableKindHasPayload);
     }
     nonzero("content", content_digest)?;
     validate_expiry(valid_until_unix_ms)?;
-    Ok(OpaqueReasoningStateRefV1 {
+    Ok(OpaqueReasoningStateRef {
         kind,
         status,
         binding,
@@ -1202,20 +1202,20 @@ fn terminal_ref(
 }
 
 fn validate_native_state_policy(
-    policy: NativeStatePolicyV1,
-    status: ReasoningContinuationStatusV1,
+    policy: NativeStatePolicy,
+    status: ReasoningContinuationStatus,
 ) -> Result<(), ReasoningStateError> {
     let authorized = matches!(
         (policy, status),
         (
-            NativeStatePolicyV1::ExactRequired | NativeStatePolicyV1::ExactIfAvailable,
-            ReasoningContinuationStatusV1::Exact
+            NativeStatePolicy::ExactRequired | NativeStatePolicy::ExactIfAvailable,
+            ReasoningContinuationStatus::Exact
         ) | (
-            NativeStatePolicyV1::ExactIfAvailable,
-            ReasoningContinuationStatusV1::Approximate
+            NativeStatePolicy::ExactIfAvailable,
+            ReasoningContinuationStatus::Approximate
         ) | (
-            NativeStatePolicyV1::ScopedCertificate,
-            ReasoningContinuationStatusV1::ScopedCertificate
+            NativeStatePolicy::ScopedCertificate,
+            ReasoningContinuationStatus::ScopedCertificate
         )
     );
     if authorized {
@@ -1226,14 +1226,14 @@ fn validate_native_state_policy(
 }
 
 fn validate_certificate(
-    status: ReasoningContinuationStatusV1,
-    certificate: Option<DigestV1>,
+    status: ReasoningContinuationStatus,
+    certificate: Option<Sha256Digest>,
 ) -> Result<(), ReasoningStateError> {
     match (status, certificate) {
-        (ReasoningContinuationStatusV1::ScopedCertificate, None) => {
+        (ReasoningContinuationStatus::ScopedCertificate, None) => {
             Err(ReasoningStateError::ScopedCertificateRequired)
         }
-        (ReasoningContinuationStatusV1::ScopedCertificate, Some(digest)) => {
+        (ReasoningContinuationStatus::ScopedCertificate, Some(digest)) => {
             nonzero("continuation certificate", digest)
         }
         (_, Some(_)) => Err(ReasoningStateError::UnexpectedScopedCertificate),
@@ -1249,16 +1249,16 @@ fn validate_expiry(expiry: Option<u64>) -> Result<(), ReasoningStateError> {
     }
 }
 
-fn nonzero(field: &'static str, digest: DigestV1) -> Result<(), ReasoningStateError> {
-    if digest == DigestV1::ZERO {
+fn nonzero(field: &'static str, digest: Sha256Digest) -> Result<(), ReasoningStateError> {
+    if digest == Sha256Digest::ZERO {
         Err(ReasoningStateError::ZeroIdentity(field))
     } else {
         Ok(())
     }
 }
 
-fn digest(bytes: &[u8]) -> DigestV1 {
-    DigestV1::from_bytes(sha256(bytes))
+fn digest(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from_bytes(sha256(bytes))
 }
 
 #[cfg(test)]

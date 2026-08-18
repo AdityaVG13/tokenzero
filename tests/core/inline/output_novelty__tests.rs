@@ -22,8 +22,8 @@ impl ExactTokenizerAdapter for ByteAdapter {
     }
 }
 
-fn d(byte: u8) -> DigestV1 {
-    DigestV1::from_bytes([byte; 32])
+fn d(byte: u8) -> Sha256Digest {
+    Sha256Digest::from_bytes([byte; 32])
 }
 
 fn adapter() -> ByteAdapter {
@@ -41,29 +41,29 @@ fn adapter() -> ByteAdapter {
     }
 }
 
-fn fields() -> Vec<OutputNoveltyFieldV1> {
+fn fields() -> Vec<OutputNoveltyField> {
     vec![
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "operation",
-            OutputNoveltyFieldRoleV1::Deterministic,
+            OutputNoveltyFieldRole::Deterministic,
             b"replace_exact_file".to_vec(),
         )
         .unwrap(),
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "target_ref",
-            OutputNoveltyFieldRoleV1::Referenced,
+            OutputNoveltyFieldRole::Referenced,
             b"tz://blob/0123456789abcdef".to_vec(),
         )
         .unwrap(),
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "existing_prefix",
-            OutputNoveltyFieldRoleV1::Reused,
+            OutputNoveltyFieldRole::Reused,
             b"existing".to_vec(),
         )
         .unwrap(),
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "novel_body",
-            OutputNoveltyFieldRoleV1::Novel,
+            OutputNoveltyFieldRole::Novel,
             b"new body".to_vec(),
         )
         .unwrap(),
@@ -73,8 +73,8 @@ fn fields() -> Vec<OutputNoveltyFieldV1> {
 #[test]
 fn coding_preserves_caller_order_and_accounts_exact_field_payloads() {
     let adapter = adapter();
-    let first = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
-    let second = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
+    let first = OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
+    let second = OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
 
     assert_eq!(first.encoded(), second.encoded());
     assert_eq!(first.receipt(), second.receipt());
@@ -101,7 +101,7 @@ fn coding_preserves_caller_order_and_accounts_exact_field_payloads() {
     assert_eq!(totals.deterministic_payload_bytes(), 18);
     assert_eq!(
         first.receipt().selection_origin(),
-        OutputSelectionOriginV1::CallerSupplied
+        OutputSelectionOrigin::CallerSupplied
     );
     assert!(
         !serde_json::to_string(first.receipt())
@@ -114,18 +114,18 @@ fn coding_preserves_caller_order_and_accounts_exact_field_payloads() {
 #[test]
 fn output_novelty_receipt_schema_is_not_entity_novelty() {
     let adapter = adapter();
-    let coding = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
+    let coding = OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), fields()).unwrap();
     let receipt_json = serde_json::to_value(coding.receipt()).unwrap();
     let receipt_obj = receipt_json
         .as_object()
-        .expect("OutputNoveltyReceiptV1 JSON is an object");
+        .expect("OutputNoveltyReceipt JSON is an object");
     assert_eq!(
         receipt_obj["schema_version"].as_str().unwrap(),
-        OUTPUT_NOVELTY_SCHEMA_V1
+        OUTPUT_NOVELTY_SCHEMA
     );
     assert_ne!(
         receipt_obj["schema_version"].as_str().unwrap(),
-        "zerostack.entity-novelty.v1"
+        "zerostack.entity-novelty"
     );
     for entity_only in [
         "record_type",
@@ -137,7 +137,7 @@ fn output_novelty_receipt_schema_is_not_entity_novelty() {
     ] {
         assert!(
             !receipt_obj.contains_key(entity_only),
-            "OutputNoveltyReceiptV1 JSON must not carry entity-novelty field {entity_only}"
+            "OutputNoveltyReceipt JSON must not carry entity-novelty field {entity_only}"
         );
     }
     let dumped = serde_json::to_string(&receipt_json).unwrap();
@@ -155,23 +155,23 @@ fn output_novelty_receipt_schema_is_not_entity_novelty() {
 fn role_is_caller_authority_not_inferred_from_equal_bytes() {
     let adapter = adapter();
     let reused = vec![
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "body",
-            OutputNoveltyFieldRoleV1::Reused,
+            OutputNoveltyFieldRole::Reused,
             b"same bytes".to_vec(),
         )
         .unwrap(),
     ];
     let novel = vec![
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "body",
-            OutputNoveltyFieldRoleV1::Novel,
+            OutputNoveltyFieldRole::Novel,
             b"same bytes".to_vec(),
         )
         .unwrap(),
     ];
-    let reused = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), reused).unwrap();
-    let novel = OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), novel).unwrap();
+    let reused = OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), reused).unwrap();
+    let novel = OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), novel).unwrap();
 
     assert_ne!(
         reused.receipt().encoding_digest(),
@@ -185,15 +185,15 @@ fn role_is_caller_authority_not_inferred_from_equal_bytes() {
 fn oversized_payload_is_rejected_before_tokenization() {
     let adapter = adapter();
     let oversized = vec![
-        OutputNoveltyFieldV1::new(
+        OutputNoveltyField::new(
             "oversized",
-            OutputNoveltyFieldRoleV1::Reused,
+            OutputNoveltyFieldRole::Reused,
             vec![b'x'; MAX_OUTPUT_NOVELTY_BYTES],
         )
         .unwrap(),
     ];
     assert!(matches!(
-        OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), oversized),
+        OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), oversized),
         Err(OutputNoveltyError::EncodedByteLimit { .. })
     ));
 }
@@ -202,20 +202,20 @@ fn oversized_payload_is_rejected_before_tokenization() {
 fn malformed_or_vacuous_codings_fail_loudly() {
     let adapter = adapter();
     assert!(matches!(
-        OutputNoveltyCodingV1::encode(&adapter, DigestV1::ZERO, d(2), d(3), fields()),
+        OutputNoveltyCoding::encode(&adapter, Sha256Digest::ZERO, d(2), d(3), fields()),
         Err(OutputNoveltyError::ZeroIdentity("classification authority"))
     ));
     assert!(matches!(
-        OutputNoveltyFieldV1::new("body", OutputNoveltyFieldRoleV1::Novel, Vec::new()),
+        OutputNoveltyField::new("body", OutputNoveltyFieldRole::Novel, Vec::new()),
         Err(OutputNoveltyError::EmptyNovelField(_))
     ));
     let duplicate = vec![
-        OutputNoveltyFieldV1::new("body", OutputNoveltyFieldRoleV1::Referenced, b"a".to_vec())
+        OutputNoveltyField::new("body", OutputNoveltyFieldRole::Referenced, b"a".to_vec())
             .unwrap(),
-        OutputNoveltyFieldV1::new("body", OutputNoveltyFieldRoleV1::Novel, b"b".to_vec()).unwrap(),
+        OutputNoveltyField::new("body", OutputNoveltyFieldRole::Novel, b"b".to_vec()).unwrap(),
     ];
     assert!(matches!(
-        OutputNoveltyCodingV1::encode(&adapter, d(1), d(2), d(3), duplicate),
+        OutputNoveltyCoding::encode(&adapter, d(1), d(2), d(3), duplicate),
         Err(OutputNoveltyError::DuplicateFieldName(name)) if name == "body"
     ));
 }

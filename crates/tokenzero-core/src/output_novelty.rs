@@ -9,17 +9,17 @@ use crate::model_artifacts::{ExactTokenMap, ExactTokenizerAdapter, ModelArtifact
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::{error::Error, fmt};
-use zero_abi::{DigestV1, sha256};
+use zero_abi::{Sha256Digest, sha256};
 
-pub const OUTPUT_NOVELTY_SCHEMA_V1: &str = "tokenzero.output-novelty/v1";
+pub const OUTPUT_NOVELTY_SCHEMA: &str = "tokenzero.output-novelty/v1";
 pub const MAX_OUTPUT_NOVELTY_FIELDS: usize = 256;
 pub const MAX_OUTPUT_NOVELTY_FIELD_NAME_BYTES: usize = 128;
 pub const MAX_OUTPUT_NOVELTY_BYTES: usize = 16 * 1_048_576;
-const ENCODING_DOMAIN_V1: &[u8] = b"TOKENZERO-OUTPUT-NOVELTY-V1\0";
+const ENCODING_DOMAIN: &[u8] = b"TOKENZERO-OUTPUT-NOVELTY-V1\0";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutputNoveltyFieldRoleV1 {
+pub enum OutputNoveltyFieldRole {
     /// Existing address or selector supplied by the caller.
     Referenced,
     /// Exact output bytes already available under the caller's authority.
@@ -30,7 +30,7 @@ pub enum OutputNoveltyFieldRoleV1 {
     Deterministic,
 }
 
-impl OutputNoveltyFieldRoleV1 {
+impl OutputNoveltyFieldRole {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Referenced => "referenced",
@@ -43,7 +43,7 @@ impl OutputNoveltyFieldRoleV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutputSelectionOriginV1 {
+pub enum OutputSelectionOrigin {
     CallerSupplied,
 }
 
@@ -85,22 +85,22 @@ impl From<ModelArtifactError> for OutputNoveltyError {
 
 /// One caller-selected field. Raw bytes remain outside the serializable receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutputNoveltyFieldV1 {
+pub struct OutputNoveltyField {
     name: String,
-    role: OutputNoveltyFieldRoleV1,
+    role: OutputNoveltyFieldRole,
     bytes: Vec<u8>,
 }
 
-impl OutputNoveltyFieldV1 {
+impl OutputNoveltyField {
     pub fn new(
         name: impl Into<String>,
-        role: OutputNoveltyFieldRoleV1,
+        role: OutputNoveltyFieldRole,
         bytes: impl Into<Vec<u8>>,
     ) -> Result<Self, OutputNoveltyError> {
         let name = name.into();
         validate_field_name(&name)?;
         let bytes = bytes.into();
-        if role == OutputNoveltyFieldRoleV1::Novel && bytes.is_empty() {
+        if role == OutputNoveltyFieldRole::Novel && bytes.is_empty() {
             return Err(OutputNoveltyError::EmptyNovelField(name));
         }
         Ok(Self { name, role, bytes })
@@ -109,7 +109,7 @@ impl OutputNoveltyFieldV1 {
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub const fn role(&self) -> OutputNoveltyFieldRoleV1 {
+    pub const fn role(&self) -> OutputNoveltyFieldRole {
         self.role
     }
     pub fn bytes(&self) -> &[u8] {
@@ -118,22 +118,22 @@ impl OutputNoveltyFieldV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct OutputNoveltyFieldReceiptV1 {
+pub struct OutputNoveltyFieldReceipt {
     name: String,
-    role: OutputNoveltyFieldRoleV1,
-    payload_digest: DigestV1,
+    role: OutputNoveltyFieldRole,
+    payload_digest: Sha256Digest,
     payload_bytes: u64,
     standalone_payload_tokens: u64,
 }
 
-impl OutputNoveltyFieldReceiptV1 {
+impl OutputNoveltyFieldReceipt {
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub const fn role(&self) -> OutputNoveltyFieldRoleV1 {
+    pub const fn role(&self) -> OutputNoveltyFieldRole {
         self.role
     }
-    pub const fn payload_digest(&self) -> DigestV1 {
+    pub const fn payload_digest(&self) -> Sha256Digest {
         self.payload_digest
     }
     pub const fn payload_bytes(&self) -> u64 {
@@ -147,7 +147,7 @@ impl OutputNoveltyFieldReceiptV1 {
 /// Role totals count exact field payloads only. They intentionally exclude
 /// canonical framing, and token totals are not claimed additive across fields.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct OutputNoveltyTotalsV1 {
+pub struct OutputNoveltyTotals {
     referenced_fields: u32,
     referenced_payload_bytes: u64,
     referenced_standalone_payload_tokens: u64,
@@ -162,7 +162,7 @@ pub struct OutputNoveltyTotalsV1 {
     deterministic_standalone_payload_tokens: u64,
 }
 
-impl OutputNoveltyTotalsV1 {
+impl OutputNoveltyTotals {
     pub const fn novel_fields(&self) -> u32 {
         self.novel_fields
     }
@@ -184,27 +184,27 @@ impl OutputNoveltyTotalsV1 {
 
     fn add(
         &mut self,
-        role: OutputNoveltyFieldRoleV1,
+        role: OutputNoveltyFieldRole,
         bytes: u64,
         tokens: u64,
     ) -> Result<(), OutputNoveltyError> {
         let (fields, payload_bytes, payload_tokens) = match role {
-            OutputNoveltyFieldRoleV1::Referenced => (
+            OutputNoveltyFieldRole::Referenced => (
                 &mut self.referenced_fields,
                 &mut self.referenced_payload_bytes,
                 &mut self.referenced_standalone_payload_tokens,
             ),
-            OutputNoveltyFieldRoleV1::Reused => (
+            OutputNoveltyFieldRole::Reused => (
                 &mut self.reused_fields,
                 &mut self.reused_payload_bytes,
                 &mut self.reused_standalone_payload_tokens,
             ),
-            OutputNoveltyFieldRoleV1::Novel => (
+            OutputNoveltyFieldRole::Novel => (
                 &mut self.novel_fields,
                 &mut self.novel_payload_bytes,
                 &mut self.novel_standalone_payload_tokens,
             ),
-            OutputNoveltyFieldRoleV1::Deterministic => (
+            OutputNoveltyFieldRole::Deterministic => (
                 &mut self.deterministic_fields,
                 &mut self.deterministic_payload_bytes,
                 &mut self.deterministic_standalone_payload_tokens,
@@ -224,37 +224,37 @@ impl OutputNoveltyTotalsV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct OutputNoveltyReceiptV1 {
+pub struct OutputNoveltyReceipt {
     schema_version: String,
-    selection_origin: OutputSelectionOriginV1,
-    classification_authority_digest: DigestV1,
-    selected_effect_digest: DigestV1,
-    verification_receipt_digest: DigestV1,
-    tokenizer_identity_digest: DigestV1,
-    encoding_digest: DigestV1,
+    selection_origin: OutputSelectionOrigin,
+    classification_authority_digest: Sha256Digest,
+    selected_effect_digest: Sha256Digest,
+    verification_receipt_digest: Sha256Digest,
+    tokenizer_identity_digest: Sha256Digest,
+    encoding_digest: Sha256Digest,
     total_encoded_bytes: u64,
     total_encoded_tokens: u64,
-    fields: Vec<OutputNoveltyFieldReceiptV1>,
-    totals: OutputNoveltyTotalsV1,
+    fields: Vec<OutputNoveltyFieldReceipt>,
+    totals: OutputNoveltyTotals,
 }
 
-impl OutputNoveltyReceiptV1 {
-    pub const fn selection_origin(&self) -> OutputSelectionOriginV1 {
+impl OutputNoveltyReceipt {
+    pub const fn selection_origin(&self) -> OutputSelectionOrigin {
         self.selection_origin
     }
-    pub const fn classification_authority_digest(&self) -> DigestV1 {
+    pub const fn classification_authority_digest(&self) -> Sha256Digest {
         self.classification_authority_digest
     }
-    pub const fn selected_effect_digest(&self) -> DigestV1 {
+    pub const fn selected_effect_digest(&self) -> Sha256Digest {
         self.selected_effect_digest
     }
-    pub const fn verification_receipt_digest(&self) -> DigestV1 {
+    pub const fn verification_receipt_digest(&self) -> Sha256Digest {
         self.verification_receipt_digest
     }
-    pub const fn tokenizer_identity_digest(&self) -> DigestV1 {
+    pub const fn tokenizer_identity_digest(&self) -> Sha256Digest {
         self.tokenizer_identity_digest
     }
-    pub const fn encoding_digest(&self) -> DigestV1 {
+    pub const fn encoding_digest(&self) -> Sha256Digest {
         self.encoding_digest
     }
     pub const fn total_encoded_bytes(&self) -> u64 {
@@ -263,35 +263,35 @@ impl OutputNoveltyReceiptV1 {
     pub const fn total_encoded_tokens(&self) -> u64 {
         self.total_encoded_tokens
     }
-    pub fn fields(&self) -> &[OutputNoveltyFieldReceiptV1] {
+    pub fn fields(&self) -> &[OutputNoveltyFieldReceipt] {
         &self.fields
     }
-    pub const fn totals(&self) -> OutputNoveltyTotalsV1 {
+    pub const fn totals(&self) -> OutputNoveltyTotals {
         self.totals
     }
 }
 
 /// Canonical coding plus a payload-free receipt. Field ordering is caller order.
-pub struct OutputNoveltyCodingV1 {
-    fields: Vec<OutputNoveltyFieldV1>,
+pub struct OutputNoveltyCoding {
+    fields: Vec<OutputNoveltyField>,
     encoded: Vec<u8>,
-    receipt: OutputNoveltyReceiptV1,
+    receipt: OutputNoveltyReceipt,
 }
 
-impl OutputNoveltyCodingV1 {
+impl OutputNoveltyCoding {
     pub fn encode<T: ExactTokenizerAdapter + ?Sized>(
         tokenizer: &T,
-        classification_authority_digest: DigestV1,
-        selected_effect_digest: DigestV1,
-        verification_receipt_digest: DigestV1,
-        fields: Vec<OutputNoveltyFieldV1>,
+        classification_authority_digest: Sha256Digest,
+        selected_effect_digest: Sha256Digest,
+        verification_receipt_digest: Sha256Digest,
+        fields: Vec<OutputNoveltyField>,
     ) -> Result<Self, OutputNoveltyError> {
         for (name, digest) in [
             ("classification authority", classification_authority_digest),
             ("selected effect", selected_effect_digest),
             ("verification receipt", verification_receipt_digest),
         ] {
-            if digest == DigestV1::ZERO {
+            if digest == Sha256Digest::ZERO {
                 return Err(OutputNoveltyError::ZeroIdentity(name));
             }
         }
@@ -310,7 +310,7 @@ impl OutputNoveltyCodingV1 {
             if !names.insert(field.name.clone()) {
                 return Err(OutputNoveltyError::DuplicateFieldName(field.name.clone()));
             }
-            if field.role == OutputNoveltyFieldRoleV1::Novel && field.bytes.is_empty() {
+            if field.role == OutputNoveltyFieldRole::Novel && field.bytes.is_empty() {
                 return Err(OutputNoveltyError::EmptyNovelField(field.name.clone()));
             }
         }
@@ -330,7 +330,7 @@ impl OutputNoveltyCodingV1 {
         )?;
         debug_assert_eq!(encoded.len(), expected_encoded_bytes);
         let encoded_map = ExactTokenMap::tokenize(tokenizer, &encoded)?;
-        let mut totals = OutputNoveltyTotalsV1::default();
+        let mut totals = OutputNoveltyTotals::default();
         let mut field_receipts = Vec::with_capacity(fields.len());
         for field in &fields {
             let field_map = ExactTokenMap::tokenize(tokenizer, &field.bytes)?;
@@ -339,7 +339,7 @@ impl OutputNoveltyCodingV1 {
             let standalone_payload_tokens = u64::try_from(field_map.token_count())
                 .map_err(|_| OutputNoveltyError::LengthOverflow)?;
             totals.add(field.role, payload_bytes, standalone_payload_tokens)?;
-            field_receipts.push(OutputNoveltyFieldReceiptV1 {
+            field_receipts.push(OutputNoveltyFieldReceipt {
                 name: field.name.clone(),
                 role: field.role,
                 payload_digest: digest(&field.bytes),
@@ -347,9 +347,9 @@ impl OutputNoveltyCodingV1 {
                 standalone_payload_tokens,
             });
         }
-        let receipt = OutputNoveltyReceiptV1 {
-            schema_version: OUTPUT_NOVELTY_SCHEMA_V1.to_string(),
-            selection_origin: OutputSelectionOriginV1::CallerSupplied,
+        let receipt = OutputNoveltyReceipt {
+            schema_version: OUTPUT_NOVELTY_SCHEMA.to_string(),
+            selection_origin: OutputSelectionOrigin::CallerSupplied,
             classification_authority_digest,
             selected_effect_digest,
             verification_receipt_digest,
@@ -369,19 +369,19 @@ impl OutputNoveltyCodingV1 {
         })
     }
 
-    pub fn fields(&self) -> &[OutputNoveltyFieldV1] {
+    pub fn fields(&self) -> &[OutputNoveltyField] {
         &self.fields
     }
     pub fn encoded(&self) -> &[u8] {
         &self.encoded
     }
-    pub fn receipt(&self) -> &OutputNoveltyReceiptV1 {
+    pub fn receipt(&self) -> &OutputNoveltyReceipt {
         &self.receipt
     }
 
     /// Reconstruct the exact caller-selected fields after checking that the
     /// retained canonical coding still matches them byte-for-byte.
-    pub fn reconstruct_fields(&self) -> Result<Vec<OutputNoveltyFieldV1>, OutputNoveltyError> {
+    pub fn reconstruct_fields(&self) -> Result<Vec<OutputNoveltyField>, OutputNoveltyError> {
         let reconstructed = self.fields.clone();
         let encoded = encode_fields(
             self.receipt.classification_authority_digest,
@@ -411,8 +411,8 @@ fn validate_field_name(name: &str) -> Result<(), OutputNoveltyError> {
     }
 }
 
-fn encoded_len(fields: &[OutputNoveltyFieldV1]) -> Result<usize, OutputNoveltyError> {
-    let mut len = ENCODING_DOMAIN_V1
+fn encoded_len(fields: &[OutputNoveltyField]) -> Result<usize, OutputNoveltyError> {
+    let mut len = ENCODING_DOMAIN
         .len()
         .checked_add(3 * 32)
         .and_then(|value| value.checked_add(8 + fields.len().to_string().len()))
@@ -428,12 +428,12 @@ fn encoded_len(fields: &[OutputNoveltyFieldV1]) -> Result<usize, OutputNoveltyEr
 }
 
 fn encode_fields(
-    classification_authority_digest: DigestV1,
-    selected_effect_digest: DigestV1,
-    verification_receipt_digest: DigestV1,
-    fields: &[OutputNoveltyFieldV1],
+    classification_authority_digest: Sha256Digest,
+    selected_effect_digest: Sha256Digest,
+    verification_receipt_digest: Sha256Digest,
+    fields: &[OutputNoveltyField],
 ) -> Result<Vec<u8>, OutputNoveltyError> {
-    let mut out = ENCODING_DOMAIN_V1.to_vec();
+    let mut out = ENCODING_DOMAIN.to_vec();
     out.extend_from_slice(classification_authority_digest.as_bytes());
     out.extend_from_slice(selected_effect_digest.as_bytes());
     out.extend_from_slice(verification_receipt_digest.as_bytes());
@@ -459,8 +459,8 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), OutputNoveltyError> 
     Ok(())
 }
 
-fn digest(bytes: &[u8]) -> DigestV1 {
-    DigestV1::from_bytes(sha256(bytes))
+fn digest(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from_bytes(sha256(bytes))
 }
 
 #[cfg(test)]

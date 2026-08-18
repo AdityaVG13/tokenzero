@@ -412,9 +412,9 @@ pub fn run_raw_worker_once(opts: &RawWorkerServeOptions, request_json: &str) -> 
 /// Control `shutdown` ends the loop with exit 0.
 pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
     if std::env::var("ZEROSTACK_RAW_WORKER_PROTOCOL").is_ok_and(|value| {
-        value == raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION || value == "v2"
+        value == raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION
     }) {
-        return run_raw_worker_v2_serve(opts);
+        return run_raw_worker_protocol_serve(opts);
     }
     if opts.handshake_only {
         return raw_worker_print_handshake();
@@ -638,10 +638,11 @@ pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Result<Option<i32>, St
 #[path = "../../../tests/engine/unit/raw_worker_inline_tests.rs"]
 mod tests;
 
-#[path = "raw_worker_v2_impl.rs"]
-mod raw_worker_v2_impl;
-#[path = "raw_worker_v2_protocol.rs"]
-pub mod raw_worker_v2_protocol;
-pub use raw_worker_v2_impl::{
-    RawWorkerV2Session, execute_raw_worker_v2_frame, run_raw_worker_v2_serve,
+#[path = "raw_worker_impl.rs"]
+mod raw_worker_impl;
+#[path = "raw_worker_protocol.rs"]
+pub mod raw_worker_protocol;
+pub use raw_worker_impl::{
+    RawWorkerSession, execute_raw_worker_frame as execute_raw_worker_protocol_frame,
+    run_raw_worker_protocol_serve,
 };

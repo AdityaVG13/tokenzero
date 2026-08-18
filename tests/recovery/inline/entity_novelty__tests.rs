@@ -1,7 +1,7 @@
 use super::*;
 use std::any::type_name;
 use tempfile::tempdir;
-use tokenzero_core::output_novelty::{OUTPUT_NOVELTY_SCHEMA_V1, OutputNoveltyReceiptV1};
+use tokenzero_core::output_novelty::{OUTPUT_NOVELTY_SCHEMA, OutputNoveltyReceipt};
 
 #[test]
 fn refuses_second_entity_namespace() {
@@ -78,12 +78,12 @@ fn rejects_scheme_prefix_in_entity_ids() {
 fn entity_novelty_record_is_not_output_novelty_receipt() {
     assert_ne!(
         type_name::<EntityNoveltyRecord>(),
-        type_name::<OutputNoveltyReceiptV1>(),
-        "EntityNoveltyRecord must not be an alias of OutputNoveltyReceiptV1"
+        type_name::<OutputNoveltyReceipt>(),
+        "EntityNoveltyRecord must not be an alias of OutputNoveltyReceipt"
     );
-    assert_eq!(ENTITY_NOVELTY_SCHEMA_VERSION, "zerostack.entity-novelty.v1");
-    assert_eq!(OUTPUT_NOVELTY_SCHEMA_V1, "tokenzero.output-novelty/v1");
-    assert_ne!(ENTITY_NOVELTY_SCHEMA_VERSION, OUTPUT_NOVELTY_SCHEMA_V1);
+    assert_eq!(ENTITY_NOVELTY_SCHEMA_VERSION, "zerostack.entity-novelty");
+    assert_eq!(OUTPUT_NOVELTY_SCHEMA, "tokenzero.output-novelty/v1");
+    assert_ne!(ENTITY_NOVELTY_SCHEMA_VERSION, OUTPUT_NOVELTY_SCHEMA);
     assert_eq!(ENTITY_NOVELTY_RECORD_TYPE, "entity-novelty");
 
     let record = EntityNoveltyRecord::empty("global", "tokenzero").unwrap();
@@ -121,7 +121,7 @@ fn entity_novelty_record_is_not_output_novelty_receipt() {
     }
     let dumped = serde_json::to_string(&entity_json).unwrap();
     assert!(
-        !dumped.contains(OUTPUT_NOVELTY_SCHEMA_V1),
+        !dumped.contains(OUTPUT_NOVELTY_SCHEMA),
         "entity novelty JSON must not carry the output-novelty schema id"
     );
 }

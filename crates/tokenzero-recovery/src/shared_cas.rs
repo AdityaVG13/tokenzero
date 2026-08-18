@@ -28,7 +28,7 @@ pub use zero_store::{
     GC_MAX_PRODUCER_NAMESPACES, GC_MAX_RECORD_BYTES, GC_MAX_REPORT_OBJECTS, GC_MIN_GRACE_SECONDS,
     GC_RECORD_TYPE_DRY_RUN, GC_RECORD_TYPE_LEASE, GC_RECORD_TYPE_PIN, GC_RECORD_TYPE_REACHABILITY,
     GC_RECORD_TYPE_REPAIR, GC_RECORD_TYPE_SWEEP_PROGRESS, GC_REFS_FORMAT, GC_SCHEMA_VERSION,
-    GC_SCHEMA_VERSION_V1, GcCandidate, GcConfig, GcError, GcRunReceipt, GcRunState, GcVerdict,
+    GC_SCHEMA_VERSION_LEGACY, GcCandidate, GcConfig, GcError, GcRunReceipt, GcRunState, GcVerdict,
     LeaseOwner, LeaseRecord, PinRecord, ReachabilitySnapshot, RepairReceipt,
     current_reachability_snapshot, gc_contract_digest_hex, gc_contract_manifest,
     gc_repair_receipt_digest_hex, gc_report_digest_hex, publish_lease_record, publish_pin_record,

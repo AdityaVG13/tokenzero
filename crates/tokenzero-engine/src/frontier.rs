@@ -1,7 +1,7 @@
 //! Frontier resident-set planner (ZS-CACHE-007).
 //!
 //! PROPOSES ONLY. Verification authority is the hub
-//! `ResidencyThresholdCheckerV1` (ZeroStack `zero-gate/src/residency.rs`,
+//! `ResidencyThresholdChecker` (ZeroStack `zero-gate/src/residency.rs`,
 //! W4): the optimizer proposes, the checker authorizes. This module never
 //! authorizes residency and never re-implements the checker; it emits a
 //! proposal in the hub `causal_residency_plan` vocabulary (planned objects
@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const FRONTIER_PLAN_SCHEMA_V1: &str = "tokenzero.frontier-plan/v1";
+pub const FRONTIER_PLAN_SCHEMA: &str = "tokenzero.frontier-plan/v1";
 /// Optimizer name carried in proposals so the hub checker can attribute
 /// the plan to this proposer.
 pub const FRONTIER_OPTIMIZER_NAME: &str = "tokenzero-frontier-density-v1";
@@ -52,7 +52,7 @@ pub struct FrontierBudgets {
 
 /// Proposed resident set. PROPOSAL ONLY: `budget_violations` names budgets
 /// the total demand cannot fit inside; the hub
-/// `ResidencyThresholdCheckerV1` is the verifying authority.
+/// `ResidencyThresholdChecker` is the verifying authority.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FrontierPlan {
     pub schema: &'static str,
@@ -149,7 +149,7 @@ pub fn plan_frontier_resident_set(
     let total_demand_weight = plan_objects.iter().map(|object| object.demand_weight).sum();
 
     FrontierPlan {
-        schema: FRONTIER_PLAN_SCHEMA_V1,
+        schema: FRONTIER_PLAN_SCHEMA,
         tier: tier.to_string(),
         capacity_bytes: budgets.capacity_bytes,
         threshold,

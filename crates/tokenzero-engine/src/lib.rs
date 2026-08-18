@@ -70,7 +70,7 @@ pub use action_cache_key::{
     action_cache_key,
 };
 pub use admission::{
-    ADMISSION_BYTES_PER_TOKEN, ADMISSION_SCHEMA_V1, AdmissionDecision, AdmissionEstimator,
+    ADMISSION_BYTES_PER_TOKEN, ADMISSION_SCHEMA, AdmissionDecision, AdmissionEstimator,
     AdmissionPolicy, AdmissionReason,
 };
 pub use binary_resolve::{
@@ -79,7 +79,7 @@ pub use binary_resolve::{
     resolve_rg_binary, resolve_tokenzero_binary,
 };
 pub use cache_crossover::{
-    CACHE_CROSSOVER_SCHEMA_V1, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
+    CACHE_CROSSOVER_SCHEMA, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
     CacheCrossoverInput, CacheCrossoverReason, CacheCrossoverReceipt, EmissionCrossoverConfig,
     TOKEN_COST_PPM_SCALE, decide_cache_crossover,
 };
@@ -213,7 +213,7 @@ pub use eviction_scheduler::{
     simulate_eviction_replay, ttl_from_gaps,
 };
 pub use frontier::{
-    FRONTIER_OPTIMIZER_NAME, FRONTIER_PLAN_SCHEMA_V1, FrontierBudgets, FrontierPlan,
+    FRONTIER_OPTIMIZER_NAME, FRONTIER_PLAN_SCHEMA, FrontierBudgets, FrontierPlan,
     FrontierPlanObject, plan_frontier_resident_set,
 };
 pub use ledger::{CountMethodVersion, UNSTAMPED_LEGACY, current_count_method_version};

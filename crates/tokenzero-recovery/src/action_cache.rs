@@ -147,7 +147,7 @@ impl From<serde_json::Error> for ActionCacheError {
     }
 }
 
-/// Eviction slack guard (ZS-CACHE-012), mirroring hub `EvictionSlackV1`:
+/// Eviction slack guard (ZS-CACHE-012), mirroring hub `EvictionSlack`:
 /// `sigma = W_R - 0.99W`. An eviction that would push retained valid mass
 /// below 99% of demanded mass is refused, loudly, before any state change.
 #[derive(Clone, Copy, Debug)]
@@ -314,7 +314,7 @@ impl ActionCacheIndex {
     }
 
     /// L3 loss (ZS-CACHE-013): preserve the entry's L2 validity and mark it
-    /// needs-refetch. Mirror of hub `LayerValidityLedgerV1::mark_l3_loss`;
+    /// needs-refetch. Mirror of hub `LayerValidityLedger::mark_l3_loss`;
     /// never a tombstone, and the validity record is never deleted. Returns
     /// false when the key has no live entry.
     pub fn mark_l3_loss(&self, key: &str, now_unix: u64) -> Result<bool, ActionCacheError> {
@@ -334,7 +334,7 @@ impl ActionCacheIndex {
 
     /// Complete a refetch of identical bytes (ZS-CACHE-013): L3 restored,
     /// the causal identity never rediscovered. Mirror of hub
-    /// `LayerValidityLedgerV1::complete_refetch`. Returns false when the key
+    /// `LayerValidityLedger::complete_refetch`. Returns false when the key
     /// is missing or not marked L3-cold.
     pub fn complete_refetch(&self, key: &str) -> Result<bool, ActionCacheError> {
         let Some(mut entry) = self.get(key)? else {

@@ -4,7 +4,7 @@
 # Axis 11 strict-mode is MISSING; do not invent a flag.
 # 14 authority axes + never-worse workspace gate + MCP/CLI honesty + excluded honesty pins.
 
-schema_version = "gauntlet.supported_surface_matrix.v1"
+schema_version = "gauntlet.supported_surface_matrix"
 
 [meta]
 project_class = "Greenfield-Rust-class"
@@ -42,7 +42,7 @@ description = "Opaque reasoning-state transport. Core types; surfaces incomplete
 
 [categories.headroom]
 weight = 0.06
-description = "DecisionViewHeadroomPlanV1. Engine call-limit is a different concept."
+description = "DecisionViewHeadroomPlan. Engine call-limit is a different concept."
 
 [categories.shell-witnesses]
 weight = 0.07
@@ -131,7 +131,7 @@ evidence = "prefix-probe-replay.json: eligibility_declared vs hit_declared_by_pr
 
 [[features]]
 id = "F-TZ-006"
-title = "Opaque reasoning-state transport (OpaqueReasoningStateEnvelopeV1)"
+title = "Opaque reasoning-state transport (OpaqueReasoningStateEnvelope)"
 category = "reasoning-state"
 weight = 1.00
 status = "partial"
@@ -141,12 +141,12 @@ evidence = "phase1_unified_recon.md axis 6"
 
 [[features]]
 id = "F-TZ-007"
-title = "Headroom (DecisionViewHeadroomPlanV1)"
+title = "Headroom (DecisionViewHeadroomPlan)"
 category = "headroom"
 weight = 1.00
 status = "partial"
 authority_axis = 7
-partial_rationale = "Hub ReasoningContractV1 + core plan types. Engine codemode_wire 'headroom' is call-limit, not this plan. Do not score the call-limit as DecisionViewHeadroomPlanV1. Partial MUST NOT round up."
+partial_rationale = "Hub ReasoningContract + core plan types. Engine codemode_wire 'headroom' is call-limit, not this plan. Do not score the call-limit as DecisionViewHeadroomPlan. Partial MUST NOT round up."
 evidence = "phase1_unified_recon.md axis 7"
 
 [[features]]
@@ -161,7 +161,7 @@ evidence = "phase1_unified_recon.md axis 8"
 
 [[features]]
 id = "F-TZ-009"
-title = "Output novelty (OutputNoveltyReceiptV1)"
+title = "Output novelty (OutputNoveltyReceipt)"
 category = "novelty-continuation"
 weight = 0.50
 status = "partial"

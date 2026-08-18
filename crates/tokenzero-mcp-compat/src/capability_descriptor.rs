@@ -37,7 +37,7 @@ pub struct CapabilityDescriptor {
     #[serde(rename = "toolFiltering")]
     pub tool_filtering: Value,
     pub tools: Vec<ToolCapability>,
-    pub zeroref_v1: ZeroRefCapabilities,
+    pub zeroref: ZeroRefCapabilities,
     pub codemode: Value,
     pub resources: Vec<ResourceSpec>,
     pub next_actions: Vec<String>,
@@ -101,7 +101,7 @@ impl CapabilityDescriptor {
             tool_clusters: tool_clusters_for_surface(surface),
             tool_filtering: tool_filter_discovery(surface),
             tools,
-            zeroref_v1: ZeroRefCapabilities::default(),
+            zeroref: ZeroRefCapabilities::default(),
             codemode: json!({
                 "owner": "zerostack",
                 "local_execution": false,

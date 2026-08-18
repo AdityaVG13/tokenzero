@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
-use zero_abi::{DigestV1, sha256};
+use zero_abi::{Sha256Digest, sha256};
 use zero_gauge::ProviderLock;
 use zero_ledger::{Digest as LedgerDigest, TokenizerIdentity as LedgerTokenizerIdentity};
-use zero_ref::{ZeroFragment, ZeroRefV1};
+use zero_ref::{ZeroFragment, ZeroRef};
 
 /// Maximum encoded tokens expanded by one page.
 pub const MAX_TOKEN_PAGE_TOKENS: usize = 4_096;
@@ -124,14 +124,14 @@ impl Error for ModelArtifactError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactTokenizerIdentity {
     provider_lock: ProviderLock,
-    identity_digest: DigestV1,
+    identity_digest: Sha256Digest,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExactTokenizerIdentityWire {
     provider_lock: ProviderLock,
-    identity_digest: DigestV1,
+    identity_digest: Sha256Digest,
 }
 
 impl Serialize for ExactTokenizerIdentity {
@@ -194,7 +194,7 @@ impl ExactTokenizerIdentity {
     }
 
     /// Digest of provider, model, and exact tokenizer revision.
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.identity_digest
     }
 
@@ -245,10 +245,10 @@ pub trait ExactTokenizerAdapter {
 /// stream. No estimate or token-count-only adapter can construct this type.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ExactTokenMap {
-    tokenizer_identity_digest: DigestV1,
-    source_digest: DigestV1,
+    tokenizer_identity_digest: Sha256Digest,
+    source_digest: Sha256Digest,
     tokens: Vec<TokenPiece>,
-    digest: DigestV1,
+    digest: Sha256Digest,
 }
 
 impl ExactTokenMap {
@@ -308,15 +308,15 @@ impl ExactTokenMap {
         })
     }
 
-    pub const fn tokenizer_identity_digest(&self) -> DigestV1 {
+    pub const fn tokenizer_identity_digest(&self) -> Sha256Digest {
         self.tokenizer_identity_digest
     }
 
-    pub const fn source_digest(&self) -> DigestV1 {
+    pub const fn source_digest(&self) -> Sha256Digest {
         self.source_digest
     }
 
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
 
@@ -419,15 +419,15 @@ impl ExactTokenMap {
 /// Bounded, source-anchored slice of an exact token map.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TokenPage {
-    tokenizer_identity_digest: DigestV1,
-    map_digest: DigestV1,
+    tokenizer_identity_digest: Sha256Digest,
+    map_digest: Sha256Digest,
     source_anchor: String,
     token_start: u64,
     token_end: u64,
     byte_start: u64,
     byte_end: u64,
     tokens: Vec<TokenPiece>,
-    digest: DigestV1,
+    digest: Sha256Digest,
 }
 
 impl TokenPage {
@@ -436,7 +436,7 @@ impl TokenPage {
         source_anchor: &str,
         token_range: Range<usize>,
     ) -> Result<Self, ModelArtifactError> {
-        let parsed = ZeroRefV1::parse(source_anchor)
+        let parsed = ZeroRef::parse(source_anchor)
             .map_err(|error| ModelArtifactError::InvalidSourceAnchor(error.to_string()))?;
         if parsed.to_string() != source_anchor {
             return Err(ModelArtifactError::NoncanonicalSourceAnchor);
@@ -498,15 +498,15 @@ impl TokenPage {
         })
     }
 
-    pub const fn tokenizer_identity_digest(&self) -> DigestV1 {
+    pub const fn tokenizer_identity_digest(&self) -> Sha256Digest {
         self.tokenizer_identity_digest
     }
 
-    pub const fn map_digest(&self) -> DigestV1 {
+    pub const fn map_digest(&self) -> Sha256Digest {
         self.map_digest
     }
 
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
 
@@ -537,9 +537,9 @@ impl TokenPage {
     }
 }
 
-/// First formation-receipt version (mirrors hub `PayloadFormationReceiptV1`
+/// First formation-receipt version (mirrors hub `PayloadFormationReceipt`
 /// versioning; the hub remains the authority for the receipt grammar).
-pub const MODEL_CAPSULE_RECEIPT_VERSION_V1: u16 = 1;
+pub const MODEL_CAPSULE_RECEIPT_VERSION: u16 = 1;
 
 /// Logical slot a model capsule was formed for. Two capsules with the same
 /// causal key and different payload digests are a rewrite, never a silent
@@ -560,7 +560,7 @@ impl CapsuleCausalKey {
     }
 
     /// Content-addressed slot: identical bytes always map to the same key.
-    pub fn from_source_root(source_root: DigestV1) -> Self {
+    pub fn from_source_root(source_root: Sha256Digest) -> Self {
         Self(format!("tz://blob/{}", source_root.to_hex()))
     }
 
@@ -570,7 +570,7 @@ impl CapsuleCausalKey {
 
     /// Contract root binding this key: any key change produces a different
     /// root, so a receipt can never be relabeled across slots.
-    pub fn contract_root(&self) -> Result<DigestV1, ModelArtifactError> {
+    pub fn contract_root(&self) -> Result<Sha256Digest, ModelArtifactError> {
         let mut bytes = b"TOKENZERO-CAPSULE-CONTRACT-V1".to_vec();
         put_string(&mut bytes, &self.0)?;
         Ok(digest(&bytes))
@@ -579,25 +579,25 @@ impl CapsuleCausalKey {
 
 /// Formation receipt binding a model capsule to its constructor, contract
 /// root, dependency roots, payload root, and epoch. Local mirror of the hub
-/// `PayloadFormationReceiptV1` vocabulary; the hub remains the grammar
+/// `PayloadFormationReceipt` vocabulary; the hub remains the grammar
 /// authority (ZS-VIEW-002: "hub only for receipt grammar").
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCapsuleFormationReceipt {
     pub receipt_version: u16,
     pub constructor_identity: String,
-    pub contract_root: DigestV1,
+    pub contract_root: Sha256Digest,
     pub dependency_roots: Vec<String>,
-    pub payload_root: DigestV1,
+    pub payload_root: Sha256Digest,
     pub epoch: u64,
 }
 
 impl ModelCapsuleFormationReceipt {
     pub fn new(
         constructor_identity: impl Into<String>,
-        contract_root: DigestV1,
+        contract_root: Sha256Digest,
         dependency_roots: Vec<String>,
-        payload_root: DigestV1,
+        payload_root: Sha256Digest,
         epoch: u64,
     ) -> Result<Self, ModelArtifactError> {
         let constructor_identity = constructor_identity.into();
@@ -608,7 +608,7 @@ impl ModelCapsuleFormationReceipt {
             return Err(ModelArtifactError::EmptyDependencyRoot);
         }
         Ok(Self {
-            receipt_version: MODEL_CAPSULE_RECEIPT_VERSION_V1,
+            receipt_version: MODEL_CAPSULE_RECEIPT_VERSION,
             constructor_identity,
             contract_root,
             dependency_roots,
@@ -618,7 +618,7 @@ impl ModelCapsuleFormationReceipt {
     }
 
     pub fn validate(&self) -> Result<(), ModelArtifactError> {
-        if self.receipt_version != MODEL_CAPSULE_RECEIPT_VERSION_V1 {
+        if self.receipt_version != MODEL_CAPSULE_RECEIPT_VERSION {
             return Err(ModelArtifactError::UnsupportedReceiptVersion {
                 actual: self.receipt_version,
             });
@@ -634,12 +634,12 @@ impl ModelCapsuleFormationReceipt {
 
     /// Verify a payload against this receipt: the payload root must match
     /// exactly. A relabeled payload under this receipt's key fails.
-    pub fn verify_payload(&self, payload_root: DigestV1) -> bool {
+    pub fn verify_payload(&self, payload_root: Sha256Digest) -> bool {
         self.payload_root == payload_root
     }
 
     /// Canonical digest of this receipt (domain-separated, length-prefixed).
-    pub fn receipt_digest(&self) -> Result<DigestV1, ModelArtifactError> {
+    pub fn receipt_digest(&self) -> Result<Sha256Digest, ModelArtifactError> {
         self.validate()?;
         formation_receipt_digest(self)
     }
@@ -651,7 +651,7 @@ impl ModelCapsuleFormationReceipt {
 /// the identical capsule twice is idempotent.
 #[derive(Clone, Debug, Default)]
 pub struct AppendOnlyCapsuleSlots {
-    formed: Vec<(CapsuleCausalKey, DigestV1)>,
+    formed: Vec<(CapsuleCausalKey, Sha256Digest)>,
 }
 
 impl AppendOnlyCapsuleSlots {
@@ -686,25 +686,25 @@ impl AppendOnlyCapsuleSlots {
 /// Canonical model-facing capsule: exact prefix/tail bytes plus evidence and pages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ModelCapsule {
-    source_root_digest: DigestV1,
-    model_profile_digest: DigestV1,
-    tokenizer_identity_digest: DigestV1,
+    source_root_digest: Sha256Digest,
+    model_profile_digest: Sha256Digest,
+    tokenizer_identity_digest: Sha256Digest,
     evidence_refs: Vec<String>,
-    token_page_digests: Vec<DigestV1>,
+    token_page_digests: Vec<Sha256Digest>,
     stable_prefix: Vec<u8>,
     dynamic_tail: Vec<u8>,
     stable_prefix_tokens: u64,
     dynamic_tail_tokens: u64,
     causal_key: CapsuleCausalKey,
     formation_receipt: ModelCapsuleFormationReceipt,
-    digest: DigestV1,
+    digest: Sha256Digest,
 }
 
 impl ModelCapsule {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        source_root_digest: DigestV1,
-        model_profile_digest: DigestV1,
+        source_root_digest: Sha256Digest,
+        model_profile_digest: Sha256Digest,
         tokenizer: &ExactTokenizerIdentity,
         mut evidence_refs: Vec<String>,
         token_pages: &[TokenPage],
@@ -726,7 +726,7 @@ impl ModelCapsule {
             });
         }
         for reference in &evidence_refs {
-            let parsed = ZeroRefV1::parse(reference)
+            let parsed = ZeroRef::parse(reference)
                 .map_err(|error| ModelArtifactError::InvalidEvidenceRef(error.to_string()))?;
             if parsed.to_string() != *reference {
                 return Err(ModelArtifactError::NoncanonicalEvidenceRef(
@@ -836,16 +836,16 @@ impl ModelCapsule {
     pub fn from_formed(
         causal_key: CapsuleCausalKey,
         receipt: ModelCapsuleFormationReceipt,
-        source_root_digest: DigestV1,
-        model_profile_digest: DigestV1,
-        tokenizer_identity_digest: DigestV1,
+        source_root_digest: Sha256Digest,
+        model_profile_digest: Sha256Digest,
+        tokenizer_identity_digest: Sha256Digest,
         mut evidence_refs: Vec<String>,
-        mut token_page_digests: Vec<DigestV1>,
+        mut token_page_digests: Vec<Sha256Digest>,
         stable_prefix: &[u8],
-        stable_prefix_map_digest: DigestV1,
+        stable_prefix_map_digest: Sha256Digest,
         stable_prefix_tokens: u64,
         dynamic_tail: &[u8],
-        dynamic_tail_map_digest: DigestV1,
+        dynamic_tail_map_digest: Sha256Digest,
         dynamic_tail_tokens: u64,
     ) -> Result<Self, ModelArtifactError> {
         if evidence_refs.len() > MAX_CAPSULE_EVIDENCE_REFS {
@@ -855,7 +855,7 @@ impl ModelCapsule {
             });
         }
         for reference in &evidence_refs {
-            let parsed = ZeroRefV1::parse(reference)
+            let parsed = ZeroRef::parse(reference)
                 .map_err(|error| ModelArtifactError::InvalidEvidenceRef(error.to_string()))?;
             if parsed.to_string() != *reference {
                 return Err(ModelArtifactError::NoncanonicalEvidenceRef(
@@ -927,32 +927,32 @@ impl ModelCapsule {
 
     /// Digest of a capsule payload byte stream (also the engine-path
     /// byte-identity map digest).
-    pub fn payload_digest(bytes: &[u8]) -> DigestV1 {
+    pub fn payload_digest(bytes: &[u8]) -> Sha256Digest {
         digest(bytes)
     }
 
     /// Canonical "no model profile bound" marker for formations outside a
     /// provider-model context (engine read path).
-    pub fn absent_model_profile_digest() -> DigestV1 {
+    pub fn absent_model_profile_digest() -> Sha256Digest {
         digest(b"TOKENZERO-ABSENT-MODEL-PROFILE-V1")
     }
 
     /// Canonical "no exact tokenizer bound" marker. Exact-tokenizer binding
     /// arrives with provider-tokenizer wiring (ZS-VIEW-008); formations using
     /// this marker never claim an exact map.
-    pub fn absent_tokenizer_digest() -> DigestV1 {
+    pub fn absent_tokenizer_digest() -> Sha256Digest {
         digest(b"TOKENZERO-ABSENT-TOKENIZER-V1")
     }
 
-    pub const fn source_root_digest(&self) -> DigestV1 {
+    pub const fn source_root_digest(&self) -> Sha256Digest {
         self.source_root_digest
     }
 
-    pub const fn model_profile_digest(&self) -> DigestV1 {
+    pub const fn model_profile_digest(&self) -> Sha256Digest {
         self.model_profile_digest
     }
 
-    pub const fn tokenizer_identity_digest(&self) -> DigestV1 {
+    pub const fn tokenizer_identity_digest(&self) -> Sha256Digest {
         self.tokenizer_identity_digest
     }
 
@@ -960,7 +960,7 @@ impl ModelCapsule {
         &self.evidence_refs
     }
 
-    pub fn token_page_digests(&self) -> &[DigestV1] {
+    pub fn token_page_digests(&self) -> &[Sha256Digest] {
         &self.token_page_digests
     }
 
@@ -991,7 +991,7 @@ impl ModelCapsule {
         rendered
     }
 
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
 
@@ -1008,8 +1008,8 @@ impl ModelCapsule {
 }
 
 // Domain-separated, length-prefixed canonical hashing helpers.
-fn digest(bytes: &[u8]) -> DigestV1 {
-    DigestV1::from_bytes(sha256(bytes))
+fn digest(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from_bytes(sha256(bytes))
 }
 
 fn validate_provider_lock(lock: &ProviderLock) -> Result<(), ModelArtifactError> {
@@ -1023,7 +1023,7 @@ fn validate_provider_lock(lock: &ProviderLock) -> Result<(), ModelArtifactError>
     {
         return Err(ModelArtifactError::IdentityFieldTooLong);
     }
-    DigestV1::from_hex(&lock.tokenizer_revision_digest)
+    Sha256Digest::from_hex(&lock.tokenizer_revision_digest)
         .map_err(|_| ModelArtifactError::InvalidTokenizerRevisionDigest)?;
     Ok(())
 }
@@ -1049,12 +1049,12 @@ fn put_tokens(out: &mut Vec<u8>, tokens: &[TokenPiece]) -> Result<(), ModelArtif
     Ok(())
 }
 
-fn tokenizer_identity_digest(lock: &ProviderLock) -> Result<DigestV1, ModelArtifactError> {
+fn tokenizer_identity_digest(lock: &ProviderLock) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-EXACT-TOKENIZER-IDENTITY-V1".to_vec();
     put_string(&mut bytes, &lock.provider)?;
     put_string(&mut bytes, &lock.model)?;
     bytes.extend_from_slice(
-        DigestV1::from_hex(&lock.tokenizer_revision_digest)
+        Sha256Digest::from_hex(&lock.tokenizer_revision_digest)
             .map_err(|_| ModelArtifactError::InvalidTokenizerRevisionDigest)?
             .as_bytes(),
     );
@@ -1062,10 +1062,10 @@ fn tokenizer_identity_digest(lock: &ProviderLock) -> Result<DigestV1, ModelArtif
 }
 
 fn token_map_digest(
-    tokenizer: DigestV1,
-    source: DigestV1,
+    tokenizer: Sha256Digest,
+    source: Sha256Digest,
     tokens: &[TokenPiece],
-) -> Result<DigestV1, ModelArtifactError> {
+) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-EXACT-TOKEN-MAP-V1".to_vec();
     bytes.extend_from_slice(tokenizer.as_bytes());
     bytes.extend_from_slice(source.as_bytes());
@@ -1075,15 +1075,15 @@ fn token_map_digest(
 
 #[allow(clippy::too_many_arguments)]
 fn token_page_digest(
-    tokenizer: DigestV1,
-    map: DigestV1,
+    tokenizer: Sha256Digest,
+    map: Sha256Digest,
     source_anchor: &str,
     token_start: u64,
     token_end: u64,
     byte_start: u64,
     byte_end: u64,
     tokens: &[TokenPiece],
-) -> Result<DigestV1, ModelArtifactError> {
+) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-TOKEN-PAGE-V1".to_vec();
     bytes.extend_from_slice(tokenizer.as_bytes());
     bytes.extend_from_slice(map.as_bytes());
@@ -1098,20 +1098,20 @@ fn token_page_digest(
 
 #[allow(clippy::too_many_arguments)]
 fn model_capsule_digest(
-    source_root: DigestV1,
-    model_profile: DigestV1,
-    tokenizer: DigestV1,
+    source_root: Sha256Digest,
+    model_profile: Sha256Digest,
+    tokenizer: Sha256Digest,
     evidence_refs: &[String],
-    page_digests: &[DigestV1],
-    stable_prefix_map: DigestV1,
-    dynamic_tail_map: DigestV1,
+    page_digests: &[Sha256Digest],
+    stable_prefix_map: Sha256Digest,
+    dynamic_tail_map: Sha256Digest,
     stable_prefix: &[u8],
     dynamic_tail: &[u8],
     stable_prefix_tokens: u64,
     dynamic_tail_tokens: u64,
     causal_key: &CapsuleCausalKey,
     receipt: &ModelCapsuleFormationReceipt,
-) -> Result<DigestV1, ModelArtifactError> {
+) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-MODEL-CAPSULE-V1".to_vec();
     bytes.extend_from_slice(source_root.as_bytes());
     bytes.extend_from_slice(model_profile.as_bytes());
@@ -1146,7 +1146,7 @@ fn model_capsule_digest(
 }
 
 /// Canonical digest of the full render payload (stable prefix + dynamic tail).
-fn render_payload_digest(prefix: &[u8], tail: &[u8]) -> Result<DigestV1, ModelArtifactError> {
+fn render_payload_digest(prefix: &[u8], tail: &[u8]) -> Result<Sha256Digest, ModelArtifactError> {
     let mut payload = Vec::with_capacity(prefix.len() + tail.len());
     payload.extend_from_slice(prefix);
     payload.extend_from_slice(tail);
@@ -1156,10 +1156,10 @@ fn render_payload_digest(prefix: &[u8], tail: &[u8]) -> Result<DigestV1, ModelAr
 /// Contract root binding source, model profile, and tokenizer identity for
 /// core-formed capsule receipts.
 fn capsule_contract_root(
-    source_root: DigestV1,
-    model_profile: DigestV1,
-    tokenizer: DigestV1,
-) -> Result<DigestV1, ModelArtifactError> {
+    source_root: Sha256Digest,
+    model_profile: Sha256Digest,
+    tokenizer: Sha256Digest,
+) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-MODEL-CAPSULE-CONTRACT-V1".to_vec();
     bytes.extend_from_slice(source_root.as_bytes());
     bytes.extend_from_slice(model_profile.as_bytes());
@@ -1170,7 +1170,7 @@ fn capsule_contract_root(
 /// Canonical domain-separated, length-prefixed digest of a formation receipt.
 fn formation_receipt_digest(
     receipt: &ModelCapsuleFormationReceipt,
-) -> Result<DigestV1, ModelArtifactError> {
+) -> Result<Sha256Digest, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-MODEL-CAPSULE-FORMATION-RECEIPT-V1".to_vec();
     bytes.extend_from_slice(&receipt.receipt_version.to_be_bytes());
     put_string(&mut bytes, &receipt.constructor_identity)?;

@@ -156,8 +156,8 @@ fn capsule_digest_is_canonical_and_provider_locked() {
     let other_ref = format!("fz://blob/{}", content_hash_hex(b"other"));
 
     let one = ModelCapsule::new(
-        DigestV1::from_bytes([8; 32]),
-        DigestV1::from_bytes([9; 32]),
+        Sha256Digest::from_bytes([8; 32]),
+        Sha256Digest::from_bytes([9; 32]),
         &tokenizer,
         vec![source_anchor.clone(), other_ref.clone()],
         &[page_a.clone(), page_b.clone()],
@@ -166,8 +166,8 @@ fn capsule_digest_is_canonical_and_provider_locked() {
     )
     .unwrap();
     let reordered = ModelCapsule::new(
-        DigestV1::from_bytes([8; 32]),
-        DigestV1::from_bytes([9; 32]),
+        Sha256Digest::from_bytes([8; 32]),
+        Sha256Digest::from_bytes([9; 32]),
         &tokenizer,
         vec![other_ref, source_anchor],
         &[page_b, page_a],
@@ -185,8 +185,8 @@ fn capsule_digest_is_canonical_and_provider_locked() {
     let foreign_tail = exact_map(&foreign, b"ask");
     assert_eq!(
         ModelCapsule::new(
-            DigestV1::from_bytes([8; 32]),
-            DigestV1::from_bytes([9; 32]),
+            Sha256Digest::from_bytes([8; 32]),
+            Sha256Digest::from_bytes([9; 32]),
             &tokenizer,
             Vec::new(),
             &[],
@@ -212,9 +212,9 @@ fn capsule_digest_is_canonical_and_provider_locked() {
 
 #[test]
 fn formation_receipt_is_canonical_and_rejects_relabeled_payloads() {
-    let payload = DigestV1::from_bytes([1; 32]);
-    let other_payload = DigestV1::from_bytes([2; 32]);
-    let contract = DigestV1::from_bytes([3; 32]);
+    let payload = Sha256Digest::from_bytes([1; 32]);
+    let other_payload = Sha256Digest::from_bytes([2; 32]);
+    let contract = Sha256Digest::from_bytes([3; 32]);
     let receipt = ModelCapsuleFormationReceipt::new(
         "fixture.constructor.v1",
         contract,
@@ -277,7 +277,7 @@ fn formed_capsule_receipt_must_bind_payload_and_slots_reject_rewrites() {
     let other_key = CapsuleCausalKey::new("fixture:3..4").unwrap();
     let blob_a = format!("tz://blob/{}", content_hash_hex(b"alpha"));
     let blob_b = format!("tz://blob/{}", content_hash_hex(b"beta"));
-    let source_root = DigestV1::from_bytes([8; 32]);
+    let source_root = Sha256Digest::from_bytes([8; 32]);
 
     let form = |key: &CapsuleCausalKey, payload: &[u8], dep: String| {
         let contract_root = key.contract_root().unwrap();

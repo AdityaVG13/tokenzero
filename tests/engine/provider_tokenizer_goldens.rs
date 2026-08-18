@@ -77,7 +77,7 @@ fn gauntlet_subject_is_not_provider_tokenizer_oracle() {
 }
 
 #[test]
-fn fixture_schema_is_tokenizer_goldens_v1() {
+fn fixture_schema_is_tokenizer_goldens() {
     assert_eq!(fixture().schema, "tokenzero.tokenizer-goldens.v1");
     assert!(!fixture().entries.is_empty());
 }

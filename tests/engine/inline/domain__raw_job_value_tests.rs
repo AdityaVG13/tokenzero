@@ -21,7 +21,7 @@ fn internal_result() -> Value {
 #[test]
 fn shared_job_contract_digest_is_canonical_in_the_tokenzero_graph() {
     assert_eq!(
-        zero_abi::token_job_contract_digest_v1(),
+        zero_abi::token_job_contract_digest(),
         "d9b15de5be5a4c5a2d80ffd409eb04fc796b16b377a67254016fc4f285b7a597"
     );
 }
@@ -30,7 +30,7 @@ fn shared_job_contract_digest_is_canonical_in_the_tokenzero_graph() {
 fn typed_job_result_strips_private_log_and_rejects_unknown_output() {
     let value = typed_job_result("tzjob-7", &internal_result()).unwrap();
     assert!(value.get("log").is_none());
-    let typed: TokenJobPollResultV1 = serde_json::from_value(value).unwrap();
+    let typed: TokenJobPollResult = serde_json::from_value(value).unwrap();
     typed.validate().unwrap();
 
     let mut mutant = internal_result();

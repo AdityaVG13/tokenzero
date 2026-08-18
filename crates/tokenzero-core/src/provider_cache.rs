@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU64;
-use zero_abi::DigestV1;
+use zero_abi::Sha256Digest;
 
 const MAX_POLICY_ID_BYTES: usize = 1_024;
 const MAX_REASON_BYTES: usize = 16_384;
@@ -43,7 +43,7 @@ pub enum ProviderCacheEligibilityStatus {
 pub struct ProviderCacheEligibility {
     status: ProviderCacheEligibilityStatus,
     policy_id: Option<String>,
-    prefix_geometry_digest: Option<DigestV1>,
+    prefix_geometry_digest: Option<Sha256Digest>,
     breakpoint_after_tokens: Option<u64>,
     reason: Option<String>,
 }
@@ -53,7 +53,7 @@ pub struct ProviderCacheEligibility {
 struct ProviderCacheEligibilityWire {
     status: ProviderCacheEligibilityStatus,
     policy_id: Option<String>,
-    prefix_geometry_digest: Option<DigestV1>,
+    prefix_geometry_digest: Option<Sha256Digest>,
     breakpoint_after_tokens: Option<u64>,
     reason: Option<String>,
 }
@@ -181,7 +181,7 @@ impl ProviderCacheEligibility {
         self.policy_id.as_deref()
     }
 
-    pub const fn prefix_geometry_digest(&self) -> Option<DigestV1> {
+    pub const fn prefix_geometry_digest(&self) -> Option<Sha256Digest> {
         self.prefix_geometry_digest
     }
 

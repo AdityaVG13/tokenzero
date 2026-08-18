@@ -23,7 +23,7 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 use zero_abi::{
-    TOKEN_JOB_OPERATION_V1, TokenJobPollRequestV1, TokenJobPollResultV1, TokenJobStatusV1,
+    TOKEN_JOB_OPERATION, TokenJobPollRequest, TokenJobPollResult, TokenJobStatus,
 };
 
 /// Domain-kernel dispatch errors (no JSON-RPC / MCP framing).
@@ -89,7 +89,7 @@ pub fn execute_embedded_value(
     op_name: &str,
     args: &Value,
 ) -> Option<Result<Value, EmbeddedDispatchError>> {
-    if op_name == TOKEN_JOB_OPERATION_V1 {
+    if op_name == TOKEN_JOB_OPERATION {
         return Some(execute_raw_worker_job(engine, args));
     }
     if matches!(op_name, "shell" | "tz_shell" | "zero.shell") {
@@ -128,7 +128,7 @@ fn execute_raw_worker_background_shell(
         .get("job")
         .and_then(Value::as_str)
         .ok_or_else(|| EmbeddedDispatchError::invalid_result("background launch omitted job"))?;
-    TokenJobPollRequestV1::new(id)
+    TokenJobPollRequest::new(id)
         .and_then(|request| request.validate().map(|()| request))
         .map_err(|error| {
             EmbeddedDispatchError::invalid_result(format!("invalid background job id: {error}"))
@@ -149,7 +149,7 @@ fn execute_raw_worker_job(
     engine: &TokenZeroEngine,
     args: &Value,
 ) -> Result<Value, EmbeddedDispatchError> {
-    let request: TokenJobPollRequestV1 = serde_json::from_value(args.clone()).map_err(|error| {
+    let request: TokenJobPollRequest = serde_json::from_value(args.clone()).map_err(|error| {
         EmbeddedDispatchError::validation(format!("invalid job arguments: {error}"))
     })?;
     request.validate().map_err(|error| {
@@ -182,7 +182,7 @@ fn execute_raw_worker_job(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InternalJobPoll {
-    status: TokenJobStatusV1,
+    status: TokenJobStatus,
     pid: Option<u32>,
     exit_code: Option<i32>,
     tail: Option<String>,
@@ -247,7 +247,7 @@ fn typed_job_result(id: &str, internal: &Value) -> Result<Value, EmbeddedDispatc
     } else {
         (String::new(), true, 0, cursor)
     };
-    let result = TokenJobPollResultV1::new(
+    let result = TokenJobPollResult::new(
         id,
         status,
         pid,

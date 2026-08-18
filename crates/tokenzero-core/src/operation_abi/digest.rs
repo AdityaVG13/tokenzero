@@ -219,7 +219,7 @@ pub fn contract_manifest_for(operations: &[Operation]) -> Result<Value, String> 
     Ok(json!({
         "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
         "engine": "tokenzero",
-        "schema_parity": "structural_io_v1",
+        "schema_parity": "structural_io",
         "canonical_dispatch_version": CANONICAL_DISPATCH_VERSION,
         "canonical_dispatch_digest": dispatch_digest,
         "operations": semantic_operations,

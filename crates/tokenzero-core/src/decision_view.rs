@@ -17,8 +17,8 @@ use crate::model_artifacts::{
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
-use zero_abi::{DigestV1, sha256};
-use zero_ref::ZeroRefV1;
+use zero_abi::{Sha256Digest, sha256};
+use zero_ref::ZeroRef;
 
 pub const MAX_DECISION_VIEW_SECTIONS: usize = 1_024;
 pub const MAX_DECISION_VIEW_BYTES: usize = 16 * 1_048_576;
@@ -186,10 +186,10 @@ impl DecisionUncertaintyMarker {
 pub struct DecisionViewSection {
     kind: DecisionViewSectionKind,
     payload: Vec<u8>,
-    tokenizer_identity_digest: Option<DigestV1>,
-    tool_schema_digest: Option<DigestV1>,
-    source_root_digest: Option<DigestV1>,
-    model_profile_digest: Option<DigestV1>,
+    tokenizer_identity_digest: Option<Sha256Digest>,
+    tool_schema_digest: Option<Sha256Digest>,
+    source_root_digest: Option<Sha256Digest>,
+    model_profile_digest: Option<Sha256Digest>,
     survival_score_bps: Option<u32>,
 }
 
@@ -384,19 +384,19 @@ impl DecisionViewSection {
 /// Complete identity tuple for canonical stable-prefix bytes P(Z,M,T,R).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecisionViewIdentity {
-    source_root_digest: DigestV1,
-    model_profile_digest: DigestV1,
-    tokenizer_identity_digest: DigestV1,
-    tool_schema_digest: DigestV1,
-    renderer_contract_digest: DigestV1,
+    source_root_digest: Sha256Digest,
+    model_profile_digest: Sha256Digest,
+    tokenizer_identity_digest: Sha256Digest,
+    tool_schema_digest: Sha256Digest,
+    renderer_contract_digest: Sha256Digest,
 }
 
 impl DecisionViewIdentity {
     pub fn new(
-        source_root_digest: DigestV1,
-        model_profile_digest: DigestV1,
+        source_root_digest: Sha256Digest,
+        model_profile_digest: Sha256Digest,
         tokenizer: &ExactTokenizerIdentity,
-        tool_schema_digest: DigestV1,
+        tool_schema_digest: Sha256Digest,
     ) -> Self {
         Self {
             source_root_digest,
@@ -407,23 +407,23 @@ impl DecisionViewIdentity {
         }
     }
 
-    pub const fn source_root_digest(&self) -> DigestV1 {
+    pub const fn source_root_digest(&self) -> Sha256Digest {
         self.source_root_digest
     }
 
-    pub const fn model_profile_digest(&self) -> DigestV1 {
+    pub const fn model_profile_digest(&self) -> Sha256Digest {
         self.model_profile_digest
     }
 
-    pub const fn tokenizer_identity_digest(&self) -> DigestV1 {
+    pub const fn tokenizer_identity_digest(&self) -> Sha256Digest {
         self.tokenizer_identity_digest
     }
 
-    pub const fn tool_schema_digest(&self) -> DigestV1 {
+    pub const fn tool_schema_digest(&self) -> Sha256Digest {
         self.tool_schema_digest
     }
 
-    pub const fn renderer_contract_digest(&self) -> DigestV1 {
+    pub const fn renderer_contract_digest(&self) -> Sha256Digest {
         self.renderer_contract_digest
     }
 }
@@ -442,10 +442,10 @@ pub enum PrefixComparison {
 pub struct StablePrefixGeometry {
     identity: DecisionViewIdentity,
     bytes: Vec<u8>,
-    bytes_digest: DigestV1,
+    bytes_digest: Sha256Digest,
     breakpoint_after_bytes: u64,
     breakpoint_after_tokens: u64,
-    geometry_digest: DigestV1,
+    geometry_digest: Sha256Digest,
 }
 
 impl StablePrefixGeometry {
@@ -482,7 +482,7 @@ impl StablePrefixGeometry {
         &self.bytes
     }
 
-    pub const fn bytes_digest(&self) -> DigestV1 {
+    pub const fn bytes_digest(&self) -> Sha256Digest {
         self.bytes_digest
     }
 
@@ -494,7 +494,7 @@ impl StablePrefixGeometry {
         self.breakpoint_after_tokens
     }
 
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.geometry_digest
     }
 
@@ -639,7 +639,7 @@ impl DecisionViewMetadata {
         self.baseline_escape
     }
 
-    fn canonical_digest(&self) -> Result<DigestV1, DecisionViewError> {
+    fn canonical_digest(&self) -> Result<Sha256Digest, DecisionViewError> {
         let mut canonical = b"TOKENZERO-DECISION-VIEW-METADATA-V1".to_vec();
         put_choices(&mut canonical, &self.candidate_choices)?;
         put_strings(
@@ -670,13 +670,13 @@ pub struct DecisionView {
     identity: DecisionViewIdentity,
     section_kinds: Vec<DecisionViewSectionKind>,
     rendered: Vec<u8>,
-    exact_token_map_digest: DigestV1,
+    exact_token_map_digest: Sha256Digest,
     total_tokens: u64,
     volatile_bytes: u64,
     volatile_tokens: u64,
     stable_prefix: StablePrefixGeometry,
     metadata: DecisionViewMetadata,
-    digest: DigestV1,
+    digest: Sha256Digest,
 }
 
 impl DecisionView {
@@ -845,7 +845,7 @@ impl DecisionView {
         &self.rendered
     }
 
-    pub const fn exact_token_map_digest(&self) -> DigestV1 {
+    pub const fn exact_token_map_digest(&self) -> Sha256Digest {
         self.exact_token_map_digest
     }
 
@@ -869,12 +869,12 @@ impl DecisionView {
         &self.metadata
     }
 
-    pub const fn digest(&self) -> DigestV1 {
+    pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
 }
 
-pub fn decision_view_renderer_contract_digest() -> DigestV1 {
+pub fn decision_view_renderer_contract_digest() -> Sha256Digest {
     digest(RENDERER_CONTRACT)
 }
 
@@ -886,7 +886,7 @@ fn validate_refs(refs: &[String]) -> Result<(), DecisionViewError> {
         });
     }
     for reference in refs {
-        let parsed = ZeroRefV1::parse(reference)
+        let parsed = ZeroRef::parse(reference)
             .map_err(|error| DecisionViewError::InvalidRecoveryRef(error.to_string()))?;
         if parsed.to_string() != *reference {
             return Err(DecisionViewError::NoncanonicalRecoveryRef(
@@ -932,7 +932,7 @@ fn put_refs(out: &mut Vec<u8>, refs: &[String]) -> Result<(), DecisionViewError>
     Ok(())
 }
 
-fn put_digests(out: &mut Vec<u8>, digests: &[DigestV1]) -> Result<(), DecisionViewError> {
+fn put_digests(out: &mut Vec<u8>, digests: &[Sha256Digest]) -> Result<(), DecisionViewError> {
     let count = u64::try_from(digests.len()).map_err(|_| DecisionViewError::LengthOverflow)?;
     append_bounded(
         out,
@@ -992,8 +992,8 @@ fn ensure_view_bound(actual: usize) -> Result<(), DecisionViewError> {
     Ok(())
 }
 
-fn digest(bytes: &[u8]) -> DigestV1 {
-    DigestV1::from_bytes(sha256(bytes))
+fn digest(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from_bytes(sha256(bytes))
 }
 
 fn put_identity(out: &mut Vec<u8>, identity: &DecisionViewIdentity) {
@@ -1006,11 +1006,11 @@ fn put_identity(out: &mut Vec<u8>, identity: &DecisionViewIdentity) {
 
 fn stable_prefix_geometry_digest(
     identity: &DecisionViewIdentity,
-    bytes_digest: DigestV1,
+    bytes_digest: Sha256Digest,
     byte_count: u64,
     token_count: u64,
     bytes: &[u8],
-) -> Result<DigestV1, DecisionViewError> {
+) -> Result<Sha256Digest, DecisionViewError> {
     let mut canonical = b"TOKENZERO-STABLE-PREFIX-GEOMETRY-V1".to_vec();
     put_identity(&mut canonical, identity);
     canonical.extend_from_slice(bytes_digest.as_bytes());
@@ -1021,14 +1021,14 @@ fn stable_prefix_geometry_digest(
 }
 
 fn decision_view_digest(
-    prefix_geometry: DigestV1,
-    token_map: DigestV1,
+    prefix_geometry: Sha256Digest,
+    token_map: Sha256Digest,
     sections: &[DecisionViewSection],
     total_tokens: u64,
     volatile_tokens: u64,
     rendered: &[u8],
-    metadata: DigestV1,
-) -> Result<DigestV1, DecisionViewError> {
+    metadata: Sha256Digest,
+) -> Result<Sha256Digest, DecisionViewError> {
     let mut canonical = b"TOKENZERO-DECISION-VIEW-IDENTITY-V1".to_vec();
     canonical.extend_from_slice(prefix_geometry.as_bytes());
     canonical.extend_from_slice(token_map.as_bytes());

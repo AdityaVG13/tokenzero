@@ -112,7 +112,7 @@ fn flush_thread_spawn_failure_is_a_typed_io_error() {
 
 /// Golden v2 fixture: the stored ratc must equal the RATC identity
 /// computed arithmetically from the record's own fields.
-const GOLDEN_V2: &str = r#"{
+const GOLDEN: &str = r#"{
     "schema": "tokenzero.ledger.v2",
     "timestamp_ms": 1700000000000,
     "session_id": "session-golden",
@@ -140,7 +140,7 @@ const GOLDEN_V2: &str = r#"{
 
 #[test]
 fn golden_v2_ratc_identity_holds_arithmetically() {
-    let record: LedgerRecord = serde_json::from_str(GOLDEN_V2).unwrap();
+    let record: LedgerRecord = serde_json::from_str(GOLDEN).unwrap();
     let rc = &record.recovery_costs;
     let expected = (rc.visible_tokens + rc.expand_tokens) as f64
         + rc.rho_fail * rc.retry_count as f64
@@ -154,7 +154,7 @@ fn golden_v2_ratc_identity_holds_arithmetically() {
 
 #[test]
 fn golden_v2_round_trips_without_payload_keys() {
-    let record: LedgerRecord = serde_json::from_str(GOLDEN_V2).unwrap();
+    let record: LedgerRecord = serde_json::from_str(GOLDEN).unwrap();
     let text = serde_json::to_string(&record).unwrap();
     // Telemetry-only rule: no payload bytes in ledger records.
     for key in ["payload", "content", "bytes_b64", "text"] {

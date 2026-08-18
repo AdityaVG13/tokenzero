@@ -9,7 +9,7 @@ use crate::CacheProvider;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CACHE_CROSSOVER_SCHEMA_V1: &str = "tokenzero.cache-crossover/v1";
+pub const CACHE_CROSSOVER_SCHEMA: &str = "tokenzero.cache-crossover/v1";
 pub const TOKEN_COST_PPM_SCALE: u64 = 1_000_000;
 const MAX_ID_BYTES: usize = 1_024;
 
@@ -222,7 +222,7 @@ pub fn decide_cache_crossover(
     };
 
     Ok(CacheCrossoverReceipt {
-        schema: CACHE_CROSSOVER_SCHEMA_V1,
+        schema: CACHE_CROSSOVER_SCHEMA,
         provider: input.provider,
         policy_id: input.policy_id.clone(),
         token_unit_id: input.token_unit_id.clone(),

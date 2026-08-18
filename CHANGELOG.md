@@ -25,7 +25,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **Family-wide CodeMode CPU budget**: machine-wide analysis permit, fair multi-tenant slots, frozen permit contract v1 with index class, and shared crate `zerostack-machine-permit` (`tokenzero-nk6u`, `tokenzero-9tle`).
 - **CodeMode envelope v3**: mechanical ack path for scalar/structured results (`tokenzero-envelope-v3-mechanical-ack-my1`).
 - **Short session ref aliases**: visible capsules may use `tz://s/<16hex>` (`tokenzero-short-ref-aliases-dle`).
-- **Shared schemas**: freeze `zerostack.derivation-provenance.v1` and `zerostack.entity-novelty.v1` (recovery novelty fusion with GraphZero).
+- **Shared schemas**: freeze `zerostack.derivation-provenance` and `zerostack.entity-novelty` (recovery novelty fusion with GraphZero).
 - **Public claim gate**: `benchmarks/claim_public_gate.py` blocks treating the northstar 99% fixed-suite headline as a population/release claim (`tokenzero-g3y.18`).
 - **Opt-in usage telemetry**: default-off; when enabled, records only `{execution_path, raw_tokens, spent_tokens}` for MCP/CodeMode (`tokenzero-f409`, https://github.com/AdityaVG13/tokenzero/pull/26).
 

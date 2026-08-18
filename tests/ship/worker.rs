@@ -30,7 +30,7 @@ fn ship_worker_probe_is_planner_free_and_contract_bound() {
         value["surface"] == "raw_worker"
             && value["planner_owner"] == "client"
             && value["compression_owner"] == "engine"
-            && value["raw_worker_version"] == "zerostack.raw_worker.v2"
+            && value["raw_worker_version"] == "zerostack.raw_worker"
             && value["semantic_contract_digest"]
                 .as_str()
                 .is_some_and(|digest| digest.len() == 64)

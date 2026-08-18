@@ -187,5 +187,5 @@ fn sbom_uses_the_canonical_worker_binary() {
     let sbom: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(sbom["artifact"], "tokenzero-codemode");
     assert_eq!(sbom["package"], "tokenzero-worker");
-    assert_eq!(sbom["raw_worker_protocol"], "zerostack.raw_worker.v2");
+    assert_eq!(sbom["raw_worker_protocol"], "zerostack.raw_worker");
 }

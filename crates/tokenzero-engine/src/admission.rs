@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const ADMISSION_SCHEMA_V1: &str = "tokenzero.admission/v1";
+pub const ADMISSION_SCHEMA: &str = "tokenzero.admission/v1";
 
 /// Rough lexical token estimate for payload bytes (4 bytes/token). Used only
 /// for horizon-cost comparisons, never for billing, telemetry, or Q99 claims.
@@ -90,7 +90,7 @@ impl AdmissionEstimator {
     pub fn decide_threshold(&self, payload_bytes: usize) -> AdmissionDecision {
         let admit = payload_bytes > self.exact_ref_threshold_bytes;
         AdmissionDecision {
-            schema: ADMISSION_SCHEMA_V1,
+            schema: ADMISSION_SCHEMA,
             policy: AdmissionPolicy::ByteThreshold,
             admit_exact_ref: admit,
             reason: if admit {
@@ -132,7 +132,7 @@ impl AdmissionEstimator {
             (Some(p), Some(h)) => (p.min(1000), h),
             _ => {
                 return AdmissionDecision {
-                    schema: ADMISSION_SCHEMA_V1,
+                    schema: ADMISSION_SCHEMA,
                     policy: AdmissionPolicy::HorizonCost,
                     admit_exact_ref: false,
                     reason: AdmissionReason::EstimatesMissing,
@@ -158,7 +158,7 @@ impl AdmissionEstimator {
             }
         };
         AdmissionDecision {
-            schema: ADMISSION_SCHEMA_V1,
+            schema: ADMISSION_SCHEMA,
             policy: AdmissionPolicy::HorizonCost,
             admit_exact_ref: admit,
             reason,

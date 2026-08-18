@@ -8,15 +8,15 @@ fn engine() -> TokenZeroEngine {
 fn handshake(expected_revision: &str) -> Value {
     let cap = local_capability();
     json!({"kind":"handshake","request":{
-        "protocol_version":"zerostack.raw_worker.v2","root":"/fixture/repo","session_id":"session-1",
+        "protocol_version":"zerostack.raw_worker","root":"/fixture/repo","session_id":"session-1",
         "expected_engine":"tokenzero","expected_worker_revision":expected_revision,
         "expected_contract_digest":cap["semantic_contract_digest"],
         "expected_registry_digest":cap["operation_registry_digest"]
     }})
 }
 
-fn send(session: &mut RawWorkerV2Session, frame: Value) -> Value {
-    serde_json::from_slice(&execute_raw_worker_v2_frame(
+fn send(session: &mut RawWorkerSession, frame: Value) -> Value {
+    serde_json::from_slice(&execute_raw_worker_frame(
         &engine(),
         session,
         &serde_json::to_vec(&frame).unwrap(),
@@ -83,7 +83,7 @@ fn oversized_internal_request_id_cannot_panic_the_typed_fallback() {
 
 #[test]
 fn golden_handshake_reports_binding_limits_and_metadata_capabilities() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let response = send(&mut session, handshake(&rev));
     assert_eq!(response["kind"], "handshake_ack");
@@ -95,7 +95,7 @@ fn golden_handshake_reports_binding_limits_and_metadata_capabilities() {
 
 #[test]
 fn requested_worker_token_accounting_matches_domain_accounting_and_hub_abi() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -115,17 +115,17 @@ fn requested_worker_token_accounting_matches_domain_accounting_and_hub_abi() {
         }}),
     );
     assert_eq!(response["kind"], "result", "{response}");
-    let accounting: raw_worker_v2_protocol::WorkerTokenAccountingV1 =
+    let accounting: raw_worker_protocol::WorkerTokenAccounting =
         serde_json::from_value(response["worker_token_accounting"].clone()).unwrap();
-    zero_abi::validate_worker_token_accounting_v1(&accounting).unwrap();
+    zero_abi::validate_worker_token_accounting(&accounting).unwrap();
     assert_eq!(
         accounting.count_kind,
-        raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound
     );
     assert_eq!(accounting.tokenizer_id, "conservative:utf8-json-bytes-v1");
-    let timeline: raw_worker_v2_protocol::EngineStageTimelineV1 =
+    let timeline: raw_worker_protocol::EngineStageTimeline =
         serde_json::from_value(response["engine_timeline"].clone()).unwrap();
-    zero_abi::validate_engine_stage_timeline_v1(&timeline).unwrap();
+    zero_abi::validate_engine_stage_timeline(&timeline).unwrap();
     assert_eq!(timeline.spans[0].stage, "tokenzero.raw_worker_call");
     let domain = &response["result"]["value"]["accounting"];
     assert!(accounting.raw_tokens >= accounting.visible_tokens);
@@ -139,7 +139,7 @@ fn requested_worker_token_accounting_matches_domain_accounting_and_hub_abi() {
     assert_eq!(accounting.exact_ref_tokens, None);
     let encoded = serde_json::to_vec(&response).unwrap();
     let decoded =
-        zero_abi::decode_response_frame(&encoded, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES)
+        zero_abi::decode_response_frame(&encoded, raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES)
             .unwrap();
     assert!(matches!(
         decoded,
@@ -163,11 +163,11 @@ fn relative_read_and_edit_bind_to_call_root_not_process_cwd() {
         root: root.clone(),
         ..Default::default()
     });
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
-    let frame = |session: &mut RawWorkerV2Session, value: &Value| -> Value {
-        serde_json::from_slice(&execute_raw_worker_v2_frame(
+    let frame = |session: &mut RawWorkerSession, value: &Value| -> Value {
+        serde_json::from_slice(&execute_raw_worker_frame(
             &engine,
             session,
             &serde_json::to_vec(value).unwrap(),
@@ -177,7 +177,7 @@ fn relative_read_and_edit_bind_to_call_root_not_process_cwd() {
     let ack = frame(
         &mut session,
         &json!({"kind":"handshake","request":{
-            "protocol_version":"zerostack.raw_worker.v2",
+            "protocol_version":"zerostack.raw_worker",
             "root": root.to_string_lossy(), "session_id":"session-1",
             "expected_engine":"tokenzero","expected_worker_revision":rev,
             "expected_contract_digest":cap["semantic_contract_digest"],
@@ -238,7 +238,7 @@ fn relative_read_and_edit_bind_to_call_root_not_process_cwd() {
 
 #[test]
 fn unrequested_accounting_preserves_the_legacy_response_shape() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -257,7 +257,7 @@ fn unrequested_accounting_preserves_the_legacy_response_shape() {
 
 #[test]
 fn requested_timeline_is_preserved_on_typed_dispatch_errors() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -279,12 +279,12 @@ fn requested_timeline_is_preserved_on_typed_dispatch_errors() {
     assert_eq!(response["kind"], "error");
     assert_eq!(response["error"]["kind"], "unsupported_operation");
     assert!(response.get("worker_token_accounting").is_none());
-    let timeline: raw_worker_v2_protocol::EngineStageTimelineV1 =
+    let timeline: raw_worker_protocol::EngineStageTimeline =
         serde_json::from_value(response["engine_timeline"].clone()).unwrap();
-    zero_abi::validate_engine_stage_timeline_v1(&timeline).unwrap();
+    zero_abi::validate_engine_stage_timeline(&timeline).unwrap();
     zero_abi::decode_response_frame(
         &serde_json::to_vec(&response).unwrap(),
-        raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
+        raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES,
     )
     .unwrap();
 }
@@ -324,21 +324,21 @@ fn missing_or_inconsistent_domain_accounting_fails_loudly() {
     let upper = worker_token_accounting("read", &json!({"input":"é🙂"}), &unicode).unwrap();
     assert_eq!(
         upper.count_kind,
-        raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound
     );
     assert!(upper.raw_tokens >= upper.visible_tokens + 9);
     assert_eq!(upper.recovery_tokens, 9);
     assert_eq!(upper.exact_ref_tokens, None);
 
     let job = worker_token_accounting(
-        zero_abi::TOKEN_JOB_OPERATION_V1,
+        zero_abi::TOKEN_JOB_OPERATION,
         &json!({"id":"job-1"}),
         &json!({"id":"job-1","status":"exited"}),
     )
     .unwrap();
     assert_eq!(
         job.count_kind,
-        raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound
     );
     assert_eq!(job.cached_tokens, 0);
     assert_eq!(job.recovery_tokens, 0);
@@ -351,7 +351,7 @@ fn missing_or_inconsistent_domain_accounting_fails_loudly() {
     .unwrap();
     assert_eq!(
         launch.count_kind,
-        raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound
     );
     assert_eq!(launch.cached_tokens, 0);
     assert_eq!(launch.recovery_tokens, 0);
@@ -359,7 +359,7 @@ fn missing_or_inconsistent_domain_accounting_fails_loudly() {
 
 #[test]
 fn skew_and_pre_handshake_calls_are_rejected() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let response = send(&mut session, handshake("skewed"));
     assert_eq!(response["error"]["kind"], "worker_revision_changed");
     assert_eq!(response["error"]["retryable"], true);
@@ -372,7 +372,7 @@ fn skew_and_pre_handshake_calls_are_rejected() {
 
 #[test]
 fn handshake_rebind_after_revision_swap_is_survivable() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let first = send(&mut session, handshake(&rev));
     assert_eq!(first["kind"], "handshake_ack");
@@ -384,12 +384,12 @@ fn handshake_rebind_after_revision_swap_is_survivable() {
 
 #[test]
 fn rehandshake_with_foreign_session_stays_terminal() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     send(&mut session, handshake(&rev));
     let cap = local_capability();
     let foreign = json!({"kind":"handshake","request":{
-        "protocol_version":"zerostack.raw_worker.v2","root":"/fixture/repo","session_id":"session-2",
+        "protocol_version":"zerostack.raw_worker","root":"/fixture/repo","session_id":"session-2",
         "expected_engine":"tokenzero","expected_worker_revision":rev,
         "expected_contract_digest":cap["semantic_contract_digest"],
         "expected_registry_digest":cap["operation_registry_digest"]
@@ -401,7 +401,7 @@ fn rehandshake_with_foreign_session_stays_terminal() {
 
 #[test]
 fn stale_trace_revision_is_retryable_and_recoverable() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -430,8 +430,8 @@ fn stale_trace_revision_is_retryable_and_recoverable() {
 
 #[test]
 fn inbound_bound_is_enforced_before_json_parse() {
-    let mut session = RawWorkerV2Session::default();
-    let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+    let mut session = RawWorkerSession::default();
+    let response: Value = serde_json::from_slice(&execute_raw_worker_frame(
         &engine(),
         &mut session,
         &vec![b'x'; 1_048_577],
@@ -442,14 +442,14 @@ fn inbound_bound_is_enforced_before_json_parse() {
 
 #[test]
 fn oversized_frame_fails_closed_without_parsing_request_id() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let mut frame = serde_json::to_vec(&json!({
         "kind": "call",
         "request": {"request_id": "req-oversized", "op": "token.read"}
     }))
     .unwrap();
     frame.extend(std::iter::repeat_n(b' ', 1_048_600));
-    let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+    let response: Value = serde_json::from_slice(&execute_raw_worker_frame(
         &engine(),
         &mut session,
         &frame,
@@ -461,10 +461,10 @@ fn oversized_frame_fails_closed_without_parsing_request_id() {
 
 #[test]
 fn in_bound_typed_frame_error_round_trips_request_id() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let line = br#"{"kind":"call","request":{"request_id":"req-7"},"extra":}"#.to_vec();
     let response: Value =
-        serde_json::from_slice(&execute_raw_worker_v2_frame(&engine(), &mut session, &line))
+        serde_json::from_slice(&execute_raw_worker_frame(&engine(), &mut session, &line))
             .unwrap();
     assert_eq!(response["error"]["kind"], "invalid_frame");
     assert!(response.get("request_id").is_none());
@@ -472,10 +472,10 @@ fn in_bound_typed_frame_error_round_trips_request_id() {
 
 #[test]
 fn empty_and_malformed_frames_return_typed_invalid_frame() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     for line in [b"\n".to_vec(), b"{not json".to_vec()] {
         let response: Value =
-            serde_json::from_slice(&execute_raw_worker_v2_frame(&engine(), &mut session, &line))
+            serde_json::from_slice(&execute_raw_worker_frame(&engine(), &mut session, &line))
                 .unwrap();
         assert_eq!(response["error"]["kind"], "invalid_frame");
     }
@@ -488,16 +488,16 @@ fn bounded_reader_rejects_oversized_line_without_unbounded_growth() {
     oversized.extend_from_slice(b"{}\n");
     let mut reader = std::io::BufReader::new(std::io::Cursor::new(oversized));
     let first =
-        read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+        read_bounded_frame(&mut reader, raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
     assert!(matches!(first, BoundedFrame::TooLarge));
     let second =
-        read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+        read_bounded_frame(&mut reader, raw_worker_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
     assert!(matches!(second, BoundedFrame::Line(line) if line == b"{}\n"));
 }
 
 #[test]
 fn expired_deadline_preserves_typed_trace_and_cancel_truth() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -519,12 +519,12 @@ fn expired_deadline_preserves_typed_trace_and_cancel_truth() {
 
 #[test]
 fn cross_root_replay_against_bound_session_fails_closed() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     send(&mut session, handshake(&rev));
     let cap = local_capability();
     let replay = json!({"kind":"handshake","request":{
-        "protocol_version":"zerostack.raw_worker.v2","root":"/fixture/other","session_id":"session-1",
+        "protocol_version":"zerostack.raw_worker","root":"/fixture/other","session_id":"session-1",
         "expected_engine":"tokenzero","expected_worker_revision":rev,
         "expected_contract_digest":cap["semantic_contract_digest"],
         "expected_registry_digest":cap["operation_registry_digest"]
@@ -543,7 +543,7 @@ fn registry_engine_and_contract_mismatches_fail_closed_typed() {
         ("expected_engine", json!("fszero")),
         ("expected_contract_digest", json!("d".repeat(64))),
     ] {
-        let mut session = RawWorkerV2Session::default();
+        let mut session = RawWorkerSession::default();
         let mut frame = handshake(&rev);
         frame["request"][field] = bad;
         let response = send(&mut session, frame);
@@ -559,7 +559,7 @@ fn registry_engine_and_contract_mismatches_fail_closed_typed() {
 
 #[test]
 fn absent_optional_digest_pins_are_allowed_skew() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let mut frame = handshake(&rev);
     let request = frame["request"].as_object_mut().unwrap();
@@ -590,7 +590,7 @@ fn cancel_control_frame_stops_dispatched_shell_work() {
     crate::shell_hooks::install(crate::shell_hooks::ProcessHooks::with_note_child(
         v2_note_child,
     ));
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -674,7 +674,7 @@ fn cancel_control_frame_stops_dispatched_shell_work() {
 
 #[test]
 fn cancel_of_unknown_request_id_reports_false() {
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     send(&mut session, handshake(&rev));
     let ack = send(
@@ -687,7 +687,7 @@ fn cancel_of_unknown_request_id_reports_false() {
 #[test]
 fn deadline_reaches_dispatched_shell_work() {
     let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -714,7 +714,7 @@ fn deadline_reaches_dispatched_shell_work() {
 #[test]
 fn background_shell_and_job_use_the_shared_typed_private_path_free_boundary() {
     let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -757,7 +757,7 @@ fn background_shell_and_job_use_the_shared_typed_private_path_free_boundary() {
         &mut session,
         json!({"kind":"call","request":{
             "request_id":"req-job-poll",
-            "op":zero_abi::TOKEN_JOB_OPERATION_V1,
+            "op":zero_abi::TOKEN_JOB_OPERATION,
             "args":{"id":id,"waitMs":30_000,"since":0,"tailBytes":64},
             "trace":trace("req-job-poll")
         }}),
@@ -768,7 +768,7 @@ fn background_shell_and_job_use_the_shared_typed_private_path_free_boundary() {
         value.get("log").is_none(),
         "private log path leaked: {value}"
     );
-    let typed: zero_abi::TokenJobPollResultV1 = serde_json::from_value(value.clone()).unwrap();
+    let typed: zero_abi::TokenJobPollResult = serde_json::from_value(value.clone()).unwrap();
     typed.validate().unwrap();
     assert!(typed.tail.contains("tz://not-a-ref"), "{value}");
     assert_eq!(polled["result"]["metadata"]["ownership"]["refs"], json!([]));
@@ -777,7 +777,7 @@ fn background_shell_and_job_use_the_shared_typed_private_path_free_boundary() {
         &mut session,
         json!({"kind":"call","request":{
             "request_id":"req-job-unknown",
-            "op":zero_abi::TOKEN_JOB_OPERATION_V1,
+            "op":zero_abi::TOKEN_JOB_OPERATION,
             "args":{"id":id,"privateLog":"/private/session/job.log"},
             "trace":trace("req-job-unknown")
         }}),
@@ -799,7 +799,7 @@ fn raw_session_shutdown_terminates_a_background_process_group() {
     let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     crate::engine_shell::reset_background_job_termination_for_tests();
     let _reset = ResetBackgroundTermination;
-    let mut session = RawWorkerV2Session::default();
+    let mut session = RawWorkerSession::default();
     let rev = revision();
     let cap = local_capability();
     send(&mut session, handshake(&rev));
@@ -841,7 +841,7 @@ fn raw_session_shutdown_terminates_a_background_process_group() {
     );
     assert_eq!(shutdown["kind"], "shutdown_ack");
     let session = Mutex::new(session);
-    terminate_raw_worker_v2_session(&session);
+    terminate_raw_worker_session(&session);
     let gone = (0..20).any(|_| {
         let status = std::process::Command::new("kill")
             .args(["-0", "--", &pid.to_string()])
@@ -874,7 +874,7 @@ fn terminate_drops_session_before_child_teardown() {
         tokenzero_runtime::PROCESS_OWNER_SESSION,
         tokenzero_runtime::PROCESS_GENERATION,
     );
-    let mut inner = RawWorkerV2Session::default();
+    let mut inner = RawWorkerSession::default();
     let cancel = inner.register_cancel("req-teardown");
     *cancel.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(verified);
     let session = Arc::new(Mutex::new(inner));
@@ -884,7 +884,7 @@ fn terminate_drops_session_before_child_teardown() {
     });
     *CHILD_TEARDOWN_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
     let serving = Arc::clone(&session);
-    let worker = std::thread::spawn(move || terminate_raw_worker_v2_session(&serving));
+    let worker = std::thread::spawn(move || terminate_raw_worker_session(&serving));
     pause.entered.wait();
     let session_free = session.try_lock().is_ok();
     pause.release.wait();
@@ -915,13 +915,13 @@ fn oversized_result_value_is_rejected_with_typed_output_error() {
     };
     let engine = engine_from_options(&opts);
     let root = dir.path().display().to_string();
-    let mut session = RawWorkerV2Session::for_binding(&root, "s-oversize");
+    let mut session = RawWorkerSession::for_binding(&root, "s-oversize");
     let cap = local_capability();
-    let ack: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+    let ack: Value = serde_json::from_slice(&execute_raw_worker_frame(
         &engine,
         &mut session,
         &serde_json::to_vec(&json!({"kind":"handshake","request":{
-            "protocol_version":raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION,
+            "protocol_version":raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION,
             "root":root,
             "session_id":"s-oversize",
             "expected_engine":"tokenzero",
@@ -944,7 +944,7 @@ fn oversized_result_value_is_rejected_with_typed_output_error() {
         .as_str()
         .unwrap()
         .to_string();
-    let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+    let response: Value = serde_json::from_slice(&execute_raw_worker_frame(
         &engine,
         &mut session,
         &serde_json::to_vec(&json!({"kind":"call","request":{

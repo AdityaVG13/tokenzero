@@ -28,7 +28,7 @@ use zero_store::{Engine, ResolvedStore, StoreEnv, StoreMode};
 use tokenzero_core::ContentType;
 
 use crate::shared_cas::{SharedCas, SharedCasError};
-use crate::{RecoveryStore, ZeroRefError, ZeroRefFragment, ZeroRefV1Blob, parse_zeroref_v1_blob};
+use crate::{RecoveryStore, ZeroRefError, ZeroRefFragment, ZeroRefBlob, parse_zeroref_v1_blob};
 
 const DESCRIPTOR_SCHEMA_VERSION: &str = "tokenzero.recovery.capability.v1";
 const DESCRIPTOR_VERSION: &str = "1.0.0";
@@ -418,7 +418,7 @@ impl TokenZeroStore {
 
     fn expand_portable_full_hash(
         &mut self,
-        parsed: ZeroRefV1Blob,
+        parsed: ZeroRefBlob,
     ) -> Result<Vec<u8>, TokenZeroStoreError> {
         let cas = self
             .shared_cas
@@ -517,7 +517,7 @@ impl TokenZeroStore {
             "schema_version": DESCRIPTOR_SCHEMA_VERSION,
             "descriptor_version": DESCRIPTOR_VERSION,
             "engine": "tokenzero",
-            "zeroref_v1": {
+            "zeroref": {
                 "version": "v1",
                 "enabled": true,
                 "shared_cas": cas_attached,

@@ -193,7 +193,7 @@ fn surface_registration(engine: &TokenZeroEngine, surface: McpToolSurface) -> Su
             refs: Vec::new(),
             snapshot: None,
         },
-        telemetry_schema: TelemetrySchema::V1,
+        telemetry_schema: TelemetrySchema::Current,
         capabilities,
     };
     let mut registration = SurfaceRegistration::new(SurfaceKind::Mcp, "TokenZero", adapter);

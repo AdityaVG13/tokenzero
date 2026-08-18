@@ -1,6 +1,6 @@
 use tokenzero_core::count_tokens;
 use tokenzero_engine::{
-    CACHE_CROSSOVER_SCHEMA_V1, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
+    CACHE_CROSSOVER_SCHEMA, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
     CacheCrossoverInput, CacheCrossoverReason, CacheProvider, TOKEN_COST_PPM_SCALE,
     decide_cache_crossover,
 };
@@ -39,7 +39,7 @@ fn provider_table_uses_the_strict_ten_x_crossover_with_complete_work() {
             receipt.reason,
             CacheCrossoverReason::CompressionStrictlyBeatsCache
         );
-        assert_eq!(receipt.schema, CACHE_CROSSOVER_SCHEMA_V1);
+        assert_eq!(receipt.schema, CACHE_CROSSOVER_SCHEMA);
         assert_eq!(
             receipt.cached_total_token_cost_ppm,
             1_375 * u128::from(TOKEN_COST_PPM_SCALE)
@@ -167,7 +167,7 @@ fn repository_corpus_measurement_validates_the_compression_side() {
         "measured corpus must remain beyond the strict crossover"
     );
     let wire = serde_json::to_value(&receipt).unwrap();
-    assert_eq!(wire["schema"], CACHE_CROSSOVER_SCHEMA_V1);
+    assert_eq!(wire["schema"], CACHE_CROSSOVER_SCHEMA);
     assert_eq!(wire["policy_id"], candidate.policy_id);
 }
 

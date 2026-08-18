@@ -92,8 +92,8 @@ name = "passthrough_conformance"
 path = "../../tests/cli/passthrough_conformance.rs"
 
 [[test]]
-name = "raw_worker_v2_packaged_conformance"
-path = "../../tests/cli/raw_worker_v2_packaged_conformance.rs"
+name = "raw_worker_packaged_conformance"
+path = "../../tests/cli/raw_worker_packaged_conformance.rs"
 
 [[test]]
 name = "store_root_precedence"

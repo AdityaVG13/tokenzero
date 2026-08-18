@@ -119,12 +119,12 @@ fn capability_descriptor_is_valid_and_matches_state() {
     assert_eq!(cap["schema_version"], DESCRIPTOR_SCHEMA_VERSION);
     assert_eq!(cap["descriptor_version"], DESCRIPTOR_VERSION);
     assert_eq!(cap["engine"], "tokenzero");
-    assert_eq!(cap["zeroref_v1"]["version"], "v1");
-    assert!(cap["zeroref_v1"]["enabled"].as_bool().unwrap());
-    assert!(!cap["zeroref_v1"]["shared_cas"].as_bool().unwrap());
-    assert!(!cap["zeroref_v1"]["shared_cas_writable"].as_bool().unwrap());
-    assert!(cap["zeroref_v1"]["blob_ref_expand"].as_bool().unwrap());
-    let schemes = cap["zeroref_v1"]["ref_schemes"].as_array().unwrap().clone();
+    assert_eq!(cap["zeroref"]["version"], "v1");
+    assert!(cap["zeroref"]["enabled"].as_bool().unwrap());
+    assert!(!cap["zeroref"]["shared_cas"].as_bool().unwrap());
+    assert!(!cap["zeroref"]["shared_cas_writable"].as_bool().unwrap());
+    assert!(cap["zeroref"]["blob_ref_expand"].as_bool().unwrap());
+    let schemes = cap["zeroref"]["ref_schemes"].as_array().unwrap().clone();
     assert!(schemes.contains(&Value::String("tz://".to_string())));
     assert!(schemes.contains(&Value::String("fz://".to_string())));
     assert!(schemes.contains(&Value::String("gz://".to_string())));
@@ -424,13 +424,13 @@ fn ambient_project_cas_is_not_advertised_as_shared() {
         "ambient CAS remains internally usable"
     );
     let cap = store.capability_descriptor();
-    assert_eq!(cap["zeroref_v1"]["shared_cas"], false);
-    assert_eq!(cap["zeroref_v1"]["shared_cas_writable"], false);
+    assert_eq!(cap["zeroref"]["shared_cas"], false);
+    assert_eq!(cap["zeroref"]["shared_cas_writable"], false);
 
     let explicit = TokenZeroStore::in_memory();
     let cap = explicit.capability_descriptor();
-    assert_eq!(cap["zeroref_v1"]["shared_cas"], true);
-    assert_eq!(cap["zeroref_v1"]["shared_cas_writable"], true);
+    assert_eq!(cap["zeroref"]["shared_cas"], true);
+    assert_eq!(cap["zeroref"]["shared_cas_writable"], true);
 }
 
 #[test]
@@ -650,8 +650,8 @@ fn cas_writable_false_when_root_not_writable() {
         Err(TokenZeroStoreError::PublishPermission)
     ));
     let cap = store.capability_descriptor();
-    assert_eq!(cap["zeroref_v1"]["shared_cas"], true);
-    assert_eq!(cap["zeroref_v1"]["shared_cas_writable"], false);
+    assert_eq!(cap["zeroref"]["shared_cas"], true);
+    assert_eq!(cap["zeroref"]["shared_cas_writable"], false);
     let report = store.root_report();
     assert_eq!(report["store_health"]["cas_attached"], true);
     assert_eq!(report["store_health"]["cas_writable"], false);

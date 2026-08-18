@@ -536,7 +536,7 @@ impl TokenZeroEngine {
             .strip_prefix("tz://blob/")
             .filter(|digest| digest.len() == 64)
             .ok_or_else(|| ModelArtifactError::InvalidBlobRef(stored.blob_ref.clone()))?;
-        let source_root = zero_abi::DigestV1::from_hex(blob_hex)
+        let source_root = zero_abi::Sha256Digest::from_hex(blob_hex)
             .map_err(|_| ModelArtifactError::InvalidBlobRef(stored.blob_ref.clone()))?;
         let causal_key = CapsuleCausalKey::new(format!(
             "{}:{}..{}",

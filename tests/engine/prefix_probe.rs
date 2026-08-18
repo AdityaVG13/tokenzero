@@ -38,7 +38,7 @@ fn gauntlet_subject_is_not_spec_oracle() {
 }
 
 #[test]
-fn fixture_schema_is_prefix_probe_v1() {
+fn fixture_schema_is_prefix_probe() {
     assert_eq!(fixture().schema, "tokenzero.prefix-probe.v1");
     assert_eq!(fixture().arms.len(), 3);
 }

@@ -135,7 +135,7 @@ fn control_handshake_returns_capability() {
     let resp = execute_raw_worker_frame(&engine, &req);
     assert!(resp.ok);
     let result = resp.result.expect("handshake result");
-    assert_eq!(result["schema"], "zerostack.surface.v1");
+    assert_eq!(result["schema"], "zerostack.surface");
     assert_eq!(result["surface"], "raw_worker");
 }
 

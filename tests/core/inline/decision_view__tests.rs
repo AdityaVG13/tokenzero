@@ -70,8 +70,8 @@ fn tokenizer_identity() -> ExactTokenizerIdentity {
 
 fn identity(tokenizer: &ExactTokenizerIdentity) -> DecisionViewIdentity {
     DecisionViewIdentity::new(
-        DigestV1::from_bytes([1; 32]),
-        DigestV1::from_bytes([2; 32]),
+        Sha256Digest::from_bytes([1; 32]),
+        Sha256Digest::from_bytes([2; 32]),
         tokenizer,
         digest(b"typed effect schema"),
     )
@@ -106,8 +106,8 @@ fn decision_view_is_deterministic_and_preserves_anchors_and_routes() {
     let stable_capsule_map = byte_map(&tokenizer, b"project capsule");
     let empty_tail = byte_map(&tokenizer, b"");
     let capsule = ModelCapsule::new(
-        DigestV1::from_bytes([1; 32]),
-        DigestV1::from_bytes([2; 32]),
+        Sha256Digest::from_bytes([1; 32]),
+        Sha256Digest::from_bytes([2; 32]),
         &tokenizer,
         vec![anchor.clone()],
         std::slice::from_ref(&page),
@@ -173,7 +173,7 @@ fn prefix_comparison_separates_identity_changes_from_byte_changes() {
     let original =
         DecisionView::render(&adapter, identity(&tokenizer), sections(b"stable")).unwrap();
     let mut changed_identity = identity(&tokenizer);
-    changed_identity.model_profile_digest = DigestV1::from_bytes([9; 32]);
+    changed_identity.model_profile_digest = Sha256Digest::from_bytes([9; 32]);
     let identity_changed =
         DecisionView::render(&adapter, changed_identity, sections(b"stable")).unwrap();
     let bytes_changed =
@@ -262,8 +262,8 @@ fn capsule_identity_and_recovery_ref_mismatches_fail_loudly() {
         identity: tokenizer.clone(),
     };
     let capsule = ModelCapsule::new(
-        DigestV1::from_bytes([9; 32]),
-        DigestV1::from_bytes([2; 32]),
+        Sha256Digest::from_bytes([9; 32]),
+        Sha256Digest::from_bytes([2; 32]),
         &tokenizer,
         Vec::new(),
         &[],
@@ -280,7 +280,7 @@ fn capsule_identity_and_recovery_ref_mismatches_fail_loudly() {
     let schema = byte_map(&tokenizer, b"typed effect schema");
     let schema_section = DecisionViewSection::stable_typed_effect_schema(&schema).unwrap();
     let mut wrong_schema_identity = identity(&tokenizer);
-    wrong_schema_identity.tool_schema_digest = DigestV1::from_bytes([7; 32]);
+    wrong_schema_identity.tool_schema_digest = Sha256Digest::from_bytes([7; 32]);
     assert_eq!(
         DecisionView::render(&adapter, wrong_schema_identity, vec![schema_section]),
         Err(DecisionViewError::ToolSchemaDigestMismatch)
@@ -306,7 +306,7 @@ fn capsule_identity_and_recovery_ref_mismatches_fail_loudly() {
 #[test]
 fn renderer_contract_digest_is_stable_and_nonzero() {
     let digest = decision_view_renderer_contract_digest();
-    assert_ne!(digest, DigestV1::ZERO);
+    assert_ne!(digest, Sha256Digest::ZERO);
     assert_eq!(digest, decision_view_renderer_contract_digest());
     let _ = TokenPiece::new(1, b"used-by-public-adapter".to_vec());
 }

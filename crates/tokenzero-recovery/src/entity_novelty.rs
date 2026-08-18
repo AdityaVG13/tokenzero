@@ -1,4 +1,4 @@
-//! Shared entity novelty (`zerostack.entity-novelty.v1`).
+//! Shared entity novelty (`zerostack.entity-novelty`).
 //!
 //! Contract owner: ZeroStack. GraphZero owns `EntityId` minting;
 //! this module only stores/loads 64-hex digests and always displays them as
@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use tokenzero_core::sha256_hex;
 
 /// Frozen schema id.
-pub const ENTITY_NOVELTY_SCHEMA_VERSION: &str = "zerostack.entity-novelty.v1";
+pub const ENTITY_NOVELTY_SCHEMA_VERSION: &str = "zerostack.entity-novelty";
 
 /// Record type constant.
 pub const ENTITY_NOVELTY_RECORD_TYPE: &str = "entity-novelty";

@@ -131,8 +131,8 @@ fn codemode_limits_are_call_ceilings_not_decision_view_headroom_plan() {
         "advertised limits schema must stay the call-limit envelope"
     );
     assert_ne!(
-        limits["schema"], "DecisionViewHeadroomPlanV1",
-        "call-limit headroom must not be advertised as DecisionViewHeadroomPlanV1"
+        limits["schema"], "DecisionViewHeadroomPlan",
+        "call-limit headroom must not be advertised as DecisionViewHeadroomPlan"
     );
     let haystack = limits.to_string().to_lowercase();
     for needle in [
@@ -149,7 +149,7 @@ fn codemode_limits_are_call_ceilings_not_decision_view_headroom_plan() {
     ] {
         assert!(
             !haystack.contains(needle),
-            "CodeModeLimits JSON advertises {needle:?} as DecisionViewHeadroomPlanV1: {limits}"
+            "CodeModeLimits JSON advertises {needle:?} as DecisionViewHeadroomPlan: {limits}"
         );
     }
     for field in [
@@ -166,7 +166,7 @@ fn codemode_limits_are_call_ceilings_not_decision_view_headroom_plan() {
     let catalog_text = catalog.to_string().to_lowercase();
     assert!(
         !catalog_text.contains("decisionviewheadroomplanv1"),
-        "CodeMode catalog advertises DecisionViewHeadroomPlanV1: {catalog}"
+        "CodeMode catalog advertises DecisionViewHeadroomPlan: {catalog}"
     );
     let limits_method = describe_method("codemode.limits");
     let description = limits_method["description"].as_str().unwrap_or_default();
@@ -176,7 +176,7 @@ fn codemode_limits_are_call_ceilings_not_decision_view_headroom_plan() {
     );
     assert!(
         !description.to_lowercase().contains("decisionviewheadroom"),
-        "codemode.limits description advertises DecisionViewHeadroomPlanV1: {description}"
+        "codemode.limits description advertises DecisionViewHeadroomPlan: {description}"
     );
 }
 

@@ -2,7 +2,7 @@
   {
     "kind": "handshake",
     "request": {
-      "protocol_version": "zerostack.raw_worker.v2",
+      "protocol_version": "zerostack.raw_worker",
       "root": "/fixture/repo",
       "session_id": "session-1",
       "expected_engine": "fszero",

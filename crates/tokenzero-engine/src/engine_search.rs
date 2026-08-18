@@ -325,7 +325,7 @@ impl TokenZeroEngine {
             "truncated_by_results": stats.truncated_by_results,
             "truncated_by_visit": stats.truncated_by_visit,
             "search_backend": backend,
-            "output_strategy": if grouped { "grouped_by_file" } else { "hit_target_v1" },
+            "output_strategy": if grouped { "grouped_by_file" } else { "hit_target" },
             "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
             "degraded": storage_error.is_some(),
             "storage_error": storage_error,
@@ -550,7 +550,7 @@ impl TokenZeroEngine {
         let compact_tokens = count_tokens(compact) as u64;
         if flat_tokens == 0 {
             return CacheCrossoverReceipt {
-                schema: CACHE_CROSSOVER_SCHEMA_V1,
+                schema: CACHE_CROSSOVER_SCHEMA,
                 provider: CacheProvider::Anthropic,
                 policy_id: EMISSION_CROSSOVER_POLICY_ID.to_owned(),
                 token_unit_id: EMISSION_CROSSOVER_TOKEN_UNIT_ID.to_owned(),
