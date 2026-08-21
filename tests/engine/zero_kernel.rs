@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_kernel::ZeroTokenEngine;
 use zero_abi::{
-    CancellationProbe, EngineCallContext, EngineInvocation, ExpandOptions, KernelBudget,
-    ProjectionRequest, TokenEngine,
+    CancellationProbe, CompressionRequest, EngineCallContext, EngineInvocation, ExpandOptions,
+    KernelBudget, ProjectionRequest, TokenEngine,
 };
 
 struct NeverCancel;
@@ -102,4 +102,59 @@ fn oversized_projection_is_bounded_and_exactly_expandable() {
             .unwrap(),
         b"line-1\n"
     );
+}
+#[test]
+fn compress_repetitive_input_yields_bounded_digest_and_honest_accounting() {
+    let store = tempdir().unwrap();
+    let engine = ZeroTokenEngine::open(store.path(), Some("gpt-4o".into()));
+    let call = invocation(store.path());
+    // 50x identical lines ~2300 bytes, 400 billed tokens in the papercut.
+    // Any small max_tokens must force a bounded visible digest with honest
+    // visible < billed accounting; the exact handle must still recover.
+    let line = "the quick brown fox jumps over the lazy dog -- repeated line\n";
+    let source = line.repeat(50);
+    assert!(
+        source.len() > 2000,
+        "fixture must be oversized: {}",
+        source.len()
+    );
+    let result = engine
+        .compress(
+            &call,
+            CompressionRequest {
+                bytes: source.as_bytes().to_vec(),
+                max_tokens: 100,
+                mode: String::new(),
+                label: None,
+                media_type: "text/plain".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        result.visible.len() < source.len(),
+        "visible must be bounded digest: visible {} vs source {}",
+        result.visible.len(),
+        source.len()
+    );
+    assert_ne!(result.visible.trim_end(), source.trim_end());
+    assert!(
+        result.accounting.visible < result.accounting.billed,
+        "telemetry honesty: visible {} must be < billed {} (tokenizer {})",
+        result.accounting.visible,
+        result.accounting.billed,
+        result.accounting.tokenizer
+    );
+    assert!(
+        result.visible.contains("omitted")
+            || result.visible.contains("repeated")
+            || result.visible.contains("exact ref")
+            || result.visible.contains(result.exact.as_str()),
+        "digest must carry omitted-span or recovery marker: {}",
+        result.visible
+    );
+    // Exact handle preserves full recovery.
+    let expanded = engine
+        .expand(&call, &result.exact, ExpandOptions::default())
+        .unwrap();
+    assert_eq!(expanded, source.as_bytes());
 }
