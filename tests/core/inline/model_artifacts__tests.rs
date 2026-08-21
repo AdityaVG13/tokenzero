@@ -199,7 +199,10 @@ fn capsule_digest_is_canonical_and_provider_locked() {
     // The core constructor forms a content-addressed causal key and a
     // receipt binding the payload: identical inputs, identical receipts.
     let receipt = one.formation_receipt();
-    assert_eq!(receipt.constructor_identity, "tokenzero-core.model-capsule.v1");
+    assert_eq!(
+        receipt.constructor_identity,
+        "tokenzero-core.model-capsule.v1"
+    );
     assert_eq!(receipt.epoch, 0);
     assert_eq!(
         receipt.payload_root,
@@ -207,7 +210,10 @@ fn capsule_digest_is_canonical_and_provider_locked() {
     );
     assert!(receipt.verify_payload(ModelCapsule::payload_digest(one.render().as_slice())));
     assert_eq!(one.causal_key(), reordered.causal_key());
-    assert_eq!(one.causal_key().as_str(), format!("tz://blob/{}", one.source_root_digest().to_hex()));
+    assert_eq!(
+        one.causal_key().as_str(),
+        format!("tz://blob/{}", one.source_root_digest().to_hex())
+    );
 }
 
 #[test]
@@ -309,9 +315,11 @@ fn formed_capsule_receipt_must_bind_payload_and_slots_reject_rewrites() {
     };
 
     let alpha = form(&key, b"alpha", blob_a.clone());
-    assert!(alpha
-        .formation_receipt()
-        .verify_payload(ModelCapsule::payload_digest(alpha.render().as_slice())));
+    assert!(
+        alpha
+            .formation_receipt()
+            .verify_payload(ModelCapsule::payload_digest(alpha.render().as_slice()))
+    );
 
     // A relabeled payload (receipt binds beta, capsule carries alpha) fails
     // loud at formation: append-never-rewrite starts at construction.

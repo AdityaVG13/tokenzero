@@ -528,9 +528,7 @@ impl TokenZeroEngine {
             summary.note_diff(telemetry, 0);
         }
         if self.config.session_dedup {
-            if let Some(record) =
-                self.pending_expand_record(key, params, &target.content, store)
-            {
+            if let Some(record) = self.pending_expand_record(key, params, &target.content, store) {
                 pending.push(record);
             }
         }

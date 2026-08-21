@@ -318,8 +318,7 @@ fn v6_metadata_round_trips_is_digest_covered_and_unknown_never_upgrades() {
         identity: tokenizer.clone(),
     };
     let sections = vec![
-        DecisionViewSection::stable_system_tool_contract(&byte_map(&tokenizer, b"stable"))
-            .unwrap(),
+        DecisionViewSection::stable_system_tool_contract(&byte_map(&tokenizer, b"stable")).unwrap(),
         DecisionViewSection::volatile_user_task(&byte_map(&tokenizer, b"task")).unwrap(),
     ];
     let choice_a = CandidateChoice::new("retry", "retry the last operation").unwrap();
@@ -345,20 +344,19 @@ fn v6_metadata_round_trips_is_digest_covered_and_unknown_never_upgrades() {
         metadata_a.clone(),
     )
     .unwrap();
-    let view_b = DecisionView::render_with_metadata(
-        &adapter,
-        identity(&tokenizer),
-        sections,
-        metadata_b,
-    )
-    .unwrap();
+    let view_b =
+        DecisionView::render_with_metadata(&adapter, identity(&tokenizer), sections, metadata_b)
+            .unwrap();
 
     // Metadata is digest-covered: changing candidate_choices changes the view
     // digest while leaving the rendered framing bytes untouched (and the
     // stable-prefix geometry unchanged -- metadata is view-level, not prefix).
     assert_ne!(view_a.digest(), view_b.digest());
     assert_eq!(view_a.rendered(), view_b.rendered());
-    assert_eq!(view_a.stable_prefix().digest(), view_b.stable_prefix().digest());
+    assert_eq!(
+        view_a.stable_prefix().digest(),
+        view_b.stable_prefix().digest()
+    );
 
     // All new fields round-trip through serde, and old-shaped JSON still
     // deserializes with serde defaults.
@@ -382,7 +380,10 @@ fn v6_metadata_round_trips_is_digest_covered_and_unknown_never_upgrades() {
     assert!(view_json.contains("\"baseline_escape\":true"));
 
     // Unknown is terminal: it can never be constructed as upgraded.
-    assert_eq!(metadata_a.completeness_grade(), CompletenessGrade::BoundedComplete);
+    assert_eq!(
+        metadata_a.completeness_grade(),
+        CompletenessGrade::BoundedComplete
+    );
     assert!(metadata_a.baseline_escape());
     assert_eq!(metadata_a.candidate_choices().len(), 1);
     assert_eq!(metadata_a.supported_decisions().len(), 2);
@@ -399,7 +400,10 @@ fn v6_metadata_round_trips_is_digest_covered_and_unknown_never_upgrades() {
         CompletenessGrade::Observed
     );
     assert_eq!(CompletenessGrade::default(), CompletenessGrade::Unknown);
-    assert_eq!(DecisionViewMetadata::default().completeness_grade(), CompletenessGrade::Unknown);
+    assert_eq!(
+        DecisionViewMetadata::default().completeness_grade(),
+        CompletenessGrade::Unknown
+    );
     assert!(matches!(
         CandidateChoice::new("", "empty id"),
         Err(DecisionViewError::EmptyChoiceId)
@@ -525,7 +529,10 @@ fn rendering_is_byte_identical_across_seeded_permutations_of_commutative_run() {
     let mut previous = 0;
     for payload in order {
         let position = position_of(rendered, payload).expect("commutative payload rendered");
-        assert!(position > previous, "{payload:?} not after the previous entry");
+        assert!(
+            position > previous,
+            "{payload:?} not after the previous entry"
+        );
         previous = position;
     }
     // Noncommutative barriers keep their caller positions: first and last.
@@ -594,7 +601,10 @@ fn all_permutations_of_four_commutative_entries_render_identically() {
     }
     let semantic_first = position_of(rendered, b"semantic-first").unwrap();
     let semantic_second = position_of(rendered, b"semantic-second").unwrap();
-    assert!(semantic_first > previous, "semantic content follows the run");
+    assert!(
+        semantic_first > previous,
+        "semantic content follows the run"
+    );
     assert!(
         semantic_first < semantic_second,
         "noncommutative content keeps caller order"
@@ -621,16 +631,17 @@ fn survival_score_participates_in_digest_and_is_validated() {
     // rendered bytes identical, digest must differ (score is digest-covered).
     let sections_high = vec![commutative(b"alpha", 9_000), commutative(b"beta", 8_000)];
     let sections_low = vec![commutative(b"alpha", 7_000), commutative(b"beta", 6_000)];
-    let view_high =
-        DecisionView::render(&adapter, identity(&tokenizer), sections_high).unwrap();
+    let view_high = DecisionView::render(&adapter, identity(&tokenizer), sections_high).unwrap();
     let view_low = DecisionView::render(&adapter, identity(&tokenizer), sections_low).unwrap();
     assert_eq!(view_high.rendered(), view_low.rendered());
     assert_ne!(view_high.digest(), view_low.digest());
 
     // Accessor and basis-point validation.
-    assert_eq!(commutative(b"alpha", 9_000).survival_score_bps(), Some(9_000));
-    let plain = DecisionViewSection::volatile_user_task(&byte_map(&tokenizer, b"plain"))
-        .unwrap();
+    assert_eq!(
+        commutative(b"alpha", 9_000).survival_score_bps(),
+        Some(9_000)
+    );
+    let plain = DecisionViewSection::volatile_user_task(&byte_map(&tokenizer, b"plain")).unwrap();
     assert_eq!(plain.survival_score_bps(), None);
     assert!(matches!(
         plain.clone().with_survival_score_bps(10_001),
@@ -644,20 +655,16 @@ fn survival_score_participates_in_digest_and_is_validated() {
     // Score-descending applies within the stable block too, and the
     // stable-first invariant survives scores: stable commutative content
     // after volatile content is still rejected.
-    let stable_low = DecisionViewSection::stable_system_tool_contract(&byte_map(
-        &tokenizer,
-        b"stable-low",
-    ))
-    .unwrap()
-    .with_survival_score_bps(3_000)
-    .unwrap();
-    let stable_high = DecisionViewSection::stable_system_tool_contract(&byte_map(
-        &tokenizer,
-        b"stable-high",
-    ))
-    .unwrap()
-    .with_survival_score_bps(8_000)
-    .unwrap();
+    let stable_low =
+        DecisionViewSection::stable_system_tool_contract(&byte_map(&tokenizer, b"stable-low"))
+            .unwrap()
+            .with_survival_score_bps(3_000)
+            .unwrap();
+    let stable_high =
+        DecisionViewSection::stable_system_tool_contract(&byte_map(&tokenizer, b"stable-high"))
+            .unwrap()
+            .with_survival_score_bps(8_000)
+            .unwrap();
     let tail = DecisionViewSection::volatile_user_task(&byte_map(&tokenizer, b"tail")).unwrap();
     let view = DecisionView::render(
         &adapter,

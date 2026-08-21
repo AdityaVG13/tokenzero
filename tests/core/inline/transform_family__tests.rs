@@ -4,8 +4,8 @@
 //! (or documented no-op), and asserts a named invariant. A planted mutation that
 //! violates the invariant is asserted to fail so the property stays regression-
 //! sensitive.
-use proptest::prelude::*;
 use super::*;
+use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Predicate — shell_family classification
@@ -199,10 +199,8 @@ fn json_object_strategy() -> impl Strategy<Value = String> {
 
 fn json_array_strategy() -> impl Strategy<Value = String> {
     prop::collection::vec("[a-z0-9 ]{1,16}", 2..10usize).prop_map(|items| {
-        let mut values: Vec<serde_json::Value> = items
-            .into_iter()
-            .map(serde_json::Value::String)
-            .collect();
+        let mut values: Vec<serde_json::Value> =
+            items.into_iter().map(serde_json::Value::String).collect();
         values.push(serde_json::Value::String("pad ".repeat(40)));
         serde_json::Value::Array(values).to_string()
     })
@@ -213,8 +211,7 @@ fn structural_budget_strategy() -> impl Strategy<Value = usize> {
 }
 
 fn is_documented_structural_sentinel(out: &str) -> bool {
-    out == VISIBLE_BUDGET_LOSSY_DECLARATION
-        || out.starts_with(VISIBLE_BUDGET_LOSSY_DECLARATION)
+    out == VISIBLE_BUDGET_LOSSY_DECLARATION || out.starts_with(VISIBLE_BUDGET_LOSSY_DECLARATION)
 }
 
 /// Inverse for Structural: parse JSON (or accept the documented plain sentinel).

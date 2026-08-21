@@ -15,7 +15,7 @@
 //! when the flag is on, so release baselines stay free of extra frames.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Env flag: set to `1` / `true` / `yes` / `on` to enable structured profile events.

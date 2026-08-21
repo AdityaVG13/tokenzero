@@ -466,7 +466,10 @@ fn exact_recovery_scheme(reference: &str) -> bool {
         .split_once('#')
         .map_or(reference, |(base, _)| base);
     // Recovery expand treats fz://blob and gz://blob as same-store aliases of tz://.
-    base.starts_with("tz://") || base.starts_with("fz://blob/") || base.starts_with("gz://blob/")
+    base.starts_with("z://blob/")
+        || base.starts_with("tz://")
+        || base.starts_with("fz://blob/")
+        || base.starts_with("gz://blob/")
 }
 
 fn exact_ref_has_selector(reference: &str) -> bool {
@@ -1882,8 +1885,8 @@ mod capsule_omission_exact_ref;
 mod transform_family_tests;
 
 #[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-core/lib_secret_mask_security_tests.rs"]
-mod secret_mask_security_tests;
-#[cfg(test)]
 #[path = "../../../tests/unit/tokenzero-core/lib_overflow_edge_tests.rs"]
 mod overflow_edge_tests;
+#[cfg(test)]
+#[path = "../../../tests/unit/tokenzero-core/lib_secret_mask_security_tests.rs"]
+mod secret_mask_security_tests;

@@ -210,8 +210,7 @@ fn malformed_or_vacuous_codings_fail_loudly() {
         Err(OutputNoveltyError::EmptyNovelField(_))
     ));
     let duplicate = vec![
-        OutputNoveltyField::new("body", OutputNoveltyFieldRole::Referenced, b"a".to_vec())
-            .unwrap(),
+        OutputNoveltyField::new("body", OutputNoveltyFieldRole::Referenced, b"a".to_vec()).unwrap(),
         OutputNoveltyField::new("body", OutputNoveltyFieldRole::Novel, b"b".to_vec()).unwrap(),
     ];
     assert!(matches!(

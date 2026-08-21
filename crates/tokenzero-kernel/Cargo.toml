@@ -1,0 +1,21 @@
+[package]
+name = "tokenzero-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed TokenZero TokenEngine implementation for ZeroKernel"
+autotests = false
+publish = false
+
+[dependencies]
+tiktoken-rs.workspace = true
+tokenzero-core = { path = "../tokenzero-core" }
+zero-abi.workspace = true
+zero-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "zero_kernel"
+path = "../../tests/engine/zero_kernel.rs"

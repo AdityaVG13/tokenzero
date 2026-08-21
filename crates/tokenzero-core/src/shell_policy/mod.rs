@@ -1,6 +1,5 @@
 use crate::render::domain::{
-    is_expected_false_exit, is_repo_inventory_command, is_search_no_match,
-    requested_output_lines,
+    is_expected_false_exit, is_repo_inventory_command, is_search_no_match, requested_output_lines,
 };
 use crate::shell_family::shell_family_with_combined;
 use crate::shell_parse::{

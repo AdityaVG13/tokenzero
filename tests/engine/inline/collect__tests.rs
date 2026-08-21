@@ -465,7 +465,11 @@ fn transform_family_literal_collect_search_preserves_needle_bytes() {
         matches.iter().any(|m| m.text.contains(needle)),
         "collect_search (tz_find backend) must keep exact needle bytes"
     );
-    assert!(matches.iter().all(|m| literal_substring_hit(&m.text, needle)));
+    assert!(
+        matches
+            .iter()
+            .all(|m| literal_substring_hit(&m.text, needle))
+    );
 }
 
 #[test]

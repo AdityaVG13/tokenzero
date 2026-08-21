@@ -10,7 +10,7 @@ use crate::decision_view::{DecisionView, DecisionViewIdentity};
 use serde::Serialize;
 use std::{error::Error, fmt};
 use zero_abi::{
-    Sha256Digest, NativeStatePolicy, ReasoningContractError, ReasoningContract, sha256,
+    NativeStatePolicy, ReasoningContract, ReasoningContractError, Sha256Digest, sha256,
 };
 
 pub const MAX_OPAQUE_REASONING_STATE_BYTES: usize = 16 * 1_048_576;
@@ -867,18 +867,16 @@ impl ModelStateContinuationAssessment {
                 ) => ModelStateContinuationClass::Unavailable {
                     reason: ModelStateUnavailableReason::ProviderUnavailable,
                 },
-                (
-                    ReasoningContinuationStatus::Expired,
-                    ModelStateContinuationEvidence::None,
-                ) => ModelStateContinuationClass::Unavailable {
-                    reason: ModelStateUnavailableReason::StateExpired,
-                },
-                (
-                    ReasoningContinuationStatus::Rejected,
-                    ModelStateContinuationEvidence::None,
-                ) => ModelStateContinuationClass::Unavailable {
-                    reason: ModelStateUnavailableReason::StateRejected,
-                },
+                (ReasoningContinuationStatus::Expired, ModelStateContinuationEvidence::None) => {
+                    ModelStateContinuationClass::Unavailable {
+                        reason: ModelStateUnavailableReason::StateExpired,
+                    }
+                }
+                (ReasoningContinuationStatus::Rejected, ModelStateContinuationEvidence::None) => {
+                    ModelStateContinuationClass::Unavailable {
+                        reason: ModelStateUnavailableReason::StateRejected,
+                    }
+                }
                 (
                     ReasoningContinuationStatus::IdentityMismatch,
                     ModelStateContinuationEvidence::None,
@@ -921,7 +919,9 @@ impl ModelStateContinuationAssessment {
         }
     }
 
-    pub const fn empirical_evidence(&self) -> Option<(Sha256Digest, Sha256Digest, Sha256Digest, Option<u64>)> {
+    pub const fn empirical_evidence(
+        &self,
+    ) -> Option<(Sha256Digest, Sha256Digest, Sha256Digest, Option<u64>)> {
         match self.class {
             ModelStateContinuationClass::Empirical {
                 frozen_distribution_digest,
@@ -1042,10 +1042,7 @@ fn validate_continuation_evidence_for_state(
     }
     match (state_reference.status(), evidence) {
         (ReasoningContinuationStatus::Exact, ModelStateContinuationEvidence::None)
-        | (
-            ReasoningContinuationStatus::ScopedCertificate,
-            ModelStateContinuationEvidence::None,
-        )
+        | (ReasoningContinuationStatus::ScopedCertificate, ModelStateContinuationEvidence::None)
         | (ReasoningContinuationStatus::Approximate, ModelStateContinuationEvidence::None)
         | (
             ReasoningContinuationStatus::Approximate,

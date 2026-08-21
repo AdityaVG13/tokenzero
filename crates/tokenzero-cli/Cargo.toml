@@ -13,20 +13,15 @@ rust-version.workspace = true
 autotests = false
 autobins = false
 
-# Classic MCP remains an explicit compatibility feature. Aggregate CodeMode
-# execution belongs to ZeroStack; this CLI embeds no planner or JavaScript host.
+# The CLI is operator-only; model execution belongs to ZeroKernel.
 [features]
 default = []
-surface-mcp = ["dep:tokenzero-mcp-compat", "tokenzero-mcp-compat/surface-mcp", "tokenzero-install/surface-mcp"]
+surface-mcp = []
 
 [[bin]]
 name = "tokenzero"
 path = "src/main.rs"
 
-[[bin]]
-name = "tokenzero-mcp"
-path = "src/bin/tokenzero_mcp.rs"
-required-features = ["surface-mcp"]
 
 [dependencies]
 anyhow.workspace = true
@@ -37,7 +32,6 @@ tempfile.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
 tokenzero-install = { path = "../tokenzero-install", version = "1.0.2", default-features = false }
-tokenzero-mcp-compat = { path = "../tokenzero-mcp-compat", version = "1.0.2", default-features = false, optional = true }
 tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
 tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
 tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }

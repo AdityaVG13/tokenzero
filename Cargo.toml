@@ -5,9 +5,8 @@ members = [
     "crates/tokenzero-recovery",
     "crates/tokenzero-runtime",
     "crates/tokenzero-engine",
+    "crates/tokenzero-kernel",
     "crates/tokenzero-filters",
-    "crates/tokenzero-codemode",
-    "crates/tokenzero-mcp-compat",
     "crates/tokenzero-test-support",
     "crates/tokenzero-cli",
     "crates/tokenzero-install",
@@ -48,12 +47,14 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
-zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
-zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
-zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
-zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6" }
+tiktoken-rs = "0.12"
+zero-abi = { path = "../ZeroStack/crates/zero-abi" }
+zero-gauge = { path = "../ZeroStack/crates/zero-gauge" }
+zero-ledger = { path = "../ZeroStack/crates/zero-ledger" }
+zero-ref = { path = "../ZeroStack/crates/zero-ref" }
+zero-process = { path = "../ZeroStack/crates/zero-process" }
+zero-store = { path = "../ZeroStack/crates/zero-store" }
+tokenzero-kernel = { path = "crates/tokenzero-kernel" }
 # Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
 zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "bae540d3fe16b1d5f53948f293eb04a8c93e68c6", features = ["fastmcp"] }
 

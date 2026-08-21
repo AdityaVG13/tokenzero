@@ -449,12 +449,8 @@ fn oversized_frame_fails_closed_without_parsing_request_id() {
     }))
     .unwrap();
     frame.extend(std::iter::repeat_n(b' ', 1_048_600));
-    let response: Value = serde_json::from_slice(&execute_raw_worker_frame(
-        &engine(),
-        &mut session,
-        &frame,
-    ))
-    .unwrap();
+    let response: Value =
+        serde_json::from_slice(&execute_raw_worker_frame(&engine(), &mut session, &frame)).unwrap();
     assert_eq!(response["error"]["kind"], "frame_too_large");
     assert!(response.get("request_id").is_none());
 }
@@ -464,8 +460,7 @@ fn in_bound_typed_frame_error_round_trips_request_id() {
     let mut session = RawWorkerSession::default();
     let line = br#"{"kind":"call","request":{"request_id":"req-7"},"extra":}"#.to_vec();
     let response: Value =
-        serde_json::from_slice(&execute_raw_worker_frame(&engine(), &mut session, &line))
-            .unwrap();
+        serde_json::from_slice(&execute_raw_worker_frame(&engine(), &mut session, &line)).unwrap();
     assert_eq!(response["error"]["kind"], "invalid_frame");
     assert!(response.get("request_id").is_none());
 }

@@ -56,7 +56,9 @@ fn auto_horizon_cost_without_estimates_fails_loud() {
     config.session_dedup = false;
     let engine = TokenZeroEngine::new(config);
     let response = engine.read(&[path], Mode::Auto, None, None, false, 1, 4000);
-    let error = response.error.expect("HorizonCost without estimates must fail");
+    let error = response
+        .error
+        .expect("HorizonCost without estimates must fail");
     assert_eq!(error.code, "horizon_cost_refused");
     assert!(
         error.message.contains("expansion probability"),
@@ -76,25 +78,11 @@ fn labeled_horizon_cost_estimates_drive_admission_without_defaults() {
     // 16 KB ~ 4096 tokens. Labeled p=0, horizon=1, handling=10 admits.
     // Estimator defaults (p=0, horizon=100) must not be consulted: a
     // labeled always-expand p=1000 with the same handling stays inline.
-    let admitted = local_payload_policy_estimated(
-        16 * 1024,
-        Mode::Auto,
-        true,
-        &estimator,
-        0,
-        1,
-        10,
-    );
+    let admitted =
+        local_payload_policy_estimated(16 * 1024, Mode::Auto, true, &estimator, 0, 1, 10);
     assert_eq!(admitted, LocalPayloadPolicy::ExactRef);
-    let refused = local_payload_policy_estimated(
-        16 * 1024,
-        Mode::Auto,
-        true,
-        &estimator,
-        1000,
-        1,
-        10,
-    );
+    let refused =
+        local_payload_policy_estimated(16 * 1024, Mode::Auto, true, &estimator, 1000, 1, 10);
     assert_eq!(refused, LocalPayloadPolicy::Inline);
 }
 

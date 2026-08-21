@@ -411,9 +411,9 @@ pub fn run_raw_worker_once(opts: &RawWorkerServeOptions, request_json: &str) -> 
 ///
 /// Control `shutdown` ends the loop with exit 0.
 pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
-    if std::env::var("ZEROSTACK_RAW_WORKER_PROTOCOL").is_ok_and(|value| {
-        value == raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION
-    }) {
+    if std::env::var("ZEROSTACK_RAW_WORKER_PROTOCOL")
+        .is_ok_and(|value| value == raw_worker_protocol::RAW_WORKER_PROTOCOL_VERSION)
+    {
         return run_raw_worker_protocol_serve(opts);
     }
     if opts.handshake_only {

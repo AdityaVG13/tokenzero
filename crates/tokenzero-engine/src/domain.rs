@@ -22,9 +22,7 @@ use tokenzero_core::{
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
-use zero_abi::{
-    TOKEN_JOB_OPERATION, TokenJobPollRequest, TokenJobPollResult, TokenJobStatus,
-};
+use zero_abi::{TOKEN_JOB_OPERATION, TokenJobPollRequest, TokenJobPollResult, TokenJobStatus};
 
 /// Domain-kernel dispatch errors (no JSON-RPC / MCP framing).
 #[derive(Debug, Clone)]

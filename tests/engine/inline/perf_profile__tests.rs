@@ -39,7 +39,10 @@ fn attribution_pct_fails_closed_when_total_zero() {
     assert_eq!(attribution_pct(0, 0), Err(HotPathEmptyTotal));
     assert_eq!(attribution_pct(1, 0), Err(HotPathEmptyTotal));
     let empty = HotPathProfileSnapshot::default();
-    assert_eq!(empty.attribution_pct(HotPathName::Expand), Err(HotPathEmptyTotal));
+    assert_eq!(
+        empty.attribution_pct(HotPathName::Expand),
+        Err(HotPathEmptyTotal)
+    );
     assert_eq!(
         HotPathProfileCard::try_from_snapshot(empty),
         Err(HotPathEmptyTotal)
@@ -54,7 +57,9 @@ fn mt8_floor_holds_when_named_path_ran_at_point_one_pct() {
         read: 999,
         capsule: 0,
     };
-    let pct = snap.attribution_pct(HotPathName::Expand).expect("total > 0");
+    let pct = snap
+        .attribution_pct(HotPathName::Expand)
+        .expect("total > 0");
     assert!((pct - MT8_MIN_ATTRIBUTION_PCT).abs() < 1e-12);
     let card = HotPathProfileCard::try_from_snapshot(snap).expect("total > 0");
     assert!(card.meets_mt8_floor(HotPathName::Expand));
@@ -109,8 +114,7 @@ fn hot_path_profile_card_reads_snapshot_delta_after_n_calls() {
         !card_json.contains("wall") && !card_json.contains("latency"),
         "{card_json}"
     );
-    let parsed: serde_json::Value =
-        serde_json::from_str(&card_json).expect("card JSON must parse");
+    let parsed: serde_json::Value = serde_json::from_str(&card_json).expect("card JSON must parse");
     assert_eq!(parsed["attribution"], "enter_count");
     let expand_pct = parsed["expand_pct"].as_f64().expect("expand_pct");
     let total = parsed["total"].as_u64().expect("total");

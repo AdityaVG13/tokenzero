@@ -64,6 +64,7 @@ pub mod wall;
 pub mod warmkeeper;
 pub mod workspace;
 pub mod write_ladder;
+pub mod zero_kernel;
 
 pub use action_cache_key::{
     ACTIONCACHE_KEY_SCHEMA, ActionCacheKeyInput, ConsistencyClass, action_cache_envelope,
@@ -197,14 +198,14 @@ pub use cache_meter::{
     ProviderCacheTelemetry, ProviderUsage, cache_miss_attribution, parse_provider_usage,
 };
 pub use config::{
-    CAPSULE_EXACT_REF_THRESHOLD_ENV, DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES,
-    DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
-    SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, capsule_exact_ref_threshold,
-    capsule_exact_ref_threshold_from_env, default_mcp_idle_timeout, default_shell_timeout,
-    mcp_idle_timeout_from_secs, mcp_tool_surface_from_env, parse_corridor_estimates,
-    parse_ratc_weights, resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_millis,
-    shell_timeout_from_secs, telemetry_env_enabled, CorridorEstimates, RatcWeights, RATC_ENV,
-    CORRIDOR_ENV, RATC_STATUS_ADVISORY,
+    CAPSULE_EXACT_REF_THRESHOLD_ENV, CORRIDOR_ENV, CorridorEstimates,
+    DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES, DEFAULT_SHELL_INLINE_BUDGET, EngineConfig,
+    FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, RATC_ENV, RATC_STATUS_ADVISORY,
+    RatcWeights, SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV,
+    capsule_exact_ref_threshold, capsule_exact_ref_threshold_from_env, default_mcp_idle_timeout,
+    default_shell_timeout, mcp_idle_timeout_from_secs, mcp_tool_surface_from_env,
+    parse_corridor_estimates, parse_ratc_weights, resolve_telemetry, shell_inline_budget_from_env,
+    shell_timeout_from_millis, shell_timeout_from_secs, telemetry_env_enabled,
 };
 pub use eviction_scheduler::{
     CacheBreakpoint, EvictionBatch, EvictionCandidate, EvictionDecision, EvictionDecisionKind,
@@ -314,3 +315,5 @@ pub enum InitializeState {
     /// Client completed initialize + initialized; tools/list and peers allowed.
     Ready,
 }
+
+pub use zero_kernel::ZeroTokenEngine;

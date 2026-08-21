@@ -415,9 +415,10 @@ pub(crate) fn requested_output_lines(command: &str) -> Option<(&'static str, usi
             }
         }
         if tool == "head" || tool == "tail" {
-            if let Some(digits) = word.strip_prefix('-').filter(|rest| {
-                !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-            }) {
+            if let Some(digits) = word
+                .strip_prefix('-')
+                .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+            {
                 return digits.parse().ok().map(|n| (tool, n));
             }
         }

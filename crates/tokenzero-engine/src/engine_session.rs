@@ -1,4 +1,4 @@
-use super::config::{new_session_id, ServeFlight};
+use super::config::{ServeFlight, new_session_id};
 use super::session_persist::{SessionPersistSnapshot, SessionPersistence};
 use super::*;
 
@@ -268,7 +268,10 @@ impl TokenZeroEngine {
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full
     /// serve, nothing recorded) instead of failing the call.
     pub(crate) fn session_lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
-        self.with_session_memory(|| SeenState::Miss, |memory| memory.lookup(key, content_sha256))
+        self.with_session_memory(
+            || SeenState::Miss,
+            |memory| memory.lookup(key, content_sha256),
+        )
     }
 
     /// Fail-open write-back of this call's serve records and rollup counters.

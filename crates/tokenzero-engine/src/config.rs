@@ -121,8 +121,7 @@ impl EngineConfig {
             fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
             tool_surface: mcp_tool_surface_from_env(),
             telemetry_enabled: None,
-            ratc: ratc_weights_from_env()
-                .unwrap_or_else(|err| panic!("TOKENZERO_RATC: {err}")),
+            ratc: ratc_weights_from_env().unwrap_or_else(|err| panic!("TOKENZERO_RATC: {err}")),
             corridor: corridor_estimates_from_env()
                 .unwrap_or_else(|err| panic!("TOKENZERO_CORRIDOR: {err}")),
         }
