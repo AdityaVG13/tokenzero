@@ -13,14 +13,7 @@ pub(crate) fn push_hex_byte(out: &mut String, b: u8) {
 }
 
 pub fn sha256_hex(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for &b in digest.iter() {
-        push_hex_byte(&mut out, b);
-    }
-    out
+    zero_abi::sha256_hex(text.as_bytes())
 }
 
 /// The lossy declaration emitted when the visible budget drops bytes and no

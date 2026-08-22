@@ -1487,6 +1487,7 @@ dependencies = [
  "zero-ledger",
  "zero-process",
  "zero-store",
+ "zerostack-test-support",
 ]
 
 [[package]]
@@ -1537,6 +1538,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokenzero-core",
+ "zero-abi",
  "zero-store",
 ]
 
@@ -2073,6 +2075,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zerostack-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "zero-abi",
 ]
 
 [[package]]

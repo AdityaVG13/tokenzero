@@ -13,6 +13,7 @@ rust-version.workspace = true
 autotests = false
 
 [dependencies]
+zero-abi.workspace = true
 fs4.workspace = true
 rusqlite.workspace = true
 rustix.workspace = true

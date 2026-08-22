@@ -993,7 +993,7 @@ fn scan_reader<R: BufRead>(
     Ok(JsonlScan {
         event_count,
         skipped_lines,
-        ledger_sha256: hex_encode(hasher.finalize()),
+        ledger_sha256: zero_abi::hex_lower_32(hasher.finalize().into()),
     })
 }
 
@@ -1060,13 +1060,7 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
 }
 
 pub fn hex_sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex_encode(hasher.finalize())
-}
-
-fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    zero_abi::sha256_hex(bytes)
 }
 
 macro_rules! simple_fns {
@@ -1119,7 +1113,7 @@ simple_fns! {
 pub fn hash_hint(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    hex_encode(&hasher.finalize()[..8])
+    hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 // Session Ledger (bfu): rocket-equation token-turn pricing (mass × turns remaining).
