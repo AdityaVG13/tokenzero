@@ -19,6 +19,7 @@ default = []
 surface-mcp = []
 
 [dependencies]
+zerostack-install.workspace = true
 flate2.workspace = true
 fs4.workspace = true
 serde.workspace = true

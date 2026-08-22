@@ -37,6 +37,7 @@ zero-process.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokenzero-test-support = { path = "../tokenzero-test-support" }
+zerostack-test-support.workspace = true
 
 # Relocated standalone tests live under the workspace tests/ tree.
 [[test]]
