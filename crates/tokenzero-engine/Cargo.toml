@@ -101,4 +101,4 @@ path = "../../tests/engine/zero_ledger_pin.rs"
 
 [[test]]
 name = "certify"
-path = "tests/certify.rs"
+path = "../../tests/unit/tokenzero-engine/certify.rs"
