@@ -98,3 +98,7 @@ path = "../../tests/engine/warmkeeper.rs"
 [[test]]
 name = "engine_zero_ledger_pin"
 path = "../../tests/engine/zero_ledger_pin.rs"
+
+[[test]]
+name = "certify"
+path = "tests/certify.rs"

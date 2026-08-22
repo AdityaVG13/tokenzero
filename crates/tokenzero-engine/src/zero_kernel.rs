@@ -92,6 +92,20 @@ impl TokenEngine for ZeroTokenEngine {
         Ok(self.count(bytes))
     }
 
+    fn certify(
+        &self,
+        invocation: &EngineInvocation,
+        bytes: &[u8],
+        claimed: &TokenAccounting,
+    ) -> Result<zero_abi::CertifyResult, EngineError> {
+        Self::cancelled(invocation)?;
+        let recomputed = self.count(bytes);
+        Ok(zero_abi::CertifyResult {
+            matches: &recomputed == claimed,
+            recomputed,
+        })
+    }
+
     fn project(
         &self,
         invocation: &EngineInvocation,
