@@ -1,55 +1,29 @@
 //! Certify primitive: re-measurement must be deterministic, catch tampered
 //! bytes, and distinguish the BPE path from the lexical estimate path.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use tokenzero_engine::ZeroTokenEngine;
-use zero_abi::{
-    CancellationProbe, EngineCallContext, EngineInvocation, KernelBudget, TokenAccounting,
-    TokenEngine,
-};
+use zerostack_test_support::{TempWorkspace, test_invocation};
+use zero_abi::{EngineInvocation, TokenAccounting, TokenEngine};
 
-struct NoopCancel;
-impl CancellationProbe for NoopCancel {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
+fn workspace() -> TempWorkspace {
+    TempWorkspace::new("tz-certify").unwrap()
 }
 
-fn invocation() -> EngineInvocation {
-    let root = tempfile::tempdir().unwrap();
-    let context = EngineCallContext {
-        workspace_root: root.path().to_path_buf(),
-        project_root: root.path().to_path_buf(),
-        session_id: "certify-test".into(),
-        cell_id: "cell-1".into(),
-        trace_id: "certify-test-cell-1".into(),
-        deadline_unix_ms: u64::MAX,
-        budget: KernelBudget {
-            wall_ms: 1_000,
-            cpu_ms: 1_000,
-            memory_bytes: 64 * 1024 * 1024,
-            call_limit: 64,
-            task_limit: 8,
-            output_byte_limit: 64 * 1024,
-        },
-    };
-    EngineInvocation {
-        context,
-        cancellation: Arc::new(NoopCancel),
-    }
+/// Engine bound to the shared hub scaffolding; store lives in the hermetic
+/// workspace so tests stay isolated without hand-built invocations.
+fn engine(ws: &TempWorkspace) -> ZeroTokenEngine {
+    ZeroTokenEngine::open(ws.store(), None)
 }
 
-fn engine() -> ZeroTokenEngine {
-    // Fresh temp store per call keeps tests hermetic; count() never touches CAS.
-    ZeroTokenEngine::open(tempfile::tempdir().unwrap().into_path(), None)
+fn invocation_for(ws: &TempWorkspace) -> EngineInvocation {
+    test_invocation(ws.root(), "certify-test", "cell-1")
 }
 
 #[test]
 fn certify_is_deterministic_and_matches_fresh_measurement() {
-    let invocation = invocation();
-    let engine = engine();
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
     let bytes = b"the quick brown fox jumps over the lazy dog";
     let claimed = engine.measure(&invocation, bytes).unwrap();
     let result = engine.certify(&invocation, bytes, &claimed).unwrap();
@@ -59,8 +33,9 @@ fn certify_is_deterministic_and_matches_fresh_measurement() {
 
 #[test]
 fn certify_detects_tampered_bytes() {
-    let invocation = invocation();
-    let engine = engine();
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
     let original = b"alpha beta gamma delta epsilon zeta eta theta";
     let claimed = engine.measure(&invocation, original).unwrap();
 
@@ -73,8 +48,9 @@ fn certify_detects_tampered_bytes() {
 
 #[test]
 fn certify_rejects_mismatched_tokenizer_claim() {
-    let invocation = invocation();
-    let engine = engine();
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
     let bytes = b"determinism probe for tokenizer identity";
     let mut forged = engine.measure(&invocation, bytes).unwrap();
     forged.tokenizer = "forged-tokenizer".into();
