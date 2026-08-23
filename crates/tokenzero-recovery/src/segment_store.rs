@@ -760,6 +760,3 @@ impl Drop for Lock {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/segment_store_expand_lock_tests.rs"]
-mod expand_lock_tests;

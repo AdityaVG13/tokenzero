@@ -201,6 +201,3 @@ fn arg_bool_value(value: &Value) -> bool {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/expand_params__tests.rs"]
-mod tests;

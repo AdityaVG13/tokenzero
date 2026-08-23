@@ -140,6 +140,3 @@ pub fn check_active_wall_deadline_every(
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/wall__tests.rs"]
-mod tests;

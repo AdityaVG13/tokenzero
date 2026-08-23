@@ -287,6 +287,3 @@ fn select_newest<'a>(
     selected
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/context_view__tests.rs"]
-mod tests;

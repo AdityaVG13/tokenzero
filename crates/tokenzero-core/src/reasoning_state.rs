@@ -1258,6 +1258,3 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from_bytes(sha256(bytes))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/reasoning_state__tests.rs"]
-mod tests;

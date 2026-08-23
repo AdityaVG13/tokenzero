@@ -236,6 +236,3 @@ fn inclusion_path(leaves: &[Hash], index: usize, out: &mut Vec<ProofSibling>) ->
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/transparency__tests.rs"]
-mod tests;

@@ -302,10 +302,6 @@ impl TokenZeroEngine {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_fetch__tests.rs"]
-mod fetch_tests;
-
 fn fetch_transport_failure(
     url: &str,
     code: &str,

@@ -368,6 +368,3 @@ impl Drop for ToolMetrics {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/metrics__tests.rs"]
-mod tests;

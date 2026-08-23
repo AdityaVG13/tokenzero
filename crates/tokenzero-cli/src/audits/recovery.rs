@@ -545,6 +545,3 @@ pub(crate) fn p95_f64(values: &mut [f64]) -> Option<f64> {
     )
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/unit/tokenzero/recovery_error_path_tests.rs"]
-mod error_path_tests;

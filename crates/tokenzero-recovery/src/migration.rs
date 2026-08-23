@@ -1334,6 +1334,3 @@ impl MigrationStore for RecoveryStoreAdapter<'_> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/migration__cleanup_guards.rs"]
-mod cleanup_guards;

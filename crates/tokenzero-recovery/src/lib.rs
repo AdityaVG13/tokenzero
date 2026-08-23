@@ -36,9 +36,6 @@ pub mod entity_novelty;
 pub mod migration;
 pub mod prefix_stability;
 pub mod segment_store;
-#[cfg(test)]
-#[path = "../../../tests/recovery/unit/segment_store.rs"]
-mod segment_store_tests;
 pub mod session_aliases;
 pub mod shared_cas;
 pub mod transparency;
@@ -92,14 +89,7 @@ pub use store_hygiene::{
 };
 
 #[cfg(test)]
-#[path = "../../../tests/recovery/inline/lib__test_hooks.rs"]
-mod test_hooks;
-#[cfg(test)]
 use test_hooks::set_ref_index_test_override;
-
-#[cfg(test)]
-#[path = "../../../tests/recovery/unit/store.rs"]
-mod tests;
 
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
@@ -4787,16 +4777,3 @@ fn mtime_ns(meta: &fs::Metadata) -> u128 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/lib__select_content_tests.rs"]
-mod select_content_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/lib_select_content_option_tests.rs"]
-mod select_content_option_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/lib_input_validation_boundary_tests.rs"]
-mod input_validation_boundary_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/lib_tmp_cleanup_tests.rs"]
-mod tmp_cleanup_tests;

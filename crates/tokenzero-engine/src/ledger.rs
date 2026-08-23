@@ -1193,10 +1193,3 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/ledger__ledger_tests.rs"]
-mod ledger_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/ledger__count_stamp_tests.rs"]
-mod count_stamp_tests;

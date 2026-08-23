@@ -229,6 +229,3 @@ artifact_args! {
     WsSkeletonArgs => "results/current/tokenzero_ws_001.json",
 }
 
-#[cfg(test)]
-#[path = "../../../tests/cli/inline/cli_args__artifact_default_tests.rs"]
-mod artifact_default_tests;

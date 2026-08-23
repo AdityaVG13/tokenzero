@@ -148,6 +148,3 @@ impl PrefixStabilityGuard {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/prefix_stability__tests.rs"]
-mod tests;

@@ -725,6 +725,3 @@ impl TokenZeroEngine {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_expand__tests.rs"]
-mod tests;

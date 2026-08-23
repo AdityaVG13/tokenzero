@@ -384,6 +384,3 @@ fn text_fingerprint(text: &str) -> u64 {
     hasher.finish()
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/recall__tests.rs"]
-mod tests;

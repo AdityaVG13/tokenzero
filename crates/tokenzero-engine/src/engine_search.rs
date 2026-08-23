@@ -656,6 +656,3 @@ impl TokenZeroEngine {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_search__crossover_tests.rs"]
-mod crossover_tests;

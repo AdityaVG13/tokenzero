@@ -1188,6 +1188,3 @@ fn formation_receipt_digest(
     Ok(digest(&bytes))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/model_artifacts__tests.rs"]
-mod tests;

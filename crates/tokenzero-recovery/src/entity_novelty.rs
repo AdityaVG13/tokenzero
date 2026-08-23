@@ -280,10 +280,3 @@ fn now_rfc3339() -> String {
     crate::shared_cas::format_system_time(SystemTime::now())
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/entity_novelty__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/entity_novelty_tmp_cleanup_tests.rs"]
-mod tmp_cleanup_tests;

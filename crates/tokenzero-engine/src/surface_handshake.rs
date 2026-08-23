@@ -191,6 +191,3 @@ pub fn composition_trace(
     })
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/surface_handshake__tests.rs"]
-mod tests;

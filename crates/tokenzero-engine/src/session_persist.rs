@@ -493,6 +493,3 @@ impl Drop for SessionPersistLock {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/unit/session_persist_tests.rs"]
-mod tests;

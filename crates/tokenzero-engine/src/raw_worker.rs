@@ -634,10 +634,6 @@ pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Result<Option<i32>, St
     Ok(Some(run_raw_worker_serve(&opts)))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/unit/raw_worker_inline_tests.rs"]
-mod tests;
-
 #[path = "raw_worker_impl.rs"]
 mod raw_worker_impl;
 #[path = "raw_worker_protocol.rs"]

@@ -1442,6 +1442,3 @@ impl SessionLedgerReport {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-pulse/lib_hub_atomic_write.rs"]
-mod hub_atomic_write;

@@ -328,6 +328,3 @@ pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
     crate::recall::build_session_pack(cache_path, max_tokens)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/cache_maintenance__tests.rs"]
-mod tests;

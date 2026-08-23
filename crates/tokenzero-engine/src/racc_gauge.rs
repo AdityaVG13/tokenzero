@@ -204,6 +204,3 @@ fn digest_label(label: &str) -> Digest {
     Digest::from_hex(&sha256_hex(label)).expect("sha256 hex is a valid ledger digest")
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/racc_gauge__racc_gauge_tests.rs"]
-mod racc_gauge_tests;

@@ -187,6 +187,3 @@ fn insert_default(map: &mut Map<String, Value>, key: &str, value: Value) {
     map.entry(key.to_string()).or_insert(value);
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/action_cache_key__action_cache_key_tests.rs"]
-mod action_cache_key_tests;

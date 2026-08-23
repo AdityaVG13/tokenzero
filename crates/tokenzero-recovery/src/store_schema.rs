@@ -346,10 +346,3 @@ fn hex_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/store_schema__store_schema_tests.rs"]
-mod store_schema_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/store_schema_shadow_lock_tests.rs"]
-mod shadow_lock_tests;

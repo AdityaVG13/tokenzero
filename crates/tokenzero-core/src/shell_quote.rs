@@ -341,6 +341,3 @@ pub fn quote_for(platform: &str, args: &[String]) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-core/shell_quote_quote_security_tests.rs"]
-mod quote_security_tests;

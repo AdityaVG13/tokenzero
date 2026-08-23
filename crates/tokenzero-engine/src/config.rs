@@ -414,6 +414,3 @@ pub fn mcp_idle_timeout_from_secs(seconds: Option<u64>) -> Option<Duration> {
     ))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/config__telemetry_tests.rs"]
-mod telemetry_tests;

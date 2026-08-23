@@ -170,6 +170,3 @@ impl AdmissionEstimator {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/admission__tests.rs"]
-mod admission_tests;

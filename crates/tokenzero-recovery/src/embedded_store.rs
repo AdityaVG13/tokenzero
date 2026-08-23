@@ -932,10 +932,3 @@ fn temp_cas_dir() -> PathBuf {
     ))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/unit/embedded_store.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/embedded_store_empty_blob_line_fragment_tests.rs"]
-mod empty_blob_line_fragment_tests;

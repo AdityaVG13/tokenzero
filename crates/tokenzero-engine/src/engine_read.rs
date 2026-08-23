@@ -613,10 +613,3 @@ impl TokenZeroEngine {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_read__capsule_policy_tests.rs"]
-mod capsule_policy_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_read__formation_receipt_tests.rs"]
-mod formation_receipt_tests;

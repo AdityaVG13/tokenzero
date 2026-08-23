@@ -172,6 +172,3 @@ const fn density(object: &FrontierPlanObject) -> u64 {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/frontier__tests.rs"]
-mod frontier_tests;

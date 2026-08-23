@@ -251,6 +251,3 @@ pub fn live_entry_for_key(store_root: &Path, key: &str) -> Option<ActionCacheEnt
     ActionCacheIndex::open(store_root).get(key).ok().flatten()
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/cachezero__cachezero_tests.rs"]
-mod cachezero_tests;

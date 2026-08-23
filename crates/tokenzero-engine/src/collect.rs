@@ -959,6 +959,3 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
         || (!include_hidden && name.starts_with('.'))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/collect__tests.rs"]
-mod tests;

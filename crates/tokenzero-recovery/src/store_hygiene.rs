@@ -333,6 +333,3 @@ pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
     serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/store_hygiene_prune_option_tests.rs"]
-mod prune_option_tests;

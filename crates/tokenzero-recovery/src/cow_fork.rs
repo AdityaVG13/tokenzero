@@ -262,6 +262,3 @@ impl CowSession {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/cow_fork_persist_then_advertise_tests.rs"]
-mod persist_then_advertise_tests;

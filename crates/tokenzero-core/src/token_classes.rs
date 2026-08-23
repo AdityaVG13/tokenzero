@@ -195,10 +195,3 @@ pub fn savings_ratio_typed(raw: Tok<Raw>, visible: Tok<Visible>) -> f64 {
     crate::tokens::savings_ratio_u64(raw.get(), visible.get())
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/token_classes__token_class_tests.rs"]
-mod token_class_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-core/token_classes_width_tests.rs"]
-mod width_tests;

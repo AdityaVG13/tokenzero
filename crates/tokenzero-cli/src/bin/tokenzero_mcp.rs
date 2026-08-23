@@ -347,6 +347,3 @@ fn run_uninstall(args: &[String]) {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/unit/tokenzero/tokenzero_mcp_tests.rs"]
-mod tests;

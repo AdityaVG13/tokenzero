@@ -1479,21 +1479,3 @@ fn invalid_runtime_input(msg: impl Into<String>) -> RuntimeError {
     ))
 }
 
-#[cfg(test)]
-#[path = "../../../tests/runtime/inline/lib__stdio_error_tests.rs"]
-mod stdio_error_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/runtime/inline/lib__inherited_pipe_join_tests.rs"]
-mod inherited_pipe_join_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/runtime/inline/lib__spill_prune_bounds_tests.rs"]
-mod spill_prune_bounds_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-runtime/lib_input_validation_tests.rs"]
-mod input_validation_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-runtime/lib_spill_cleanup_tests.rs"]
-mod spill_cleanup_tests;

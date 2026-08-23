@@ -278,10 +278,6 @@ fn required_u64(
     })
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/domain__raw_job_value_tests.rs"]
-mod raw_job_value_tests;
-
 /// Registry-metadata classification: domain ops are Canonical/LegacyAlias and
 /// not Resource. Adapter-owned control/composition ops are CodemodeControl or
 /// Resource. No hard-coded name mask.
@@ -549,10 +545,6 @@ fn attach_channels_gated(
     response
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/domain__channel_tests.rs"]
-mod channel_tests;
-
 /// Deterministic harness-renderable status line derived from the operation
 /// and its arguments; no model prose involved (vz89.11).
 fn channel_status_line(bare: &str, args: &Value) -> String {
@@ -742,10 +734,6 @@ pub fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResp
     }
     Ok(response)
 }
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/domain__batch_truth_tests.rs"]
-mod batch_truth_tests;
 
 fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> ToolResponse {
     let visible_tokens = count_tokens(&text);

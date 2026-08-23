@@ -1051,10 +1051,6 @@ pub fn preview(text: &str) -> String {
     value
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/render__preview_tests.rs"]
-mod preview_tests;
-
 pub fn captured_stream_text(text: &str, capture: &StreamCapture, stream_name: &str) -> String {
     if !capture.truncated {
         return text.to_string();

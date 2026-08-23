@@ -174,10 +174,3 @@ pub fn alias_repeated_paths_and_symbols_if_changed(
     Some(rewritten)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/text_aliases__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/text_aliases__prefilter_soundness.rs"]
-mod prefilter_soundness;

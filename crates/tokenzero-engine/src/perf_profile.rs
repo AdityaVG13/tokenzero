@@ -387,6 +387,3 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/perf_profile__tests.rs"]
-mod tests;

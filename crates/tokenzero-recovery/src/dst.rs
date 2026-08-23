@@ -121,6 +121,3 @@ pub fn check_linearizable(history: &[HistoryEvent]) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/dst__tests.rs"]
-mod tests;

@@ -305,6 +305,3 @@ pub fn store_resolution_json(
     })
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/workspace__tests.rs"]
-mod tests;

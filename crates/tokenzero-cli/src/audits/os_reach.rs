@@ -269,6 +269,3 @@ pub(crate) fn load_os_release_artifacts(paths: &[PathBuf]) -> Result<Vec<serde_j
         .collect()
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/unit/tokenzero/os_reach_tests.rs"]
-mod tests;

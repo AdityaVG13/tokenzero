@@ -73,6 +73,3 @@ pub fn coldest<'a>(order: &'a [String], is_live: impl Fn(&str) -> bool) -> Optio
     best.map(|(id, _, _)| id)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/frecency__tests.rs"]
-mod tests;

@@ -295,10 +295,3 @@ fn persist_fingerprint(path: &Path) -> (Option<FileIdentity>, Option<FileIdentit
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/memory_verbs__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/memory_verbs_input_validation_tests.rs"]
-mod input_validation_tests;

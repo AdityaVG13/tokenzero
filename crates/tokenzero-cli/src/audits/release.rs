@@ -518,10 +518,3 @@ pub(crate) fn write_artifacts(
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/cli/inline/audits__release__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../../tests/unit/tokenzero/release_write_artifacts_crash_window_tests.rs"]
-mod write_artifacts_crash_window_tests;

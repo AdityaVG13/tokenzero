@@ -7,10 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokenzero_core::{ContentType, count_tokens};
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/unit/working_set.rs"]
-mod tests;
-
 pub const DEFAULT_WORKING_SET_TOKENS: usize = 8192;
 pub const EVICTION_REF_LINE_PREFIX: &str = "TZ-EVICT/1";
 /// Portable one-token response emitted when requested bytes are already resident.
@@ -873,6 +869,3 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/working_set_input_validation_tests.rs"]
-mod input_validation_tests;

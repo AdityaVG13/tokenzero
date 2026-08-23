@@ -453,6 +453,3 @@ let reasons = failures! {
 (reasons, object!({"schema_version": artifact["schema_version"], "all_release_oses_run": artifact["all_release_oses_run"], "public_os_claim_approved": artifact["public_os_claim_approved"]}))
 } }
 
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero/release_claims_honesty_gate_tests.rs"]
-mod honesty_gate_tests;

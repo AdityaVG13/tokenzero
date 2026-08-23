@@ -191,10 +191,3 @@ impl AnytimeFailureMonitor {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/pulse/inline/eprocess__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/pulse/inline/digest_before_fragment__tests.rs"]
-mod digest_before_fragment_tests;

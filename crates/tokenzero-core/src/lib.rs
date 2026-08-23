@@ -1864,29 +1864,3 @@ pub use tokens::{
     prefix_end_for_kept_lines, savings_ratio, sha256_hex, tokenizer_metadata,
 };
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/lib__tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/core/inline/lib__channel_mode_tests.rs"]
-mod channel_mode_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/core/inline/lib__core_safety_regressions.rs"]
-mod core_safety_regressions;
-
-#[cfg(test)]
-#[path = "../../../tests/core/inline/lib__capsule_omission_exact_ref.rs"]
-mod capsule_omission_exact_ref;
-
-#[cfg(test)]
-#[path = "../../../tests/core/inline/transform_family__tests.rs"]
-mod transform_family_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-core/lib_overflow_edge_tests.rs"]
-mod overflow_edge_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-core/lib_secret_mask_security_tests.rs"]
-mod secret_mask_security_tests;

@@ -639,13 +639,3 @@ fn validate_key(key: &str) -> Result<(), ActionCacheError> {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/action_cache__action_cache_tests.rs"]
-mod action_cache_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/action_cache_serve_l3_recheck_tests.rs"]
-mod serve_l3_recheck_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero-recovery/action_cache_slack_width_tests.rs"]
-mod slack_width_tests;

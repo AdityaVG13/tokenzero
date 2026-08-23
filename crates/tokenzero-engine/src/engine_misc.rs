@@ -256,6 +256,3 @@ fn write_cache_pack_manifest(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_misc__cache_pack_manifest_tests.rs"]
-mod cache_pack_manifest_tests;

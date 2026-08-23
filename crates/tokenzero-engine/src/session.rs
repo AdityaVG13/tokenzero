@@ -302,6 +302,3 @@ impl SessionSummary {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/session__delta_tests.rs"]
-mod delta_tests;

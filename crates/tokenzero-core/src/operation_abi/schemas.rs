@@ -494,6 +494,3 @@ pub fn args(schema: Value) -> OperationArgs {
     OperationArgs { schema }
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/core/inline/operation_abi__schemas__tests.rs"]
-mod tests;

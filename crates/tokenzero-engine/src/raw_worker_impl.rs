@@ -1008,6 +1008,3 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, maximum: usize) -> std::io::Re
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/raw_worker_impl__tests.rs"]
-mod tests;

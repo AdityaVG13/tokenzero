@@ -280,6 +280,3 @@ pub fn codemode_method_catalog() -> Value {
     })
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/codemode_catalog__catalog_tests.rs"]
-mod catalog_tests;

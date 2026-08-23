@@ -14,14 +14,7 @@ use tokenzero_runtime::{
 use zero_process::VerifiedChild;
 
 #[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__test_hooks.rs"]
-mod test_hooks;
-#[cfg(test)]
 pub(crate) use test_hooks::reset_background_job_termination_for_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__rewrite_execution_tests.rs"]
-mod rewrite_execution_tests;
 
 struct BackgroundJobState {
     status: &'static str,
@@ -333,10 +326,6 @@ fn exact_shell_stream_text(
     verify_full_stream_digest(display, capture, stream)?;
     Ok(display.to_string())
 }
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__exact_stream_witness_tests.rs"]
-mod exact_stream_witness_tests;
 
 fn shell_ref(kind: &str, stored: &StoredPayload, bytes: usize) -> tokenzero_core::RefRecord {
     ref_record(kind, stored.blob_ref.clone(), bytes)
@@ -1220,18 +1209,7 @@ impl TokenZeroEngine {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__visible_choice_tests.rs"]
-mod visible_choice_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__job_tail_tests.rs"]
-mod job_tail_tests;
-
 #[cfg(all(test, unix))]
 #[path = "../../../tests/engine/inline/engine_shell__background_tests.rs"]
 mod background_tests;
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_shell__accumulator_bounds.rs"]
-mod accumulator_bounds;

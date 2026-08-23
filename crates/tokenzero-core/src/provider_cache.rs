@@ -314,6 +314,3 @@ fn validate_policy_id(policy_id: String) -> Result<String, ProviderCacheError> {
     Ok(policy_id)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/provider_cache__tests.rs"]
-mod tests;

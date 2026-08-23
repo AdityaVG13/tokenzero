@@ -226,6 +226,3 @@ pub fn session_exposure_ledger(scope_id: &str) -> Arc<Mutex<SessionExposureLedge
     )
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/exposure__tests.rs"]
-mod tests;

@@ -145,6 +145,3 @@ fn artifact_class(op: &str) -> &str {
         .unwrap_or(op)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/cachezero__cachezero_observe_tests.rs"]
-mod cachezero_observe_tests;

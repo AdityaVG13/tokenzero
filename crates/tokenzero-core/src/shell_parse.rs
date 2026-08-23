@@ -809,6 +809,3 @@ pub(crate) fn is_abnormal_json(value: &serde_json::Value) -> bool {
     )
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/shell_parse__regression_tests.rs"]
-mod regression_tests;

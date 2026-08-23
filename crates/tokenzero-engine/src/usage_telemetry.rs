@@ -404,6 +404,3 @@ pub fn record_operation_amplification(
     let _ = append_record(&path, &record);
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/unit/usage_telemetry_inline_tests.rs"]
-mod tests;

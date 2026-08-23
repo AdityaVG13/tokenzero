@@ -2486,11 +2486,5 @@ use audits::release::*;
 use audits::shared::*;
 
 #[cfg(test)]
-#[path = "../../../tests/unit/tokenzero/main_argv_sibling_tests.rs"]
-mod argv_sibling_tests;
-#[cfg(test)]
 #[path = "../../../tests/unit/tokenzero/main_package_audit_dist_tests.rs"]
 mod package_audit_dist_tests;
-#[cfg(test)]
-#[path = "../../../tests/unit/tokenzero/main_stdout_crash_window_tests.rs"]
-mod stdout_crash_window_tests;

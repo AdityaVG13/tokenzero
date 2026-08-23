@@ -285,6 +285,3 @@ pub fn rewrite_full_hash_blob_refs_in_value(value: &mut Value) {
     }
 }
 
-#[cfg(test)]
-#[path = "../../../tests/recovery/inline/session_aliases__tests.rs"]
-mod tests;

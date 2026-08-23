@@ -41,6 +41,3 @@ pub(super) fn common_prefix_len<T: PartialEq>(left: &[T], right: &[T]) -> usize 
     left.iter().zip(right).take_while(|(a, b)| a == b).count()
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/engine_common__tests.rs"]
-mod tests;

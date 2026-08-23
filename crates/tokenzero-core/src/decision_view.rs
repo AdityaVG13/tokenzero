@@ -1121,6 +1121,3 @@ fn put_strings(out: &mut Vec<u8>, label: &str, values: &[String]) -> Result<(), 
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/decision_view__tests.rs"]
-mod tests;

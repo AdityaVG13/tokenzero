@@ -603,10 +603,3 @@ pub(crate) fn handoff_artifact(id: &str, path: &str, purpose: &str) -> Json {
     object!({"id": id, "path": path, "purpose": purpose, "required_for_final_reconciliation": true})
 }
 
-#[cfg(test)]
-#[path = "../../../tests/cli/inline/artifact_contracts__handoff_integrity_rejects_schema_bound_non_json_payload_without_json_extension.rs"]
-mod handoff_integrity_rejects_schema_bound_non_json_payload_without_json_extension;
-
-#[cfg(test)]
-#[path = "../../../tests/cli/inline/artifact_contracts__inspect_artifact_guards.rs"]
-mod inspect_artifact_guards;

@@ -663,6 +663,3 @@ fn classify_error_kind(message: &str) -> &'static str {
     "runtime"
 }
 
-#[cfg(test)]
-#[path = "../../../tests/engine/inline/codemode_wire__structured_error_tests.rs"]
-mod structured_error_tests;

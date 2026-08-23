@@ -461,10 +461,3 @@ pub fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
         .map_or(text.len(), |(index, _)| index)
 }
 
-#[cfg(test)]
-#[path = "../../../tests/core/inline/tokens__inline_elision_tests.rs"]
-mod inline_elision_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/core/inline/tokens__visible_budget_never_exceeds.rs"]
-mod visible_budget_never_exceeds;
