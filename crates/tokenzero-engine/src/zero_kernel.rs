@@ -63,6 +63,35 @@ impl ZeroTokenEngine {
         }
     }
 
+    fn clamp_visible_to_budget<'a>(
+        &self,
+        text: &'a str,
+        max_tokens: u64,
+    ) -> (&'a str, TokenAccounting, bool) {
+        let accounting = self.count(text.as_bytes());
+        if accounting.billed <= max_tokens {
+            return (text, accounting, false);
+        }
+
+        let mut boundaries = Vec::with_capacity(text.chars().count().saturating_add(1));
+        boundaries.push(0);
+        boundaries.extend(text.char_indices().skip(1).map(|(offset, _)| offset));
+        boundaries.push(text.len());
+        let mut low = 0usize;
+        let mut high = boundaries.len().saturating_sub(1);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if self.count(text[..boundaries[middle]].as_bytes()).billed <= max_tokens {
+                low = middle;
+            } else {
+                high = middle.saturating_sub(1);
+            }
+        }
+        let visible = &text[..boundaries[low]];
+        let accounting = self.count(visible.as_bytes());
+        (visible, accounting, true)
+    }
+
     fn store_exact(&self, bytes: &[u8], media_type: &str) -> Result<ZeroHandle, EngineError> {
         let handle = self.cas.put(bytes).map_err(cas_error)?;
         let selection = std::str::from_utf8(bytes)
@@ -244,15 +273,20 @@ impl TokenEngine for ZeroTokenEngine {
                 }
             }
         }
+        let (visible, visible_accounting, truncated) =
+            self.clamp_visible_to_budget(&capsule.text, u64::from(request.max_tokens));
+        let visible_tokens = visible_accounting.billed.min(u64::from(request.max_tokens));
         Ok(CompressionResult {
-            visible: capsule.text,
+            visible: visible.to_owned(),
             exact: handle,
+            truncated,
+            omitted_tokens: raw_accounting.billed.saturating_sub(visible_tokens),
             accounting: TokenAccounting {
                 tokenizer: raw_accounting.tokenizer,
                 billed: raw_accounting.billed,
-                visible: capsule.visible_tokens as u64,
+                visible: visible_tokens,
                 cached: raw_accounting.cached,
-                certified: raw_accounting.certified,
+                certified: raw_accounting.certified && visible_accounting.certified,
             },
         })
     }

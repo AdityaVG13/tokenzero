@@ -2,9 +2,9 @@
 //! bytes, and distinguish the BPE path from the lexical estimate path.
 
 use tokenzero_engine::ZeroTokenEngine;
+use zero_abi::{CompressionRequest, EngineInvocation, ExpandOptions, TokenAccounting, TokenEngine};
 use zerostack_conformance::token_engine;
 use zerostack_test_support::{TempWorkspace, test_invocation};
-use zero_abi::{EngineInvocation, TokenAccounting, TokenEngine};
 
 fn workspace() -> TempWorkspace {
     TempWorkspace::new("tz-certify").unwrap()
@@ -67,4 +67,64 @@ fn tokenzero_engine_conforms_to_shared_contract() {
     let engine = engine(&ws);
     let result = token_engine::run_all(&engine, &invocation);
     result.require_clean("TokenZero");
+}
+
+#[test]
+fn compression_hard_caps_visible_tokens_and_round_trips_exactly() {
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
+    let input = "repeated exact line for compression\n".repeat(50);
+    for budget in [8, 16, 30, 64] {
+        let result = engine
+            .compress(
+                &invocation,
+                CompressionRequest {
+                    bytes: input.as_bytes().to_vec(),
+                    max_tokens: budget,
+                    mode: String::new(),
+                    label: None,
+                    media_type: "text/plain; charset=utf-8".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            result.accounting.visible <= u64::from(budget),
+            "visible={} budget={budget}",
+            result.accounting.visible
+        );
+        if budget == 8 {
+            assert!(
+                result.truncated,
+                "an eight-token envelope must require truncation"
+            );
+        }
+        assert!(result.omitted_tokens > 0);
+        let expanded = engine
+            .expand(&invocation, &result.exact, ExpandOptions::default())
+            .unwrap();
+        assert_eq!(expanded, input.as_bytes());
+    }
+}
+
+#[test]
+fn repeated_input_saves_more_than_half_the_visible_tokens() {
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
+    let input = "same line same line same line\n".repeat(50);
+    let measured = engine.measure(&invocation, input.as_bytes()).unwrap();
+    let result = engine
+        .compress(
+            &invocation,
+            CompressionRequest {
+                bytes: input.as_bytes().to_vec(),
+                max_tokens: 64,
+                mode: String::new(),
+                label: None,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .unwrap();
+    assert!(result.accounting.visible * 2 < measured.billed);
 }

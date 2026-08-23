@@ -1579,14 +1579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokenzero-ship-tests"
-version = "1.4.0"
-dependencies = [
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "tokenzero-test-support"
 version = "1.4.0"
 dependencies = [
