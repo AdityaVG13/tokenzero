@@ -1487,6 +1487,7 @@ dependencies = [
  "zero-ledger",
  "zero-process",
  "zero-store",
+ "zerostack-conformance",
  "zerostack-test-support",
 ]
 
@@ -2106,6 +2107,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zerostack-conformance"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "zero-abi",
 ]
 
 [[package]]

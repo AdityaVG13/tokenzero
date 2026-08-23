@@ -50,6 +50,7 @@ wait-timeout = "0.2.1"
 tiktoken-rs = "0.12"
 zero-abi = { path = "../ZeroStack/crates/zero-abi" }
 zerostack-test-support = { path = "../ZeroStack/crates/zerostack-test-support" }
+zerostack-conformance = { path = "../ZeroStack/crates/zerostack-conformance" }
 zerostack-install = { path = "../ZeroStack/crates/zerostack-install" }
 zero-gauge = { path = "../ZeroStack/crates/zero-gauge" }
 zero-ledger = { path = "../ZeroStack/crates/zero-ledger" }

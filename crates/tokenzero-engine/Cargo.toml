@@ -34,6 +34,7 @@ zero-ledger.workspace = true
 zero-process.workspace = true
 
 [dev-dependencies]
+zerostack-conformance.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokenzero-test-support = { path = "../tokenzero-test-support" }

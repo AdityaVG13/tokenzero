@@ -2,6 +2,7 @@
 //! bytes, and distinguish the BPE path from the lexical estimate path.
 
 use tokenzero_engine::ZeroTokenEngine;
+use zerostack_conformance::token_engine;
 use zerostack_test_support::{TempWorkspace, test_invocation};
 use zero_abi::{EngineInvocation, TokenAccounting, TokenEngine};
 
@@ -57,4 +58,13 @@ fn certify_rejects_mismatched_tokenizer_claim() {
     let result = engine.certify(&invocation, bytes, &forged).unwrap();
     assert!(!result.matches, "tokenizer identity is part of the claim");
     assert_ne!(result.recomputed.tokenizer, "forged-tokenizer");
+}
+
+#[test]
+fn tokenzero_engine_conforms_to_shared_contract() {
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
+    let result = token_engine::run_all(&engine, &invocation);
+    result.require_clean("TokenZero");
 }
