@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 
-use crate::*;
 
 /// Lookup table for hex nibble encoding.
 pub(crate) const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
