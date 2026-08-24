@@ -1879,11 +1879,13 @@ pub use shell_quote::{
     split_command_string, split_command_string_for_platform,
 };
 pub use tokens::{
-    TokenizerFamily, TokenizerMetadata, VISIBLE_BUDGET_LOSSY_DECLARATION, active_model_id,
+    TokenizerFamily, TokenizerIdPreflightError, TokenizerMetadata,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, VISIBLE_BUDGET_LOSSY_DECLARATION, active_model_id,
     active_tokenizer_metadata, count_tokens, count_tokens_for_model, enforce_token_budget,
     enforce_token_budget_with_ref, pack_to_token_boundary, pack_to_token_boundary_for_model,
     pack_to_token_boundary_for_model_with_char_limit, pack_to_token_boundary_with_char_limit,
-    prefix_end_for_kept_lines, savings_ratio, savings_ratio_u64, sha256_hex, tokenizer_metadata,
+    prefix_end_for_kept_lines, preflight_tokenizer_id, savings_ratio, savings_ratio_u64,
+    sha256_hex, tokenizer_metadata,
 };
 
 #[cfg(test)]

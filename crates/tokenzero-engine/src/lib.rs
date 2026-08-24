@@ -317,6 +317,7 @@ pub enum InitializeState {
 }
 
 pub use zero_kernel::{
-    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, ZeroTokenEngine, account_mass,
-    estimator_tokenizer_id, tiktoken_tokenizer_id,
+    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, ZeroTokenEngine, account_mass, estimator_tokenizer_id,
+    preflight_tokenizer_id, tiktoken_tokenizer_id,
 };

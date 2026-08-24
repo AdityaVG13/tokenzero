@@ -14,6 +14,69 @@ pub fn sha256_hex(text: &str) -> String {
     zero_abi::sha256_hex(text.as_bytes())
 }
 
+/// Unlabeled estimator alias. Pulse grammar is `estimator:<slug>`.
+///
+/// `estimate:` looks labeled but is the Phase-4 honesty hole: kernel used to
+/// emit it and Pulse never accepted it. It is not an alias of `estimator:`.
+pub const UNLABELED_ESTIMATE_TOKENIZER_PREFIX: &str = "estimate:";
+
+/// Honesty preflight refusal for tokenizer ids that must never count as exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerIdPreflightError {
+    Empty,
+    UnlabeledEstimateAlias,
+    Q99IsNotExact,
+    ExactLabelIsNotATokenizerId,
+}
+
+impl TokenizerIdPreflightError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "tokenizer id is empty",
+            Self::UnlabeledEstimateAlias => {
+                "tokenizer id estimate: is unlabeled; Pulse grammar is estimator:<slug>"
+            }
+            Self::Q99IsNotExact => "Q99 is not a tokenizer identity and is never exact",
+            Self::ExactLabelIsNotATokenizerId => {
+                "exact is not a tokenizer identity; use provider/model@digest"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for TokenizerIdPreflightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn tokenizer_id_last_component(id: &str) -> &str {
+    id.rsplit([':', '/', '@']).next().unwrap_or(id)
+}
+
+/// Fail-closed honesty preflight for kernel/Pulse tokenizer ids.
+///
+/// Full Pulse grammar (`estimator:` / `tiktoken:` / `provider/model@hex`) stays
+/// in Pulse. This gate is the retry predicate: unlabeled `estimate:` is never
+/// an estimator alias, and `Q99` / `exact` never parse as exact identities.
+pub fn preflight_tokenizer_id(id: &str) -> Result<(), TokenizerIdPreflightError> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(TokenizerIdPreflightError::Empty);
+    }
+    if id.starts_with(UNLABELED_ESTIMATE_TOKENIZER_PREFIX) {
+        return Err(TokenizerIdPreflightError::UnlabeledEstimateAlias);
+    }
+    let leaf = tokenizer_id_last_component(id);
+    if leaf.eq_ignore_ascii_case("q99") || leaf.eq_ignore_ascii_case("q99-input") {
+        return Err(TokenizerIdPreflightError::Q99IsNotExact);
+    }
+    if id.eq_ignore_ascii_case("exact") {
+        return Err(TokenizerIdPreflightError::ExactLabelIsNotATokenizerId);
+    }
+    Ok(())
+}
+
 /// The lossy declaration emitted when the visible budget drops bytes and no
 /// recovery ref is available.
 ///

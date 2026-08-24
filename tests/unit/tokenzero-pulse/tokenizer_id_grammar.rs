@@ -32,9 +32,32 @@ fn tokenizer_id_grammar_accepts_estimator_and_digest_rejects_q99() {
         .with_tokenizer_id("tiktoken:cl100k_base")
         .expect("cl100k");
     assert!(event.clone().with_tokenizer_id("tiktoken:").is_err());
-    assert!(event.clone().with_tokenizer_id("Q99").is_err());
+    let unlabeled = event
+        .clone()
+        .with_tokenizer_id("estimate:tokenzero-lexical")
+        .expect_err("estimate: is unlabeled, not estimator:");
+    assert!(
+        unlabeled.contains("estimate:"),
+        "refusal must name the unlabeled prefix, got {unlabeled}"
+    );
+    assert!(
+        unlabeled.contains("estimator:"),
+        "refusal must name the labeled grammar, got {unlabeled}"
+    );
+    let q99 = event
+        .clone()
+        .with_tokenizer_id("Q99")
+        .expect_err("Q99 is never exact");
+    assert!(
+        q99.contains("Q99") && q99.contains("never exact"),
+        "Q99 refusal must be specific, got {q99}"
+    );
     assert!(event.clone().with_tokenizer_id("exact").is_err());
     assert!(event.clone().with_tokenizer_id("gpt-4o").is_err());
+    assert!(
+        event.clone().with_tokenizer_id("estimator:q99").is_err(),
+        "Q99 slug is not an exact tokenizer and not a labeled estimator"
+    );
     assert!(
         event
             .with_tokenizer_id("EngineIdentity::TokenZero")

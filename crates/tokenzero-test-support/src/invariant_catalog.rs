@@ -169,6 +169,15 @@ impl InvariantCatalog {
                 ProofStatus::Satisfied,
             ),
             invariant(
+                "INV-TZ-TOK-002",
+                "Unlabeled estimate: tokenizer ids and Q99-as-exact fail closed in the kernel/Pulse preflight. estimator:<slug> remains the labeled approximate class.",
+                &["F-TZ-001-EST"],
+                ProofKind::ProptestInvariant,
+                "tests/unit/tokenzero-core/model_artifact_limits.rs",
+                "tokenzero.tokenizer-id-preflight.v1",
+                ProofStatus::Satisfied,
+            ),
+            invariant(
                 "INV-TZ-EXP-001",
                 "Expand of a persisted blob ref returns the original stored bytes (WAL replay included).",
                 &["F-TZ-002-RT"],

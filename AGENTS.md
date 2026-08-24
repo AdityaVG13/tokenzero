@@ -246,6 +246,32 @@ This `AGENTS.md` is the operating contract for agents. The canonical technical c
 
 ---
 
+## Negative-Evidence Discipline
+
+Durable ledgers live in the sibling gauntlet workspace
+`/Users/aditya/AI/TokenZero__gauntlet_workspace/docs/progress/`
+(`perf-negative-results.md`, `conformance-negative-results.md`,
+`surface-deferrals.md`) and the workspace copies of those files.
+
+Before a perf, conformance, or surface change, grep those ledgers, then mine
+60 days of cass for `rejected, reverted, abandoned, slower, regressed, didn't
+help, within noise, no improvement, failed to improve, rolled back, backed out,
+not a keep, keep gate, estimator-as-q99, unlabeled-estimate, self-comparison`.
+If cass or the ledger is unavailable, record a blocker entry rather than
+silently skipping.
+
+Before opening a performance bead or optimization pass, run
+`TokenZero__gauntlet_workspace/scripts/mine-ledger.sh` and
+`mine-cass-cross-machine.sh`. If a hotspot already has a ledger entry, cite it
+and show the retry-condition predicate is satisfied before proceeding.
+
+Ledger entries must include a load-bearing **retry-condition predicate** —
+never "later", never "if it seems important". Product encoding:
+`preflight_tokenizer_id` refuses unlabeled `estimate:` and Q99-as-exact;
+keep-gate fails closed on `cv_pct > 5`.
+
+---
+
 ## Toolchain: Rust & Cargo
 
 Use Cargo for Rust builds. Do not introduce another package manager unless the

@@ -45,11 +45,33 @@ pub fn account_mass(accounting: &TokenAccounting) -> AccountMass {
     }
 }
 
+pub use tokenzero_core::{
+    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+};
+
 /// Pulse `estimator:<slug>` id for an approximate family, or the lexical gauge.
 pub fn estimator_tokenizer_id(model_id: Option<&str>) -> String {
-    match model_id.and_then(tokenzero_core::tokenizer_metadata) {
+    let id = match model_id.and_then(tokenzero_core::tokenizer_metadata) {
         Some(meta) => format!("estimator:tokenzero-{}", meta.family.name()),
         None => LEXICAL_ESTIMATOR_ID.to_string(),
+    };
+    seal_tokenizer_id(id)
+}
+
+fn seal_tokenizer_id(id: String) -> String {
+    tokenzero_core::preflight_tokenizer_id(&id).unwrap_or_else(|err| {
+        panic!("kernel tokenizer id failed honesty preflight ({err}): {id}");
+    });
+    id
+}
+
+fn sealed_accounting(tokenizer: String, count: u64, certified: bool) -> TokenAccounting {
+    TokenAccounting {
+        tokenizer: seal_tokenizer_id(tokenizer),
+        billed: count,
+        visible: count,
+        cached: 0,
+        certified,
     }
 }
 
@@ -66,7 +88,7 @@ pub fn tiktoken_tokenizer_id(model: &str) -> String {
         Some(Tokenizer::Gpt2) => "gpt2",
         None => "unknown",
     };
-    format!("tiktoken:{encoding}")
+    seal_tokenizer_id(format!("tiktoken:{encoding}"))
 }
 
 #[derive(Clone, Debug)]
@@ -109,13 +131,7 @@ impl ZeroTokenEngine {
             && let Ok(bpe) = tiktoken_rs::bpe_for_model(model)
         {
             let count = bpe.encode_with_special_tokens(text).len() as u64;
-            return TokenAccounting {
-                tokenizer: tiktoken_tokenizer_id(model),
-                billed: count,
-                visible: count,
-                cached: 0,
-                certified: true,
-            };
+            return sealed_accounting(tiktoken_tokenizer_id(model), count, true);
         }
         let (count, tokenizer) = match text {
             Some(text) => (
@@ -124,13 +140,7 @@ impl ZeroTokenEngine {
             ),
             None => (bytes.len() as u64, BYTES_ESTIMATOR_ID.to_string()),
         };
-        TokenAccounting {
-            tokenizer,
-            billed: count,
-            visible: count,
-            cached: 0,
-            certified: false,
-        }
+        sealed_accounting(tokenizer, count, false)
     }
 
     fn clamp_visible_to_budget<'a>(

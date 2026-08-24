@@ -8,7 +8,10 @@ use tokenzero_core::model_artifacts::{
     MAX_CAPSULE_RENDER_BYTES, MAX_CAPSULE_TOKEN_PAGES, MAX_TOKEN_PAGE_BYTES, MAX_TOKEN_PAGE_TOKENS,
     ModelArtifactError, ModelCapsule, TokenPage,
 };
-use tokenzero_core::sha256_hex;
+use tokenzero_core::{
+    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+    sha256_hex,
+};
 use tokenzero_test_support::{
     ExecutionEnvelope, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, scenario,
 };
@@ -54,6 +57,33 @@ fn adapter() -> ByteAdapter {
 
 fn blob_anchor(map: &ExactTokenMap) -> String {
     format!("tz://blob/{}", map.source_digest().to_hex())
+}
+
+#[test]
+fn tokenizer_id_preflight_refuses_unlabeled_estimate_and_q99_as_exact() {
+    stamp_subject_ne_oracle();
+    assert_eq!(UNLABELED_ESTIMATE_TOKENIZER_PREFIX, "estimate:");
+    assert_eq!(
+        preflight_tokenizer_id("estimate:tokenzero-lexical"),
+        Err(TokenizerIdPreflightError::UnlabeledEstimateAlias)
+    );
+    assert_eq!(
+        preflight_tokenizer_id("estimator:tokenzero-lexical"),
+        Ok(())
+    );
+    assert_eq!(
+        preflight_tokenizer_id("Q99"),
+        Err(TokenizerIdPreflightError::Q99IsNotExact)
+    );
+    assert_eq!(
+        preflight_tokenizer_id("tiktoken:Q99"),
+        Err(TokenizerIdPreflightError::Q99IsNotExact)
+    );
+    assert_eq!(
+        preflight_tokenizer_id("exact"),
+        Err(TokenizerIdPreflightError::ExactLabelIsNotATokenizerId)
+    );
+    assert_eq!(preflight_tokenizer_id("tiktoken:o200k_base"), Ok(()));
 }
 
 #[test]

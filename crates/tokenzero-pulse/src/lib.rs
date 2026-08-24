@@ -33,6 +33,10 @@ const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKENIZER_COMPONENT_MAX_LEN: usize = 64;
 const TOKENIZER_ID_ERROR: &str = "tokenizer id must name a real tokenizer or use estimator:<name>";
 
+pub use tokenzero_core::{
+    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+};
+
 /// Built-in production counts use TokenZero's deliberately labelled lexical
 /// gauge. The core gauges are approximate until an exact tokenizer adapter is
 /// linked; provider adapters may supply an exact `provider/model@<digest>` id.
@@ -60,7 +64,13 @@ fn is_tokenizer_slug(component: &str) -> bool {
 /// - `provider/model@<64hex>` — `ExactTokenizerIdentity::ledger_identity`
 ///
 /// Bare `Q99`, `exact`, MCP registry labels, and unlabeled model ids fail.
+/// `estimate:` is refused by [`preflight_tokenizer_id`] before grammar match
+/// so it cannot be smuggled as an `estimator:` alias.
 fn valid_tokenizer_id(id: &str) -> bool {
+    tokenzero_core::preflight_tokenizer_id(id).is_ok() && pulse_tokenizer_grammar(id)
+}
+
+fn pulse_tokenizer_grammar(id: &str) -> bool {
     if let Some(name) = id.strip_prefix("estimator:") {
         return is_tokenizer_slug(name);
     }
@@ -79,6 +89,13 @@ fn valid_tokenizer_id(id: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn tokenizer_id_refusal(id: &str) -> &'static str {
+    match tokenzero_core::preflight_tokenizer_id(id) {
+        Err(error) => error.as_str(),
+        Ok(()) => TOKENIZER_ID_ERROR,
+    }
 }
 
 macro_rules! pulse_structs {
@@ -238,7 +255,7 @@ impl PulseEvent {
 
     pub fn with_tokenizer_id(mut self, tokenizer_id: &str) -> Result<Self, &'static str> {
         if !valid_tokenizer_id(tokenizer_id) {
-            return Err(TOKENIZER_ID_ERROR);
+            return Err(tokenizer_id_refusal(tokenizer_id));
         }
         self.tokenizer_id = tokenizer_id.to_string();
         Ok(self)
@@ -367,7 +384,10 @@ pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File
 
 pub fn record_event(path: &Path, event: &PulseEvent) -> IoResult<()> {
     if !valid_tokenizer_id(&event.tokenizer_id) {
-        return Err(IoError::new(ErrorKind::InvalidInput, TOKENIZER_ID_ERROR));
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            tokenizer_id_refusal(&event.tokenizer_id),
+        ));
     }
     // Serialize before taking the cross-process lock so formatting work never
     // lengthens the critical section. The lock then orders event appends with

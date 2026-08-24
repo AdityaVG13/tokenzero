@@ -10,8 +10,9 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokenzero_engine::{
-    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, ZeroTokenEngine, account_mass,
-    estimator_tokenizer_id, tiktoken_tokenizer_id,
+    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, ZeroTokenEngine, account_mass, estimator_tokenizer_id,
+    preflight_tokenizer_id, tiktoken_tokenizer_id,
 };
 use tokenzero_pulse::PulseEvent;
 use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle, ScenarioAgreement, scenario};
@@ -121,9 +122,36 @@ fn canonical_account(accounting: &TokenAccounting, mass: AccountMass) -> Value {
 }
 
 fn pulse_accepts_estimator(id: &str) {
+    preflight_tokenizer_id(id).unwrap_or_else(|err| panic!("{id} failed honesty preflight: {err}"));
     PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
         .with_tokenizer_id(id)
         .unwrap_or_else(|_| panic!("{id} must satisfy Pulse estimator:<slug> grammar"));
+}
+
+#[test]
+fn kernel_and_pulse_refuse_unlabeled_estimate_alias() {
+    stamp();
+    assert_eq!(UNLABELED_ESTIMATE_TOKENIZER_PREFIX, "estimate:");
+    assert_eq!(
+        preflight_tokenizer_id("estimate:tokenzero-lexical"),
+        Err(TokenizerIdPreflightError::UnlabeledEstimateAlias)
+    );
+    let unlabeled = PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
+        .with_tokenizer_id("estimate:tokenzero-lexical")
+        .expect_err("Pulse must refuse estimate:");
+    assert!(unlabeled.contains("estimate:"));
+    let (_ws, engine, invocation) = engine();
+    let measured = engine.measure(&invocation, PAYLOAD).expect("measure");
+    preflight_tokenizer_id(&measured.tokenizer).expect("kernel emit must pass preflight");
+    assert!(
+        !measured
+            .tokenizer
+            .starts_with(UNLABELED_ESTIMATE_TOKENIZER_PREFIX),
+        "kernel must not emit unlabeled estimate: ids, got {}",
+        measured.tokenizer
+    );
+    assert!(measured.tokenizer.starts_with("estimator:"));
+    pulse_accepts_estimator(&measured.tokenizer);
 }
 
 #[test]

@@ -5,4 +5,7 @@
 #[path = "../../tokenzero-engine/src/zero_kernel.rs"]
 mod implementation;
 
-pub use implementation::ZeroTokenEngine;
+pub use implementation::{
+    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, ZeroTokenEngine,
+    preflight_tokenizer_id,
+};
