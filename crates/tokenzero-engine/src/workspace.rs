@@ -99,9 +99,9 @@ fn first_env(names: &[&str]) -> Option<OsString> {
 
 /// Pure store-root selection; the frozen precedence is documented at module level.
 ///
-/// Delegates to the hub `zero_store::ResolvedStore`. `Legacy` (no `.zerostack`
-/// marker and no honored opt-in pin) yields `None`; every unified mode yields
-/// the unified store root (project-local `.zerostack` or the resolved pin).
+/// Delegates to the hub `zero_store::ResolvedStore`. `Legacy` is returned only
+/// for an existing `.tokenzero`; new repositories resolve to project-local
+/// `.zerostack` or an explicitly opted-in pin.
 pub fn resolve_store_root_with_env(
     repo_root: &Path,
     store_root_pin: Option<&OsStr>,
@@ -299,9 +299,8 @@ pub fn store_resolution_json(
         "project_key": r.project_key,
         "effective_engine_dir": r.effective_engine_dir.display().to_string(),
         "cas_host": r.cas_host.display().to_string(),
-        "algorithm": "1) repo_root/.zerostack if present; 2) else ZEROSTACK_STORE_ROOT only when TOKENZERO_SHARED_STORE/ZEROSTACK_SHARED_STORE opt-in; 3) else legacy repo_root/.tokenzero/. Explicit --cache-path / TOKENZERO_CACHE_PATH always win. External opted-in pins are project-namespaced under <pin>/projects/<project-key>.",
+        "algorithm": "1) repo_root/.zerostack if present; 2) else an opted-in ZEROSTACK_STORE_ROOT; 3) else an existing legacy repo_root/.tokenzero; 4) otherwise create repo_root/.zerostack/tokenzero. Explicit cache paths still win; external pins remain project-namespaced.",
         "opt_in_envs": SHARED_STORE_OPT_IN_ENVS,
         "store_root_envs": STORE_ROOT_ENVS,
     })
 }
-

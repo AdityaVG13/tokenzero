@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fs4::{FileExt, TryLockError};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,7 +10,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio, savings_ratio_u64};
+use tokenzero_core::{savings_ratio, savings_ratio_u64, PULSE_SCHEMA_VERSION};
+use zero_store::{Engine, ResolvedStore};
 
 mod eprocess;
 pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
@@ -34,7 +35,7 @@ const TOKENIZER_COMPONENT_MAX_LEN: usize = 64;
 const TOKENIZER_ID_ERROR: &str = "tokenizer id must name a real tokenizer or use estimator:<name>";
 
 pub use tokenzero_core::{
-    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+    preflight_tokenizer_id, TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX,
 };
 
 /// Built-in production counts use TokenZero's deliberately labelled lexical
@@ -325,7 +326,9 @@ pub fn pulse_task_lossless(
 }
 
 pub fn default_ledger_path(root: &Path) -> PathBuf {
-    root.join(".tokenzero/pulse/events.jsonl")
+    ResolvedStore::resolve_from_process(root, Engine::TokenZero, &["TOKENZERO_SHARED_STORE"])
+        .engine_dir()
+        .join("pulse/events.jsonl")
 }
 
 fn with_pulse_lock<T>(
@@ -356,7 +359,7 @@ pub enum PulseFileOpenMode {
 
 #[cfg(unix)]
 pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
-    use rustix::fs::{CWD, Mode, OFlags, openat};
+    use rustix::fs::{openat, Mode, OFlags, CWD};
 
     let access = match mode {
         PulseFileOpenMode::Append => OFlags::WRONLY | OFlags::APPEND,
@@ -694,19 +697,28 @@ fn init_sqlite(conn: &Connection) -> IoResult<()> {
         CREATE INDEX IF NOT EXISTS idx_events_event_time ON events(event, timestamp_unix DESC);",
     )
     .into_io()?;
-    for ddl in [
-        "ALTER TABLE events ADD COLUMN session_id TEXT",
-        "ALTER TABLE events ADD COLUMN call_id TEXT",
-        "ALTER TABLE events ADD COLUMN ref_ids TEXT",
-        "ALTER TABLE events ADD COLUMN tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core'",
+    for (column, ddl) in [
+        ("session_id", "ALTER TABLE events ADD COLUMN session_id TEXT"),
+        ("call_id", "ALTER TABLE events ADD COLUMN call_id TEXT"),
+        ("ref_ids", "ALTER TABLE events ADD COLUMN ref_ids TEXT"),
+        (
+            "tokenizer_id",
+            "ALTER TABLE events ADD COLUMN tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core'",
+        ),
     ] {
-        if let Err(err) = conn.execute(ddl, []) {
-            if !err.to_string().contains("duplicate column name") {
-                return Err(err).into_io();
-            }
+        if sqlite_events_has_column(conn, column)? {
+            continue;
         }
+        conn.execute(ddl, []).into_io()?;
     }
     Ok(())
+}
+
+fn sqlite_events_has_column(conn: &Connection, column: &str) -> IoResult<bool> {
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = ?1")
+        .into_io()?;
+    stmt.exists(params![column]).into_io()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

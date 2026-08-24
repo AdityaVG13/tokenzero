@@ -133,7 +133,11 @@ fn recovery_adjusted_savings(raw: f64, consumed: f64) -> f64 {
 }
 
 fn gated_savings(savings: f64, gates_pass: bool) -> f64 {
-    if gates_pass { savings.max(0.0) } else { 0.0 }
+    if gates_pass {
+        savings
+    } else {
+        0.0
+    }
 }
 
 pub(crate) fn aggregate_bench_rows(rows: &[Json]) -> Json {
@@ -239,15 +243,69 @@ pub(crate) fn private_benchmark_path(suite: &str) -> PathBuf {
         .join(format!("{suite}.json"))
 }
 
+/// Shell-matrix success without substring agreement.
+///
+/// `"ok": false` JSON contains the letters `ok`. Text envelopes must have a
+/// payload line that is exactly `ok` (the `echo ok` fixture), not a diagnostic
+/// that happens to mention it.
+pub(crate) fn matrix_row_ok(exit_success: bool, stdout: &str) -> bool {
+    if !exit_success {
+        return false;
+    }
+    let trimmed = stdout.trim();
+    if let Ok(parsed) = serde_json::from_str::<Json>(trimmed) {
+        if parsed["status"].as_str() != Some("ok") {
+            return false;
+        }
+        return parsed
+            .pointer("/telemetry/command_success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+    }
+    stdout.lines().any(|line| line.trim() == "ok")
+}
+
 pub(crate) fn run_matrix_row(label: &str, command: &mut Command) -> Json {
     let start = Instant::now();
     match command.output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            object!({"label": label, "ok": output.status.success() && stdout.contains("ok"), "exit_code": output.status.code(), "stdout": stdout, "stderr": String::from_utf8_lossy(&output.stderr).to_string(), "duration_ms": start.elapsed().as_millis(), "alias_dependency": false})
+            let ok = matrix_row_ok(output.status.success(), &stdout);
+            object!({"label": label, "ok": ok, "skipped": false, "status": if ok { "run" } else { "fail" }, "exit_code": output.status.code(), "stdout": stdout, "stderr": String::from_utf8_lossy(&output.stderr).to_string(), "duration_ms": start.elapsed().as_millis(), "alias_dependency": false})
         }
         Err(err) => {
-            object!({"label": label, "ok": false, "error": err.to_string(), "alias_dependency": false})
+            object!({"label": label, "ok": false, "skipped": false, "status": "fail", "error": err.to_string(), "alias_dependency": false})
         }
+    }
+}
+
+#[cfg(test)]
+mod matrix_row_ok_tests {
+    use super::matrix_row_ok;
+
+    #[test]
+    fn json_ok_false_is_not_green() {
+        assert!(
+            !matrix_row_ok(true, r#"{"status":"error","ok":false,"visible":"ok"}"#),
+            "JSON key/value ok must not substring-match as success"
+        );
+    }
+
+    #[test]
+    fn json_status_ok_with_failed_command_is_not_green() {
+        assert!(!matrix_row_ok(
+            true,
+            r#"{"status":"ok","telemetry":{"command_success":false}}"#
+        ));
+    }
+
+    #[test]
+    fn text_payload_line_ok_is_green() {
+        assert!(matrix_row_ok(true, "ok\ncombined_ref: tz://blob/abc\n"));
+    }
+
+    #[test]
+    fn diagnostic_mentioning_ok_is_not_green() {
+        assert!(!matrix_row_ok(true, "looks ok but the child failed\n"));
     }
 }

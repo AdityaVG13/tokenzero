@@ -10,7 +10,7 @@ The harness owns the machine-wide heavy-process guard for the whole run.
 import argparse, atexit, hashlib, json, os, platform, re, subprocess, tempfile, time
 from pathlib import Path
 REPO=Path(__file__).resolve().parents[3]
-BIN=REPO/'target/release/tokenzero'
+BIN=REPO/'target/release-perf/tokenzero'
 OUT=Path(__file__).with_suffix('').with_name('large_read_rss')
 GUARD=Path('/tmp/zerostack-heavy-process.guard')
 SIZES=(1<<20,10<<20,100<<20)
@@ -77,7 +77,7 @@ def digest(path):
  return h.hexdigest()
 
 def run(label,provenance):
- if not BIN.is_file(): raise SystemExit('target/release/tokenzero is missing')
+ if not BIN.is_file(): raise SystemExit('target/release-perf/tokenzero is missing; never size-optimized --release for RSS/wall claims. Build: cargo build --profile release-perf -p tokenzero-cli --bin tokenzero --no-default-features')
  acquire(f'large_read_rss.py --label {label}'); atexit.register(release)
  try:
   with tempfile.TemporaryDirectory(prefix='tokenzero-large-read-') as raw:
@@ -92,7 +92,7 @@ def run(label,provenance):
   release(); atexit.unregister(release)
 
 def main():
- p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(required=True); g.add_argument('--label',choices=('baseline','candidate')); g.add_argument('--check-budget',action='store_true'); p.add_argument('--binary-provenance',default='release binary built from the working tree immediately before this measurement'); a=p.parse_args()
+ p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(required=True); g.add_argument('--label',choices=('baseline','candidate')); g.add_argument('--check-budget',action='store_true'); p.add_argument('--binary-provenance',default='release-perf binary built from the working tree immediately before this measurement'); a=p.parse_args()
  if a.check_budget:
   path=run('budget-check',a.binary_provenance); actual=json.loads(path.read_text())['workloads']['single_reads'][str(SIZES[-1])]['max_rss_bytes']; path.unlink()
   if actual>BUDGET: raise SystemExit(f'single 100MB read RSS budget exceeded: {actual} > {BUDGET}')

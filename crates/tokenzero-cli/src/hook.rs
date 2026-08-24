@@ -69,8 +69,8 @@ fn session_start_decision(input: &str, max_tokens: usize) -> Option<Value> {
     {
         return None;
     }
-    let cache =
-        std::path::Path::new(payload.get("cwd")?.as_str()?).join(".tokenzero/recovery-cache.json");
+    let cwd = std::path::Path::new(payload.get("cwd")?.as_str()?);
+    let cache = tokenzero_engine::default_recovery_cache_path(cwd);
     let pack = tokenzero_engine::session_pack(&cache, max_tokens.max(50))?;
     Some(json!({"hookSpecificOutput": {
         "hookEventName": "SessionStart", "additionalContext": pack

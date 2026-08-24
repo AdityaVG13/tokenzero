@@ -12,6 +12,9 @@ pub(crate) struct SearchStats {
     /// rg output rows that did not parse back into matches — a parity canary
     /// (silent row loss would otherwise read as "no match there").
     pub(crate) unparsed_rows: usize,
+    /// rg `--threads` cap actually used. `1` is serial; omit from claims as
+    /// concurrent search. Internal walker is also serial (`0` until set).
+    pub(crate) search_threads: u32,
 }
 
 /// Hard recursion bound for the internal directory walkers. Deep enough for
@@ -572,6 +575,36 @@ pub(crate) enum RgFailure {
     Unavailable(String),
 }
 
+/// Hard cap passed to rg. Telemetry must report this; a search-perf claim
+/// that omits `search_threads` is running serial (A27 concurrent-off).
+pub(crate) const RG_SEARCH_THREADS: u32 = 1;
+
+/// Classify rg's process status without matching English stderr.
+///
+/// grep (regex) exit 2 is `InvalidPattern` so we never fall back to
+/// substring search. find (fixed-strings) exit 2 stays `Unavailable`.
+pub(crate) fn classify_rg_exit(
+    tool: &str,
+    code: Option<i32>,
+    stderr: &str,
+) -> Result<(), RgFailure> {
+    match code {
+        Some(0) | Some(1) => Ok(()),
+        Some(2) if tool == "grep" => {
+            let detail = if stderr.is_empty() {
+                "rg exited 2 (grep regex backend; stderr empty under --no-messages)".to_string()
+            } else {
+                stderr.to_string()
+            };
+            Err(RgFailure::InvalidPattern(detail))
+        }
+        other => Err(RgFailure::Unavailable(format!(
+            "rg exited with {other:?}: {}",
+            preview(stderr)
+        ))),
+    }
+}
+
 /// Portable rg discovery: env → PATH → well-known layouts (wqw.3).
 pub fn find_rg_in_path() -> Option<PathBuf> {
     crate::binary_resolve::resolve_rg_binary()
@@ -605,7 +638,10 @@ pub(crate) fn rg_search(
     max_results: usize,
 ) -> Result<(Vec<SearchMatch>, SearchStats), RgFailure> {
     let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut stats = SearchStats::default();
+    let mut stats = SearchStats {
+        search_threads: RG_SEARCH_THREADS,
+        ..SearchStats::default()
+    };
     for (root_idx, root) in roots.iter().enumerate() {
         if crate::wall::check_active_wall_deadline_every(root_idx, 1).is_some() {
             stats.truncated_by_wall = true;
@@ -616,6 +652,7 @@ pub(crate) fn rg_search(
             break;
         }
         let mut command = std::process::Command::new(rg);
+        let thread_cap = RG_SEARCH_THREADS.to_string();
         command.args([
             "--line-number",
             "--no-heading",
@@ -627,9 +664,9 @@ pub(crate) fn rg_search(
             // Multi-tenant hosts may run many TokenZero sessions. Cap rg's
             // internal fanout so one find cannot saturate the machine; the
             // machine-wide analysis permit then bounds how many such searches
-            // run at once.
+            // run at once. `search_threads` telemetry must match this argv.
             "--threads",
-            "1",
+            thread_cap.as_str(),
         ]);
         // Mirror the internal scanner's skip list (`should_skip` with hidden
         // entries excluded): `!.*` also keeps the `.tokenzero` recovery cache
@@ -717,21 +754,11 @@ pub(crate) fn rg_search(
             stdout,
             stderr,
         };
-        match output.status.code() {
-            Some(0) => {}
-            // Exit code 1 is rg's "searched fine, found nothing".
-            Some(1) => continue,
-            code => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stderr = stderr.trim();
-                if tool == "grep" && stderr.contains("regex parse error") {
-                    return Err(RgFailure::InvalidPattern(stderr.to_string()));
-                }
-                return Err(RgFailure::Unavailable(format!(
-                    "rg exited with {code:?}: {}",
-                    preview(stderr)
-                )));
-            }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match classify_rg_exit(tool, output.status.code(), stderr.trim()) {
+            Ok(()) if output.status.code() == Some(1) => continue,
+            Ok(()) => {}
+            Err(err) => return Err(err),
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let base = root.display().to_string();
@@ -959,3 +986,34 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
         || (!include_hidden && name.starts_with('.'))
 }
 
+#[cfg(test)]
+mod classify_rg_exit_tests {
+    use super::{classify_rg_exit, RgFailure};
+
+    #[test]
+    fn grep_exit_2_is_invalid_pattern_without_english_stderr() {
+        match classify_rg_exit("grep", Some(2), "") {
+            Err(RgFailure::InvalidPattern(message)) => {
+                assert!(
+                    !message.contains("regex parse error"),
+                    "must not require an English rg diagnostic: {message}"
+                );
+            }
+            other => panic!("expected InvalidPattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_exit_2_is_unavailable_not_substring_agreement() {
+        match classify_rg_exit("find", Some(2), "regex parse error") {
+            Err(RgFailure::Unavailable(_)) => {}
+            other => panic!("find --fixed-strings exit 2 is Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grep_no_match_is_ok() {
+        assert!(classify_rg_exit("grep", Some(1), "").is_ok());
+        assert!(classify_rg_exit("grep", Some(0), "").is_ok());
+    }
+}

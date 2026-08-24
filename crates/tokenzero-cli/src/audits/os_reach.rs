@@ -62,7 +62,20 @@ pub(crate) fn run_shell_matrix(
         let inv = posix_shell_matrix_command(&exe, &cache);
         for clean in [false, true] {
             for sh in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+                let label = if clean {
+                    format!("env-i {sh} -c")
+                } else {
+                    format!("{sh} -c")
+                };
                 if !Path::new(sh).exists() {
+                    rows.push(json!({
+                        "label": label,
+                        "ok": false,
+                        "skipped": true,
+                        "status": "skip",
+                        "reason": "shell binary not present on this host",
+                        "alias_dependency": false
+                    }));
                     continue;
                 }
                 let mut cmd = if clean {
@@ -74,14 +87,7 @@ pub(crate) fn run_shell_matrix(
                     cmd.arg("-i").arg(sh);
                 }
                 cmd.arg("-c").arg(&inv);
-                rows.push(run_matrix_row(
-                    &if clean {
-                        format!("env-i {sh} -c")
-                    } else {
-                        format!("{sh} -c")
-                    },
-                    &mut cmd,
-                ));
+                rows.push(run_matrix_row(&label, &mut cmd));
             }
         }
     }
@@ -104,8 +110,10 @@ pub(crate) fn run_shell_matrix(
             .arg(format!("& {}", quote_for("powershell", &args)));
         rows.push(run_matrix_row("powershell -NoProfile", &mut ps));
     }
-    let ok = rows.iter().all(|r| r["ok"] == true);
-    let report = json!({"schema_version":"tokenzero.shell_matrix.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"rows":rows,"windows":if cfg!(windows){"run"}else{"not_run_on_this_host"},"linux":if cfg!(target_os="linux"){"run"}else{"not_run_on_this_host"},"macos":if cfg!(target_os="macos"){"run"}else{"not_run_on_this_host"}});
+    let run_rows: Vec<_> = rows.iter().filter(|r| r["status"] != "skip").collect();
+    let skipped = rows.iter().filter(|r| r["status"] == "skip").count();
+    let ok = !run_rows.is_empty() && run_rows.iter().all(|r| r["ok"] == true);
+    let report = json!({"schema_version":"tokenzero.shell_matrix.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"skipped_rows":skipped,"rows":rows,"windows":if cfg!(windows){"run"}else{"not_run_on_this_host"},"linux":if cfg!(target_os="linux"){"run"}else{"not_run_on_this_host"},"macos":if cfg!(target_os="macos"){"run"}else{"not_run_on_this_host"}});
     finish_artifact(
         &output_json,
         output_md.as_deref(),
@@ -251,7 +259,7 @@ pub(crate) fn run_core_surface_audit(
         ("doctor", doctor["ok"] == true, "doctor --runtime on disposable local root", json!({"schema_version":doctor["schema_version"],"root":doctor["root"]}));
         ("shell", shell_matrix["ok"] == true, "shell-matrix current host", json!({"schema_version":shell_matrix["schema_version"],"windows":shell_matrix["windows"],"linux":shell_matrix["linux"],"macos":shell_matrix["macos"]}));
         ("mcp", mcp["ok"] == true && mcp["unexpected_exits"] == 0, "mcp-smoke local stdio process", json!({"schema_version":mcp["schema_version"],"unexpected_exits":mcp["unexpected_exits"]}));
-        ("cache_pack", cp.status == "ok" || cp.status == "degraded", "cache-pack local recovery cache", json!({"tool":cp.tool,"status":cp.status,"refs":cp.refs.len()}));
+        ("cache_pack", cp.status == "ok", "cache-pack local recovery cache", json!({"tool":cp.tool,"status":cp.status,"refs":cp.refs.len()}));
     })
 }
 
@@ -268,4 +276,3 @@ pub(crate) fn load_os_release_artifacts(paths: &[PathBuf]) -> Result<Vec<serde_j
         })
         .collect()
 }
-

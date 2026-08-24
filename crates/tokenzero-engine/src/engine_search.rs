@@ -49,6 +49,7 @@ impl TokenZeroEngine {
         max_visited_files: usize,
     ) -> Result<SearchBackendRun, ToolResponse> {
         let run_internal = |stats: &mut SearchStats, matches: &mut Vec<SearchMatch>| {
+            stats.search_threads = 1;
             for root in roots {
                 collect_search(
                     root,
@@ -325,6 +326,8 @@ impl TokenZeroEngine {
             "truncated_by_results": stats.truncated_by_results,
             "truncated_by_visit": stats.truncated_by_visit,
             "search_backend": backend,
+            "search_threads": stats.search_threads,
+            "concurrent_search": stats.search_threads > 1,
             "output_strategy": if grouped { "grouped_by_file" } else { "hit_target" },
             "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
             "degraded": storage_error.is_some(),
@@ -655,4 +658,3 @@ impl TokenZeroEngine {
         response
     }
 }
-

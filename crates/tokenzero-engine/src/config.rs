@@ -96,7 +96,7 @@ impl EngineConfig {
         Self {
             allowed_roots: vec![root.to_path_buf()],
             call_root: root.to_path_buf(),
-            cache_path: root.join(".tokenzero/recovery-cache.json"),
+            cache_path: crate::workspace::default_recovery_cache_path(root),
             max_visible_tokens: 4000,
             capsule_exact_ref_threshold_bytes: capsule_exact_ref_threshold_from_env(),
             admission_policy: AdmissionPolicy::ByteThreshold,
@@ -413,4 +413,3 @@ pub fn mcp_idle_timeout_from_secs(seconds: Option<u64>) -> Option<Duration> {
         seconds.clamp(1, MAX_MCP_IDLE_TIMEOUT_SECS),
     ))
 }
-
