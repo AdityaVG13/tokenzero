@@ -11,29 +11,29 @@ from pathlib import Path
 from types import ModuleType
 
 ENGINE_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_HUB_REV = "be8867ee99a14fc78a75db220358096bf3874c76"
 
 
 def hub_root() -> Path:
-    """Resolve the immutable ZeroStack source already pinned by Cargo.lock."""
+    """Resolve the sibling ZeroStack source selected by Cargo metadata."""
     result = subprocess.run(
         ["cargo", "metadata", "--locked", "--format-version", "1"],
         cwd=ENGINE_ROOT,
         capture_output=True,
         text=True,
         check=True,
+        timeout=60,
     )
-    packages = json.loads(result.stdout)["packages"]
+    try:
+        packages = json.loads(result.stdout)["packages"]  # ubs:ignore — JSONDecodeError is converted below.
+    except (json.JSONDecodeError, KeyError) as error:
+        raise RuntimeError("Cargo metadata returned malformed JSON") from error
     for package in packages:
-        source = package.get("source") or ""
-        if package["name"] != "zero-abi" or EXPECTED_HUB_REV not in source:
+        if package["name"] != "zero-abi":
             continue
         root = Path(package["manifest_path"]).resolve().parents[2]
         if (root / "scripts" / "check-portability.sh").is_file():
             return root
-    raise RuntimeError(
-        f"Cargo metadata does not contain ZeroStack revision {EXPECTED_HUB_REV}"
-    )
+    raise RuntimeError("Cargo metadata does not contain a usable sibling ZeroStack source")
 
 
 def load_hub_script(script_name: str, module_name: str) -> ModuleType:

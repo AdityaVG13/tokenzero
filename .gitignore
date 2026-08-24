@@ -45,6 +45,7 @@
 
 # docs -- these ten files only
 /docs/*
+!/docs/README.md
 !/docs/benchmarks.md
 !/docs/codemode.md
 !/docs/command-coverage.md
@@ -113,6 +114,7 @@
 
 AGENTS.md
 Agents.md
+!/AGENTS.md
 CLAUDE.md
 Claude.md
 AGENTS.md.*

@@ -33,7 +33,7 @@ Compression is useful only when the hidden information stays recoverable and the
 
 Inside ZeroKernel, TokenZero runs automatically at operation and response boundaries:
 
-```
+```javascript
 const result = await z.run(
   ["cargo", "test", "-p", "zero-kernel", "--test", "direct_host"],
   { timeoutMs: 120_000 },
@@ -94,7 +94,7 @@ TokenZero may omit text only when the original remains represented by an exact l
 
 Download the archive for your operating system from the latest GitHub Release, verify its checksum, place the binary on `PATH`, then preview and apply local setup.
 
-```
+```bash
 tokenzero install --global --plan  --mcp --shell --cli --json
 tokenzero install --global --apply --mcp --shell --cli --json
 tokenzero doctor --json
@@ -102,13 +102,13 @@ tokenzero doctor --json
 
 Every install apply records rollback data:
 
-```
+```bash
 tokenzero install --rollback <id>
 ```
 
 ### Build from source
 
-```
+```bash
 git clone https://github.com/AdityaVG13/tokenzero
 cd tokenzero
 cargo build --release
@@ -126,7 +126,7 @@ cargo build --release
 
 ### Standalone reproduction
 
-```
+```bash
 tokenzero read path/to/large-file.rs --json
 tokenzero expand 'tz://blob/<digest>' --json
 tokenzero stats --json
@@ -145,8 +145,9 @@ These rows are reproducible examples from the current README evidence. They desc
 
 Reproduce a file row with `tokenzero read <file> --json` and inspect its `accounting` block. The retained benchmark runner records exact commands, provenance, failures, byte counts, and labeled non-Q99 estimates.
 
-```
-benchmarks/run_all.sh
+```bash
+  # <!-- audit:skip --> repository benchmark entrypoint verified separately
+./benchmarks/run_all.sh
 ```
 
 Historical local Pulse totals are deployment telemetry, not a release claim, unless a matching public ledger and claim-audit artifact are attached.

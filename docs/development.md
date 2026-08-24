@@ -56,7 +56,7 @@ Eight Rust crates:
 | `tokenzero-recovery` | Bounded recovery cache with exact byte-recovery for refs |
 | `tokenzero-runtime` | Runtime and session orchestration for the context layer |
 | `tokenzero-filters` | Content filters and selectors for compression |
-| `tokenzero-mcp` | MCP server exposing read/find/tree/expand/shell tools |
+| `tokenzero-cli` | Standalone CLI and classic MCP compatibility entrypoint |
 | `tokenzero` | The `tokenzero` binary |
 | `tokenzero-install` | Installer and agent-wiring (Claude/Codex/Grok/etc.) |
 | `tokenzero-pulse` | Pulse telemetry and forecasting |

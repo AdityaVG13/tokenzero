@@ -1,86 +1,21 @@
-# TokenZero MCP compatibility contract
+# TokenZero MCP compatibility policy
 
-Status: compatibility policy, not a release announcement. Contract date: **2026-08-07**.
+Classic MCP remains an explicit compatibility surface. It is not the default multi-engine path and does not expose an engine-local CodeMode planner.
 
-`tokenzero-mcp-compat` is the separately named Rust compatibility package for classic per-operation MCP. The retained `tokenzero-codemode` artifact is now a planner-free raw worker launched by ZeroStack, not a competing plan catalog. This contract freezes the classic compatibility surface and explains how to move clients to the ZeroStack aggregate host.
+Supported behavior receives security and correctness fixes for framing, cancellation, validation, corruption, crashes, hangs, schemas, and documented tools. Compatibility does not promise parity with every ZeroKernel workflow or removal after a fixed number of releases.
 
-## Release-N support window
+## Versioning
 
-Release N means the first stable release after this contract that makes CodeMode
-the default surface. Release N has not been announced by this document. The
-calendar dates below are floors, not promised release dates:
+FSZero, GraphZero, and TokenZero will adopt one coordinated version when joint releases begin. Compatibility changes follow that engine version. There is no independent release-count removal schedule.
 
-- Compatibility support begins with release N and continues until an approved
-  removal release.
-- N+1 may require an explicit compatibility install no earlier than
-  **2026-11-05** and no earlier than 90 days after the actual N publication,
-  whichever is later.
-- Removal is forbidden before **2027-02-03**, before 180 days after the actual N
-  publication, or before two later stable releases, whichever is later.
-- Removal also requires a complete client matrix, 60 days without an open P0 or
-  P1 migration defect, representative corroborated demand evidence, a tested
-  rollback package, a major-version notice, an owner-approved major release, and explicit owner approval.
+Removing a documented capability requires an explicit owner decision, client migration matrix, rollback evidence, and release notes.
 
-### Feature freeze and supported fixes
+## Migration
 
-The compatibility catalog is feature-frozen at release N. It receives only:
+1. Inventory direct tools used by the client.
+2. Map the workflow to the six-operation ZeroKernel surface.
+3. Verify refs, projection, cancellation, and state.
+4. Stop the client and remove classic registration.
+5. Enable ZeroKernel as the only aggregate model surface.
 
-1. security or privacy fixes;
-2. correctness fixes, including data loss, corruption, protocol framing, and
-   process-lifecycle defects;
-3. migration-blocker fixes needed to move a supported client to CodeMode; and
-4. build or packaging fixes needed to preserve the published compatibility
-   contract.
-
-New operations, convenience features, and composition work belong in aggregate bindings and ZeroStack. A
-performance change is in scope only when it is required for one of the supported
-fix classes. Compatibility support does not promise feature parity.
-
-Protocol stdout remains JSON-RPC only. A compatibility, startup, or deprecation
-warning must use stderr or a typed protocol diagnostic; it must never be printed
-as prose on stdout.
-
-Report a migration defect at
-<https://github.com/AdityaVG13/tokenzero/issues>. When the server can still
-answer, first call `tz_report_tool_issue` and attach its local report to the
-issue. Do not put secrets or payload bytes in either report.
-
-## Operation-complete migration
-
-On the ZeroStack aggregate host, put dependent calls in one plan instead of making many classic MCP round trips. Bare aliases such as `read` follow the same compatibility row as their canonical `tz_*` target.
-
-| Compatibility operation | Alias | CodeMode path | Migration note |
-|---|---|---|---|
-| `tz_read` | `read` | `zero.read` | Returns bounded text and exact refs. |
-| `tz_find` | `find` | `zero.find` | Literal content search. |
-| `tz_grep` | `grep` | `zero.grep` | Regex behavior still depends on the selected backend. |
-| `tz_recall` | `recall` | `zero.recall` | Searches already stored payloads. |
-| `tz_batch` | `batch` | `zero.batch` | Prefer one recipe when later calls depend on earlier results. |
-| `tz_fetch` | `fetch` | `zero.fetch` | Keeps the same network opt-in and target policy. |
-| `tz_glob` | `glob` | `zero.glob` | Path discovery only. |
-| `tz_tree` | `tree` | `zero.tree` | Keep depth and result size bounded. |
-| `tz_edit` | `edit` | `zero.edit` | Mutation stays explicit, atomic, and root-bounded. |
-| `tz_shell` | `shell` | `zero.shell` | Mutation and command approval do not transfer automatically. |
-| `tz_ingest` | `ingest` | `zero.ingest` | Stores external text behind an exact ref. |
-| `tz_expand` | `expand` | `zero.token.expand` | Request line, selector, or symbol windows; use `tokenzero expand <ref> --raw` outside the recipe only for complete bytes. |
-| `tz_mem` | `mem` | `zero.mem` | Diagnostic cache/config state. |
-| `tz_cache_pack` | `cache_pack`, `cache-pack` | `zero.cache_pack` | Preserves stable-prefix and volatile-ref semantics. |
-| `tz_rewrite` | `rewrite` | `zero.rewrite` | Plans a rewrite; it does not execute it. |
-| `tz_discover` | `discover` | `zero.discover` | Runtime/filter readiness; use describe for the method catalog. |
-| `tz_report_tool_issue` | `report_tool_issue`, `report-tool-issue` | `tz_report_tool_issue` | Retained as a primary diagnostic tool outside the recipe. |
-
-Exact refs remain the recovery authority. A bounded CodeMode result is not the
-full payload. Expand its ref instead of re-running an expensive operation.
-`zero.token.expand` intentionally bounds its default visible result; use a line,
-byte, or symbol selector. If one-call complete bytes are required, leave the
-recipe and run `tokenzero expand <ref> --raw` against the exact ref.
-
-### Protocol-method migration
-
-Classic MCP keeps its existing `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/read`, and `server/discover` behavior. Aggregate plan protocol and registration are owned by ZeroStack; TokenZero supplies operation schemas, dotted bindings, and raw-worker v2 dispatch.
-
-## Switch, rollback, and uninstall
-
-Classic MCP clients keep the explicit compatibility registration. To migrate, remove that client registration and enable the ZeroStack aggregate host, which discovers and launches `tokenzero-codemode` as a raw worker. Do not launch the raw worker as an MCP or local plan server.
-
-Save `tokenzero doctor --json` before changing client configuration. Integration writes remain rollback-capable with `tokenzero install --rollback latest`. Worker discovery and installation are owned centrally by ZeroStack; `packaging/install.sh --surface raw-worker --dry-run` prints the canonical build selector without performing a direct install.
+Rollback avoids dual registration: stop work, remove the new route, restore the classic configuration, then resume.

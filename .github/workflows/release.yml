@@ -1,20 +1,28 @@
-name: Release
+name: Coordinated engine release
 
-# MANUAL ONLY (workflow_dispatch). Per repo policy, no automatic triggers on
-# push/tags/PRs. Run this from the Actions tab and supply the tag to release.
-# Builds downloadable GitHub Release artifacts from the supplied tag. TokenZero
-# is not published to crates.io; install via the release binaries, Homebrew tap,
-# npm, or `cargo install --git`.
-
+# FSZero, GraphZero, and TokenZero publish one version together once coordinated
+# releases begin. ZeroStack remains source-only.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to release (e.g., v1.0.0). Must match the workspace version.'
+        description: "Shared engine tag, for example v1.5.0"
+        required: true
+        type: string
+      fszero_ref:
+        description: "FSZero tag or commit with the same workspace version"
+        required: true
+        type: string
+      graphzero_ref:
+        description: "GraphZero tag or commit with the same workspace version"
+        required: true
+        type: string
+      zerostack_ref:
+        description: "ZeroStack source commit used for composition"
         required: true
         type: string
       prerelease:
-        description: 'Mark the GitHub Release as a prerelease.'
+        description: "Create a prerelease"
         required: false
         default: false
         type: boolean
@@ -26,231 +34,94 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  validate-tag:
-    name: Validate release tag
+  validate-parity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - id: version
-        name: Verify input tag matches workspace version
-        run: |
-          set -euo pipefail
-          TAG="${{ inputs.tag }}"
-          TAG="${TAG#v}"
-          VER="$(cargo metadata --no-deps --format-version 1 \
-                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero-cli"))')"
-          echo "input_tag=$TAG workspace_version=$VER"
-          if [ "$TAG" != "$VER" ]; then
-            echo "::error::tag v$TAG does not match workspace version $VER"; exit 1
-          fi
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-  release:
-    name: Build + verify
-    needs: validate-tag
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
+        with: { ref: "${{ inputs.tag }}", path: TokenZero }
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build (locked)
-        run: cargo build --workspace --locked --release
-      - name: Bounded ship proof (locked)
-        run: |
-          python3 scripts/check_ship_suite.py
-          python3 scripts/run_ship_suite.py
-      - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Package dry run
-        run: cargo package --workspace --locked
-
-  windows-release:
-    name: Windows verify
-    needs: validate-tag
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
+        with: { repository: AdityaVG13/FSZero, ref: "${{ inputs.fszero_ref }}", path: FSZero }
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Windows verifier
-        shell: pwsh
-        run: .\scripts\rust_windows_verify.ps1
-      - name: Build release binary
-        run: cargo build --workspace --locked --release
-      - name: Windows global install rehearsal
-        shell: pwsh
+        with: { repository: AdityaVG13/GraphZero, ref: "${{ inputs.graphzero_ref }}", path: GraphZero }
+      - uses: actions/checkout@v4
+        with: { repository: AdityaVG13/ZeroStack, ref: "${{ inputs.zerostack_ref }}", path: ZeroStack }
+      - name: Verify shared engine version
+        shell: bash
+        env: { RELEASE_TAG: "${{ inputs.tag }}" }
         run: |
-          $tokenzero = (Resolve-Path target\release\tokenzero.exe).Path
-          .\scripts\rust_windows_global_rehearsal.ps1 -TokenZeroExe $tokenzero -SkipBuild
-      - name: npm wrapper smoke
-        shell: pwsh
-        run: |
-          $env:TOKENZERO_BIN = (Resolve-Path target\release\tokenzero.exe).Path
-          node package\npm\bin\tokenzero.js --version
-      - name: npm package dry run
-        working-directory: package/npm
-        run: npm pack --dry-run
+          python3 - <<'PY'
+          import os, pathlib, re
+          expected = os.environ["RELEASE_TAG"].removeprefix("v")
+          versions = {}
+          for repo in ("TokenZero", "FSZero", "GraphZero"):
+              text = pathlib.Path(repo, "Cargo.toml").read_text(encoding="utf-8")
+              section = re.search(r"\[workspace\.package\](.*?)(?:\n\[|\Z)", text, re.S)
+              version = re.search(r'^version\s*=\s*"([^"]+)"', section.group(1), re.M) if section else None
+              if not version:
+                  raise SystemExit(f"{repo}: missing workspace version")
+              versions[repo] = version.group(1)
+          if set(versions.values()) != {expected}:
+              raise SystemExit(f"engine version parity failed: expected {expected}, got {versions}")
+          print(f"engine version parity OK: {expected}")
+          PY
+      - name: Verify ZeroStack is source-only
+        run: test ! -f ZeroStack/.github/workflows/release.yml
 
-  build-artifacts:
-    name: Build artifact (${{ matrix.target }})
-    needs: [release, windows-release]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  build:
+    needs: validate-parity
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary: tokenzero
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary: tokenzero.exe
-          - os: macos-14
-            target: aarch64-apple-darwin
-            binary: tokenzero
-          - os: macos-14
-            target: x86_64-apple-darwin
-            binary: tokenzero
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      # Build the host-free CLI and the canonical planner-free raw worker as
-      # separate package roles. Legacy engine-local hosts are never compiled
-      # into the backend artifact.
-      - name: Build release binaries
+        with: { ref: "${{ inputs.tag }}", path: TokenZero }
+      - uses: actions/checkout@v4
+        with: { repository: AdityaVG13/FSZero, ref: "${{ inputs.fszero_ref }}", path: FSZero }
+      - uses: actions/checkout@v4
+        with: { repository: AdityaVG13/GraphZero, ref: "${{ inputs.graphzero_ref }}", path: GraphZero }
+      - uses: actions/checkout@v4
+        with: { repository: AdityaVG13/ZeroStack, ref: "${{ inputs.zerostack_ref }}", path: ZeroStack }
+      - name: Install target
         shell: bash
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build CLI and classic MCP compatibility
+        shell: bash
+        run: |
+          cargo build --manifest-path TokenZero/Cargo.toml --locked --release --target "${{ matrix.target }}" -p tokenzero-cli --bin tokenzero
+          cargo build --manifest-path TokenZero/Cargo.toml --locked --release --target "${{ matrix.target }}" --target-dir TokenZero/target-mcp -p tokenzero-cli --bin tokenzero --features surface-mcp
+      - name: Package
+        shell: bash
+        env:
+          RELEASE_TAG: "${{ inputs.tag }}"
+          TARGET: "${{ matrix.target }}"
+          RUNNER_OS_NAME: "${{ runner.os }}"
         run: |
           set -euo pipefail
-          cargo build -p tokenzero-cli --locked --release --target "${{ matrix.target }}" \
-            --bin tokenzero --no-default-features
-          cargo build -p tokenzero-worker --locked --release --target "${{ matrix.target }}" \
-            --bin tokenzero-codemode --no-default-features
-
-      # package-audit inspects bytes and need not execute the cross target. Build
-      # one host-native auditor so every matrix row can gate its exact archive.
-      - name: Build native package auditor
-        shell: bash
-        run: cargo build -p tokenzero-cli --locked --release --bin tokenzero --no-default-features
-
-      # Fail the release rather than publish an archive without its backend.
-      - name: Verify canonical worker artifact exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          dir="target/${{ matrix.target }}/release"
-          path="$dir/tokenzero-codemode${{ runner.os == 'Windows' && '.exe' || '' }}"
-          test -f "$path" || { echo "missing release artifact: $path" >&2; exit 1; }
-          echo "ok: $path"
-      - name: Package Unix artifact
-        if: ${{ runner.os != 'Windows' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          name="tokenzero-${{ inputs.tag }}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          rel="target/${{ matrix.target }}/release"
-          cp "$rel/${{ matrix.binary }}" "dist/$name/"
-          # Ship the canonical backend beside the CLI artifact.
-          cp "$rel/tokenzero-codemode" "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          # Build a deterministic USTAR archive without host owner/xattr/PAX
-          # metadata. The exact bytes produced here are audited below and then
-          # uploaded without repacking.
-          python3 - "$name" <<'PY'
-          import gzip
-          import pathlib
-          import sys
-          import tarfile
-
-          name = sys.argv[1]
-          dist = pathlib.Path("dist")
-          source = dist / name
-          archive = dist / f"{name}.tar.gz"
-          with archive.open("wb") as raw:
-              with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-                  with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
-                      for path in [source, *sorted(source.rglob("*"))]:
-                          info = bundle.gettarinfo(str(path), arcname=str(path.relative_to(dist)))
-                          info.uid = 0
-                          info.gid = 0
-                          info.uname = "root"
-                          info.gname = "root"
-                          info.mtime = 0
-                          if path.is_file():
-                              with path.open("rb") as payload:
-                                  bundle.addfile(info, payload)
-                          else:
-                              bundle.addfile(info)
-          PY
-          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
-      - name: Package Windows artifact
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        run: |
-          $name = "tokenzero-${{ inputs.tag }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path "dist\$name" | Out-Null
-          $rel = "target\${{ matrix.target }}\release"
-          Copy-Item -LiteralPath "$rel\${{ matrix.binary }}" -Destination "dist\$name\"
-          # Ship the canonical backend beside the CLI artifact.
-          Copy-Item -LiteralPath "$rel\tokenzero-codemode.exe" -Destination "dist\$name\"
-          Copy-Item -LiteralPath README.md, LICENSE -Destination "dist\$name\"
-          Compress-Archive -Path "dist\$name" -DestinationPath "dist\$name.zip" -Force
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist\$name.zip").Hash.ToLowerInvariant()
-          "$hash  $name.zip" | Set-Content -NoNewline -Encoding utf8 -Path "dist\$name.zip.sha256"
-
-      - name: Audit exact Unix release archive and checksum
-        if: ${{ runner.os != 'Windows' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          archives=(dist/*.tar.gz)
-          test "${#archives[@]}" -eq 1 || { echo "expected one packaged archive" >&2; exit 1; }
-          archive="${archives[0]}"
-          checksum="$archive.sha256"
-          expected="$(awk '{print tolower($1)}' "$checksum")"
-          actual="$(shasum -a 256 "$archive" | awk '{print tolower($1)}')"
-          test "$actual" = "$expected" || { echo "release checksum mismatch" >&2; exit 1; }
-          report="$(target/release/tokenzero package-audit --dist "$archive" --json)"
-          printf '%s\n' "$report"
-          printf '%s' "$report" | python3 -c             'import json,sys; doc=json.load(sys.stdin); assert doc.get("ok") is True, doc'
-
-      - name: Audit exact Windows release archive and checksum
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        run: |
-          $archives = @(Get-ChildItem -LiteralPath dist -Filter *.zip -File)
-          if ($archives.Count -ne 1) { throw "expected one packaged archive" }
-          $archive = $archives[0].FullName
-          $checksum = "$archive.sha256"
-          $expected = ((Get-Content -Raw -LiteralPath $checksum) -split '\s+')[0].ToLowerInvariant()
-          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "release checksum mismatch" }
-          $report = (& target\release\tokenzero.exe package-audit --dist $archive --json | Out-String)
-          $report
-          $document = $report | ConvertFrom-Json
-          if ($document.ok -ne $true) { throw "package-audit rejected exact release archive" }
-
+          version="${RELEASE_TAG#v}"
+          name="tokenzero-${version}-${TARGET}"
+          mkdir -p "dist/${name}"
+          exe=""; [[ "${RUNNER_OS_NAME}" == "Windows" ]] && exe=".exe"
+          cp "TokenZero/target/${TARGET}/release/tokenzero${exe}" "dist/${name}/tokenzero${exe}"
+          cp "TokenZero/target-mcp/${TARGET}/release/tokenzero${exe}" "dist/${name}/tokenzero-mcp${exe}"
+          cp TokenZero/README.md TokenZero/LICENSE "dist/${name}/"
+          if [[ "${RUNNER_OS_NAME}" == "Windows" ]]; then
+            (cd dist && 7z a "${name}.zip" "${name}")
+            shasum -a 256 "dist/${name}.zip" > "dist/${name}.zip.sha256"
+          else
+            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+            shasum -a 256 "dist/${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: tokenzero-${{ inputs.tag }}-${{ matrix.target }}
+          name: tokenzero-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
@@ -258,52 +129,20 @@ jobs:
             dist/*.zip.sha256
           if-no-files-found: error
 
-  github-release:
-    name: Create GitHub Release
-    needs: build-artifacts
+  publish:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Create release notes
-        run: |
-          cat > release-notes.md <<'EOF'
-          TokenZero ${{ inputs.tag }}
-
-          Download the archive for your platform, extract it, place `tokenzero` or `tokenzero.exe` on PATH, then run:
-
-          ```bash
-          tokenzero install --global --plan --mcp --shell --cli --json
-          tokenzero install --global --apply --mcp --shell --cli --json
-          tokenzero doctor --json
-          ```
-          EOF
-      - name: Create or update release
+        with: { path: dist, merge-multiple: true }
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: "${{ inputs.tag }}"
+          PRERELEASE: "${{ inputs.prerelease }}"
+        shell: bash
         run: |
-          set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
-          elif [ "$PRERELEASE" = "true" ]; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md --prerelease
-          else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md
-          fi
-          gh release upload "$TAG" dist/* --clobber
-      - name: Release summary
-        run: |
-          {
-            echo "## TokenZero ${{ inputs.tag }}"
-            echo
-            echo "- GitHub Release: created/updated"
-            echo
-            echo "### Assets"
-            find dist -maxdepth 1 -type f -printf -- "- %f\n" | sort
-          } >> "$GITHUB_STEP_SUMMARY"
+          args=("${RELEASE_TAG}" dist/* --verify-tag --generate-notes)
+          [[ "${PRERELEASE}" == "true" ]] && args+=(--prerelease)
+          gh release create "${args[@]}"
