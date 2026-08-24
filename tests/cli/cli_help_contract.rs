@@ -365,6 +365,10 @@ fn cli_capabilities_json_exposes_agent_contract() {
         required_keys.iter().any(|key| key == "kernel_orifices"),
         "capabilities required_keys must include kernel_orifices"
     );
+    assert!(
+        required_keys.iter().any(|key| key == "packaging_orifices"),
+        "capabilities required_keys must include packaging_orifices"
+    );
 
     let mcp_tools = json["mcp_tools"].as_array().expect("MCP tool map");
     let expected_names = all_operations()
@@ -605,6 +609,115 @@ fn capabilities_declares_token_engine_kernel_orifices() {
         json["aggregate_codemode"]["status"],
         "noncanonical_v6_compat"
     );
+}
+
+#[test]
+fn capabilities_does_not_advertise_dead_tokenzero_mcp_bin() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mcp_bin = &json["packaging_orifices"]["tokenzero-mcp"];
+    assert_eq!(mcp_bin["bin"], false);
+    assert_eq!(mcp_bin["status"], "not_a_workspace_bin");
+    assert_eq!(
+        mcp_bin["source_present"],
+        "crates/tokenzero-cli/src/bin/tokenzero_mcp.rs"
+    );
+    assert_eq!(
+        mcp_bin["available_in_this_build"],
+        cfg!(feature = "surface-mcp")
+    );
+    let mcp_server = json["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .find(|row| row["name"] == "mcp-server")
+        .expect("mcp-server row");
+    assert_eq!(
+        mcp_server["available_in_this_build"],
+        cfg!(feature = "surface-mcp")
+    );
+    let tools = json["mcp_tools"].as_array().expect("mcp_tools");
+    assert!(
+        tools
+            .iter()
+            .all(|row| row["available_in_this_build"] == false || cfg!(feature = "surface-mcp")),
+        "classic MCP tools must not claim available_in_this_build without surface-mcp"
+    );
+}
+
+#[test]
+fn doctor_json_does_not_claim_uncompiled_mcp_orifice() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["mcp"]["ready"], cfg!(feature = "surface-mcp"));
+    assert_eq!(json["mcp"]["live"], cfg!(feature = "surface-mcp"));
+    assert_eq!(json["mcp_orifice"]["status"], "not_a_workspace_bin");
+    assert!(
+        json["mcp"]["server"].is_null(),
+        "doctor must not name tokenzero mcp-server as live: {}",
+        json["mcp"]
+    );
+    let check = json["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|row| row["id"] == "mcp_server_entrypoint_declared")
+        .expect("mcp_server_entrypoint_declared");
+    assert_eq!(check["ok"], false);
+    assert_eq!(check["severity"], "info");
+
+    let caps = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["doctor", "capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        caps.status.success(),
+        "{}",
+        String::from_utf8_lossy(&caps.stderr)
+    );
+    let caps: Value = serde_json::from_slice(&caps.stdout).unwrap();
+    assert_eq!(caps["mcp_orifice"]["live"], false);
+    assert_eq!(caps["mcp_orifice"]["status"], "not_a_workspace_bin");
+    let detector = caps["detectors"]
+        .as_array()
+        .expect("detectors")
+        .iter()
+        .find(|row| row["id"] == "tz-mcp-server-entrypoint-declared")
+        .expect("tz-mcp-server-entrypoint-declared");
+    assert_eq!(detector["severity"], "info");
+
+    let planned = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["install", "--plan", "--mcp", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    let planned: Value = serde_json::from_slice(&planned.stdout).unwrap();
+    assert_eq!(planned["mcp_orifice"]["live"], false);
+    assert_eq!(planned["mcp_orifice"]["status"], "not_a_workspace_bin");
 }
 
 #[test]

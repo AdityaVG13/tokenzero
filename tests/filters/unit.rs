@@ -36,9 +36,13 @@ const EXPECTED_FAMILIES: &[&str] = &[
 fn discovers_launch_critical_families() {
     let report = discover();
 
-    // Report-level readiness.
+    // Report-level readiness. Classic MCP is not a workspace bin; env-parse
+    // plus `tokenzero` on PATH is not dispatch.
     assert!(report.install_ready, "install_ready must be true");
-    assert!(report.mcp_ready, "mcp_ready must be true");
+    assert!(
+        !report.mcp_ready,
+        "mcp_ready must not be true without a tokenzero-mcp binary"
+    );
     assert!(report.shell_ready, "shell_ready must be true");
     if cfg!(windows) {
         assert_eq!(
@@ -59,14 +63,29 @@ fn discovers_launch_critical_families() {
         "filter count must match EXPECTED_FAMILIES"
     );
     for f in &report.supported_filters {
-        assert!(f.supported, "family '{}' must be supported", f.family);
-        assert!(f.exact_refs, "family '{}' must have exact_refs", f.family);
         assert!(
             !f.commands.is_empty(),
             "family '{}' must list at least one command",
             f.family
         );
     }
+    assert!(
+        report
+            .supported_filters
+            .iter()
+            .filter(|f| f.family != "config")
+            .all(|f| f.supported),
+        "non-config families in FILTER_SPECS must have at least one rewrite"
+    );
+    let read = report
+        .supported_filters
+        .iter()
+        .find(|f| f.family == "read")
+        .expect("read family");
+    assert!(
+        read.exact_refs,
+        "read/cat rewrite is the family that produces tokenzero refs"
+    );
 
     // Every expected family must be present.
     let families: Vec<_> = report

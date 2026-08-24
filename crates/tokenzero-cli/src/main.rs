@@ -1621,13 +1621,27 @@ fn install_apply_or_plan(
             .with_context(
                 || "install apply failed; safe alternative: tokenzero install --plan --json",
             )?;
-        emit_value(applied, as_json)
+        emit_value(stamp_mcp_orifice(applied)?, as_json)
     } else {
         emit_value(
-            install::plan_for_agents(root, global, capabilities, agents, surface),
+            stamp_mcp_orifice(install::plan_for_agents(
+                root,
+                global,
+                capabilities,
+                agents,
+                surface,
+            ))?,
             as_json,
         )
     }
+}
+
+fn stamp_mcp_orifice<T: serde::Serialize>(value: T) -> Result<serde_json::Value> {
+    let mut stamped = serde_json::to_value(value)?;
+    if let Some(object) = stamped.as_object_mut() {
+        object.insert("mcp_orifice".into(), install::mcp_orifice_json());
+    }
+    Ok(stamped)
 }
 
 fn handle_install(args: InstallArgs) -> Result<()> {
@@ -1719,7 +1733,7 @@ fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
     let profile = clients_profile(&args.profile)?;
     let agents = install_agents(&args.agents, args.grok)?;
     let root = install_root(args.root.clone(), true);
-    let mut value = serde_json::to_value(install::plan_for_agents(
+    let mut value = stamp_mcp_orifice(install::plan_for_agents(
         &root,
         true,
         &clients_capabilities(&profile),

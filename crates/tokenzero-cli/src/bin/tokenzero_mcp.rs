@@ -1,5 +1,9 @@
 //! Release artifact `tokenzero-mcp`: FastMCP per-op surface only (tokenzero-irx9.3).
 //!
+//! Not a workspace `[[bin]]`: `tokenzero-cli` sets `autobins = false` and does
+//! not declare `name = "tokenzero-mcp"`. Doctor/capabilities/install JSON must
+//! not advertise this path as live. `tokenzero_mcp_compat` is not a crate here.
+//!
 //! Packaging subcommands (install/uninstall/sbom/doctor/help) always exit without
 //! opening a stdio server. Domain execution remains shared with the raw worker.
 
@@ -9,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 use tokenzero_core::McpToolSurface;
 use tokenzero_install::packaging::{
-    assert_packaged_surface_features, assert_surface_compiled, default_install_prefix,
-    install_surface, package_identity, reject_non_stdio_args, sbom_document,
-    semantic_contract_digest, uninstall_report, uninstall_surface, PackageSurface,
+    PackageSurface, assert_packaged_surface_features, assert_surface_compiled,
+    default_install_prefix, install_surface, package_identity, reject_non_stdio_args,
+    sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
 };
-use tokenzero_mcp_compat::{run_fastmcp_stdio, EngineConfig};
+use tokenzero_mcp_compat::{EngineConfig, run_fastmcp_stdio};
 
 const SURFACE: PackageSurface = PackageSurface::Mcp;
 
@@ -346,4 +350,3 @@ fn run_uninstall(args: &[String]) {
         }
     }
 }
-

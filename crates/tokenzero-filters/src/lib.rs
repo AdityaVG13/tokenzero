@@ -129,10 +129,8 @@ const TOKENZERO_BIN_ENV: &str = "TOKENZERO_BIN";
 const TOKENZERO_RG_PATH_ENV: &str = "TOKENZERO_RG_PATH";
 const TOKENZERO_MCP_TOOL_SURFACE_ENV: &str = "TOKENZERO_MCP_TOOL_SURFACE";
 const TOKENZERO_MCP_IDLE_TIMEOUT_ENV: &str = "TOKENZERO_MCP_IDLE_TIMEOUT_SECS";
-const TOKENZERO_SHELL_TIMEOUT_ENVS: &[&str] = &[
-    "TOKENZERO_SHELL_TIMEOUT_SECS",
-    "TOKENZERO_SHELL_TIMEOUT",
-];
+const TOKENZERO_SHELL_TIMEOUT_ENVS: &[&str] =
+    &["TOKENZERO_SHELL_TIMEOUT_SECS", "TOKENZERO_SHELL_TIMEOUT"];
 
 fn unsupported_commands() -> Vec<String> {
     FILTER_SPECS
@@ -188,7 +186,13 @@ fn well_known_tokenzero() -> Option<PathBuf> {
 }
 
 fn probe_mcp() -> bool {
-    if !probe_install() {
+    // Env-parse + `tokenzero` on PATH is not classic MCP dispatch.
+    // `tokenzero-mcp` is not a workspace [[bin]]; only a real MCP binary counts.
+    let mcp_bin = match std::env::var_os("TOKENZERO_MCP_BIN") {
+        Some(path) if !path.is_empty() => is_executable_file(Path::new(&path)),
+        _ => find_on_path("tokenzero-mcp").is_some(),
+    };
+    if !mcp_bin {
         return false;
     }
     let surface_ok = match std::env::var(TOKENZERO_MCP_TOOL_SURFACE_ENV) {
@@ -218,10 +222,15 @@ fn probe_shell() -> bool {
 }
 
 fn shell_timeout_ok() -> bool {
-    TOKENZERO_SHELL_TIMEOUT_ENVS.iter().all(|name| match std::env::var(name) {
-        Err(_) => true,
-        Ok(value) => value.parse::<u64>().ok().is_some_and(|seconds| seconds >= 1),
-    })
+    TOKENZERO_SHELL_TIMEOUT_ENVS
+        .iter()
+        .all(|name| match std::env::var(name) {
+            Err(_) => true,
+            Ok(value) => value
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|seconds| seconds >= 1),
+        })
 }
 
 fn shell_binary_present() -> bool {
@@ -245,9 +254,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 fn path_binary_names(name: &str) -> Vec<String> {
     let mut names = vec![name.to_string()];
     if cfg!(windows) && Path::new(name).extension().is_none() {
-        names.extend(
-            [".exe", ".cmd", ".bat", ".com"].map(|ext| format!("{name}{ext}")),
-        );
+        names.extend([".exe", ".cmd", ".bat", ".com"].map(|ext| format!("{name}{ext}")));
     }
     names
 }

@@ -12,6 +12,7 @@ pub struct CommandSurface {
     pub json: bool,
     pub primary_invocation: &'static str,
     pub description: &'static str,
+    pub available_in_this_build: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -39,6 +40,29 @@ const fn cmd(
         json,
         primary_invocation,
         description,
+        available_in_this_build: true,
+    }
+}
+
+const fn cmd_if(
+    available: bool,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    category: &'static str,
+    mutates: bool,
+    json: bool,
+    primary_invocation: &'static str,
+    description: &'static str,
+) -> CommandSurface {
+    CommandSurface {
+        name,
+        aliases,
+        category,
+        mutates,
+        json,
+        primary_invocation,
+        description,
+        available_in_this_build: available,
     }
 }
 
@@ -277,14 +301,15 @@ const COMMANDS: &[CommandSurface] = &[
         "tokenzero session-open --json",
         "Open a bounded manifest+delta session.",
     ),
-    cmd(
+    cmd_if(
+        cfg!(feature = "surface-mcp"),
         "mcp-server",
         &[],
         "setup",
         false,
         false,
         "tokenzero mcp-server --mode mcp",
-        "Run the explicit classic MCP compatibility server over stdio.",
+        "Classic MCP stdio adapter. Not compiled in this build unless surface-mcp is live; tokenzero-mcp is not a workspace [[bin]].",
     ),
     cmd(
         "cache-pack",
@@ -493,6 +518,7 @@ pub fn capabilities_json() -> serde_json::Value {
                 "mcp_tools",
                 "surface_parity",
                 "kernel_orifices",
+                "packaging_orifices",
                 "exit_codes",
                 "env_vars"
             ]
@@ -682,6 +708,27 @@ pub fn capabilities_json() -> serde_json::Value {
             ],
             "codemode_binding_status": "noncanonical_v6_compat",
             "note": "TokenZero owns measurement, projection, compression, and expand. z.read/z.find/z.run are ZeroStack host operations that may invoke TokenEngine at response boundaries. Dotted zero.* CodeMode bindings are aggregate V6-compat, not the canonical kernel API."
+        },
+        "packaging_orifices": {
+            "tokenzero": {
+                "bin": true,
+                "crate": "tokenzero-cli",
+                "path": "crates/tokenzero-cli/src/main.rs"
+            },
+            "tokenzero-mcp": {
+                "bin": false,
+                "artifact": "tokenzero-mcp",
+                "source_present": "crates/tokenzero-cli/src/bin/tokenzero_mcp.rs",
+                "status": "not_a_workspace_bin",
+                "available_in_this_build": cfg!(feature = "surface-mcp"),
+                "reason": "autobins=false and no [[bin]] tokenzero-mcp; tokenzero_mcp_compat is not a workspace crate"
+            },
+            "tokenzero-codemode": {
+                "bin": false,
+                "artifact": "tokenzero-codemode",
+                "status": "not_a_workspace_bin",
+                "reason": "raw-worker artifact is not built in this workspace; ZeroStack owns aggregate plan execution"
+            }
         },
         "dangerous_operations": [
             {
