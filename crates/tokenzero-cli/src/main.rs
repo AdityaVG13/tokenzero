@@ -2466,7 +2466,7 @@ fn emit_value<T: serde::Serialize>(value: T, _as_json: bool) -> Result<()> {
 
 fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Result<()> {
     if let Some(accounting) = response.accounting.as_ref() {
-        let event = PulseEvent::tool_call(
+        let mut event = PulseEvent::tool_call(
             tool,
             response.mode.as_deref().unwrap_or("hybrid"),
             accounting.raw_tokens,
@@ -2481,6 +2481,9 @@ fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Resu
                 .unwrap_or(0) as u128,
             None,
         );
+        if let Ok(stamped) = event.clone().with_tokenizer_id(&accounting.tokenizer_id) {
+            event = stamped;
+        }
         record_event(&default_ledger_path(&root), &event)?;
     }
     Ok(())

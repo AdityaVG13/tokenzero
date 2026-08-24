@@ -1119,13 +1119,13 @@ impl TokenZeroEngine {
                 .unwrap_or(mode.effective_policy()),
             visible_text,
             response_refs,
-            Accounting {
+            Accounting::measured(
                 raw_tokens,
                 visible_tokens,
-                recovery_tokens: store.recovery_tokens,
-                billed_tokens: visible_tokens,
-                cached_tokens: 0,
-                exact_ref_tokens: Some(if choice.small {
+                store.recovery_tokens,
+                visible_tokens,
+                0,
+                Some(if choice.small {
                     count_tokens(&combined_vis)
                 } else {
                     let mut total = count_tokens(&combined_vis) + count_tokens(&capture_vis);
@@ -1137,7 +1137,7 @@ impl TokenZeroEngine {
                     }
                     total
                 }),
-            },
+            ),
         );
         response.content_type = Some(ContentType::ShellOutput.to_string());
         if streams_truncated {

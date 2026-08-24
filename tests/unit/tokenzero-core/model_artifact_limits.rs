@@ -9,7 +9,8 @@ use tokenzero_core::model_artifacts::{
     ModelArtifactError, ModelCapsule, TokenPage,
 };
 use tokenzero_core::{
-    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+    Accounting, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, count_tokens_tokenizer_id, preflight_tokenizer_id,
     sha256_hex,
 };
 use tokenzero_test_support::{
@@ -84,6 +85,51 @@ fn tokenizer_id_preflight_refuses_unlabeled_estimate_and_q99_as_exact() {
         Err(TokenizerIdPreflightError::ExactLabelIsNotATokenizerId)
     );
     assert_eq!(preflight_tokenizer_id("tiktoken:o200k_base"), Ok(()));
+}
+
+#[test]
+fn mcp_accounting_json_stamps_kernel_measure_tokenizer_id() {
+    stamp_subject_ne_oracle();
+    let accounting = Accounting::measured(10, 4, 6, 4, 0, Some(2));
+    assert_eq!(accounting.tokenizer_id, count_tokens_tokenizer_id());
+    assert_eq!(accounting.tokenizer_id, LEXICAL_ESTIMATOR_ID);
+    preflight_tokenizer_id(&accounting.tokenizer_id).expect("kernel estimator must pass preflight");
+    assert!(
+        !accounting.tokenizer_id.contains('@'),
+        "MCP accounting must not invent ExactTokenizerIdentity"
+    );
+    assert!(!accounting.certified);
+    assert_eq!(accounting.spent_tokens(), 10);
+    assert_eq!(accounting.recovered_tokens(), 6);
+    let json = serde_json::to_value(&accounting).expect("serialize");
+    assert_eq!(json["tokenizer_id"], LEXICAL_ESTIMATOR_ID);
+    assert_eq!(json["certified"], false);
+    assert_eq!(json["spent_tokens"], 10);
+    assert_eq!(json["recovered_tokens"], 6);
+    assert_eq!(json["raw_tokens"], 10);
+    assert_eq!(json["visible_tokens"], 4);
+    assert!(
+        json["tokenizer_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("estimator:")),
+        "{json}"
+    );
+}
+
+#[test]
+fn mcp_accounting_replaces_unlabeled_estimate_and_never_certifies_estimator() {
+    stamp_subject_ne_oracle();
+    let mut accounting = Accounting::measured(3, 3, 0, 3, 0, None);
+    accounting.tokenizer_id = "estimate:tokenzero-lexical".into();
+    accounting.certified = true;
+    accounting.stamp_tokenizer();
+    assert_eq!(accounting.tokenizer_id, LEXICAL_ESTIMATOR_ID);
+    assert!(!accounting.certified);
+    let unlabeled: Accounting = serde_json::from_value(
+        serde_json::json!({"raw_tokens": 1, "visible_tokens": 1, "recovery_tokens": 0}),
+    )
+    .expect("legacy accounting without tokenizer_id");
+    assert_eq!(unlabeled.tokenizer_id, LEXICAL_ESTIMATOR_ID);
 }
 
 #[test]

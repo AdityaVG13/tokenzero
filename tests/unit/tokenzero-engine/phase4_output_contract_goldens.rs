@@ -9,6 +9,7 @@
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokenzero_core::{Accounting, Mode, ToolResponse, count_tokens_tokenizer_id};
 use tokenzero_engine::{
     AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
     UNLABELED_ESTIMATE_TOKENIZER_PREFIX, ZeroTokenEngine, account_mass, estimator_tokenizer_id,
@@ -539,4 +540,44 @@ fn compress_tight_budget_does_not_save_by_clamping_a_worse_wrapper() {
         source.as_bytes(),
         "expand must return original bytes after compress store"
     );
+}
+
+#[test]
+fn mcp_toolresponse_accounting_json_has_kernel_measure_tokenizer_id() {
+    stamp();
+    let response = ToolResponse::ok(
+        "read",
+        Mode::Auto,
+        "hello".into(),
+        Vec::new(),
+        Accounting::measured(10, 4, 6, 4, 0, Some(0)),
+    );
+    let json = serde_json::to_value(&response).expect("serialize ToolResponse");
+    let accounting = &json["accounting"];
+    let id = accounting["tokenizer_id"]
+        .as_str()
+        .expect("MCP Accounting JSON must emit tokenizer_id");
+    preflight_tokenizer_id(id).expect("tokenizer_id must pass honesty preflight");
+    assert_eq!(id, count_tokens_tokenizer_id());
+    assert!(
+        id.starts_with("estimator:"),
+        "MCP accounting must be kernel measure estimator or tiktoken, got {id}"
+    );
+    assert!(
+        !id.contains('@'),
+        "MCP accounting must not invent ExactTokenizerIdentity: {id}"
+    );
+    assert_eq!(accounting["certified"], false);
+    assert_eq!(accounting["spent_tokens"], 10);
+    assert_eq!(accounting["recovered_tokens"], 6);
+    let mut unlabeled = Accounting::measured(2, 2, 0, 2, 0, None);
+    unlabeled.tokenizer_id = "estimate:tokenzero-lexical".into();
+    unlabeled.certified = true;
+    let stamped = ToolResponse::ok("read", Mode::Auto, "x".into(), Vec::new(), unlabeled);
+    let stamped_json = serde_json::to_value(&stamped).expect("serialize stamped");
+    assert_eq!(
+        stamped_json["accounting"]["tokenizer_id"],
+        LEXICAL_ESTIMATOR_ID
+    );
+    assert_eq!(stamped_json["accounting"]["certified"], false);
 }

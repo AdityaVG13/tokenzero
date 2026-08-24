@@ -235,6 +235,9 @@ impl TokenZeroEngine {
             None,
         )
         .with_attribution(Some(self.session_id().to_string()), call_id, ref_ids);
+        if let Ok(stamped) = event.clone().with_tokenizer_id(&accounting.tokenizer_id) {
+            event = stamped;
+        }
         event.failure = response.error.is_some();
         event.task_lossless = tokenzero_pulse::pulse_task_lossless(
             accounting.raw_tokens,

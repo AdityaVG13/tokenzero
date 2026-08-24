@@ -167,7 +167,7 @@ pub struct RefRecord {
     pub live: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Accounting {
     pub raw_tokens: usize,
     pub visible_tokens: usize,
@@ -178,11 +178,75 @@ pub struct Accounting {
     /// Billed output tokens satisfied by the measured cache source.
     #[serde(default)]
     pub cached_tokens: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_ref_tokens: Option<usize>,
+    /// Kernel measure label for these counts: `estimator:` or `tiktoken:`.
+    /// Never unlabeled, never an invented ExactTokenizerIdentity.
+    #[serde(default = "tokens::count_tokens_tokenizer_id")]
+    pub tokenizer_id: String,
+    /// True only for a single `provider/model@hex` identity. Estimator and
+    /// tiktoken MCP totals never certify as exact.
+    #[serde(default)]
+    pub certified: bool,
+}
+
+impl Default for Accounting {
+    fn default() -> Self {
+        Self::measured(0, 0, 0, 0, 0, None)
+    }
 }
 
 impl Accounting {
+    /// MCP/engine accounting block stamped with the kernel measure estimator.
+    pub fn measured(
+        raw_tokens: usize,
+        visible_tokens: usize,
+        recovery_tokens: usize,
+        billed_tokens: usize,
+        cached_tokens: usize,
+        exact_ref_tokens: Option<usize>,
+    ) -> Self {
+        let mut accounting = Self {
+            raw_tokens,
+            visible_tokens,
+            recovery_tokens,
+            billed_tokens,
+            cached_tokens,
+            exact_ref_tokens,
+            tokenizer_id: tokens::count_tokens_tokenizer_id(),
+            certified: false,
+        };
+        accounting.stamp_tokenizer();
+        accounting
+    }
+
+    /// spent = visible + recovery. Expand charges belong here.
+    pub fn spent_tokens(&self) -> usize {
+        self.visible_tokens.saturating_add(self.recovery_tokens)
+    }
+
+    /// Recovered mass on this response (recovery_tokens).
+    pub fn recovered_tokens(&self) -> usize {
+        self.recovery_tokens
+    }
+
+    /// Stamp `tokenizer_id` from the kernel measure estimator. Refuses
+    /// unlabeled `estimate:` / empty / Q99 by replacing them. Never invents
+    /// ExactTokenizerIdentity; estimator and tiktoken stay uncertified.
+    pub fn stamp_tokenizer(&mut self) {
+        let id = self.tokenizer_id.trim();
+        let labeled = id.starts_with("estimator:")
+            || id.starts_with("tiktoken:")
+            || (id.contains('/') && id.contains('@'));
+        if id.is_empty() || !labeled || tokens::preflight_tokenizer_id(id).is_err() {
+            self.tokenizer_id = tokens::count_tokens_tokenizer_id();
+        }
+        if self.tokenizer_id.starts_with("estimator:") || self.tokenizer_id.starts_with("tiktoken:")
+        {
+            self.certified = false;
+        }
+    }
+
     pub fn visible_savings_ratio(&self) -> f64 {
         savings_ratio(self.raw_tokens, self.visible_tokens)
     }
@@ -194,10 +258,31 @@ impl Accounting {
     /// not a partition of disjoint masses (tokenzero-73yc). Signed: spent>raw
     /// is a negative ratio, not a clamped 0% save.
     pub fn recovery_adjusted_savings_ratio(&self) -> f64 {
-        savings_ratio(
-            self.raw_tokens,
-            self.visible_tokens.saturating_add(self.recovery_tokens),
-        )
+        savings_ratio(self.raw_tokens, self.spent_tokens())
+    }
+}
+
+impl Serialize for Accounting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut fields = 9;
+        if self.exact_ref_tokens.is_some() {
+            fields += 1;
+        }
+        let mut state = serializer.serialize_struct("Accounting", fields)?;
+        state.serialize_field("raw_tokens", &self.raw_tokens)?;
+        state.serialize_field("visible_tokens", &self.visible_tokens)?;
+        state.serialize_field("recovery_tokens", &self.recovery_tokens)?;
+        state.serialize_field("billed_tokens", &self.billed_tokens)?;
+        state.serialize_field("cached_tokens", &self.cached_tokens)?;
+        if let Some(exact) = self.exact_ref_tokens {
+            state.serialize_field("exact_ref_tokens", &exact)?;
+        }
+        state.serialize_field("tokenizer_id", &self.tokenizer_id)?;
+        state.serialize_field("certified", &self.certified)?;
+        state.serialize_field("spent_tokens", &self.spent_tokens())?;
+        state.serialize_field("recovered_tokens", &self.recovered_tokens())?;
+        state.end()
     }
 }
 
@@ -361,8 +446,9 @@ impl ToolResponse {
         mode: Mode,
         visible: String,
         refs: Vec<RefRecord>,
-        accounting: Accounting,
+        mut accounting: Accounting,
     ) -> Self {
+        accounting.stamp_tokenizer();
         Self {
             ack: Some(AckClass::Success.atom().to_string()),
             detail_ref: refs.first().map(|record| record.ref_id.clone()),
@@ -1879,10 +1965,11 @@ pub use shell_quote::{
     split_command_string, split_command_string_for_platform,
 };
 pub use tokens::{
-    TokenizerFamily, TokenizerIdPreflightError, TokenizerMetadata,
-    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, VISIBLE_BUDGET_LOSSY_DECLARATION, active_model_id,
-    active_tokenizer_metadata, count_tokens, count_tokens_for_model, enforce_token_budget,
-    enforce_token_budget_with_ref, pack_to_token_boundary, pack_to_token_boundary_for_model,
+    BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerFamily, TokenizerIdPreflightError,
+    TokenizerMetadata, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, VISIBLE_BUDGET_LOSSY_DECLARATION,
+    active_model_id, active_tokenizer_metadata, count_tokens, count_tokens_for_model,
+    count_tokens_tokenizer_id, enforce_token_budget, enforce_token_budget_with_ref,
+    pack_to_token_boundary, pack_to_token_boundary_for_model,
     pack_to_token_boundary_for_model_with_char_limit, pack_to_token_boundary_with_char_limit,
     prefix_end_for_kept_lines, preflight_tokenizer_id, savings_ratio, savings_ratio_u64,
     sha256_hex, tokenizer_metadata,

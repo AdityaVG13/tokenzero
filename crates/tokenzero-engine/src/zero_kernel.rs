@@ -13,11 +13,6 @@ use zero_abi::{
 };
 use zero_store::{SelectionIndex, ZeroCas, ZeroObjectMetadata};
 
-/// Pulse-grammar estimator id for the lexical gauge. Never an exact identity.
-pub const LEXICAL_ESTIMATOR_ID: &str = "estimator:tokenzero-lexical";
-/// Pulse-grammar estimator id for non-UTF-8 byte mass (1 token per byte).
-pub const BYTES_ESTIMATOR_ID: &str = "estimator:tokenzero-bytes";
-
 /// Output-contract 4-tuple for [`TokenAccounting`].
 ///
 /// `raw` is billed source mass, `visible`/`spent` are presented mass,
@@ -46,7 +41,8 @@ pub fn account_mass(accounting: &TokenAccounting) -> AccountMass {
 }
 
 pub use tokenzero_core::{
-    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
+    BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, preflight_tokenizer_id,
 };
 
 /// Pulse `estimator:<slug>` id for an approximate family, or the lexical gauge.

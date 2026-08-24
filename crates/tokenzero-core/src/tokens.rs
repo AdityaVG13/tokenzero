@@ -20,6 +20,12 @@ pub fn sha256_hex(text: &str) -> String {
 /// emit it and Pulse never accepted it. It is not an alias of `estimator:`.
 pub const UNLABELED_ESTIMATE_TOKENIZER_PREFIX: &str = "estimate:";
 
+/// Pulse-grammar estimator id for [`count_tokens`] with no family metadata.
+/// Same slug the kernel measure emits when no model BPE is bound.
+pub const LEXICAL_ESTIMATOR_ID: &str = "estimator:tokenzero-lexical";
+/// Pulse-grammar estimator id for non-UTF-8 byte mass (1 token per byte).
+pub const BYTES_ESTIMATOR_ID: &str = "estimator:tokenzero-bytes";
+
 /// Honesty preflight refusal for tokenizer ids that must never count as exact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenizerIdPreflightError {
@@ -459,6 +465,20 @@ pub fn count_tokens(text: &str) -> usize {
         || count_tokens_lexical(text),
         |metadata| approximate_token_count(text, metadata),
     )
+}
+
+/// Tokenizer id for [`count_tokens`] / MCP [`super::Accounting`] JSON.
+///
+/// This is the kernel measure estimator family (`estimator:tokenzero-lexical`
+/// or `estimator:tokenzero-<family>`). It is never unlabeled `estimate:`,
+/// never `Q99`, and never an invented `ExactTokenizerIdentity`.
+pub fn count_tokens_tokenizer_id() -> String {
+    let id = match active_tokenizer_metadata() {
+        Some(meta) => format!("estimator:tokenzero-{}", meta.family.name()),
+        None => LEXICAL_ESTIMATOR_ID.to_string(),
+    };
+    debug_assert_eq!(preflight_tokenizer_id(&id), Ok(()));
+    id
 }
 
 fn count_ascii(bytes: &[u8], stop_at_non_ascii: bool) -> (usize, usize) {

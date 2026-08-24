@@ -362,7 +362,7 @@ fn worker_token_accounting(
     let is_job = op == zero_abi::TOKEN_JOB_OPERATION;
     let is_background_shell = is_shell_op(op) && args["background"] == true;
     let accounting_optional = is_job || is_background_shell;
-    let accounting = value
+    let mut accounting = value
         .get("accounting")
         .map(|accounting| {
             serde_json::from_value::<Accounting>(accounting.clone())
@@ -372,25 +372,43 @@ fn worker_token_accounting(
     if accounting.is_none() && !accounting_optional {
         return Err("successful domain result omitted accounting".to_string());
     }
+    if let Some(accounting) = accounting.as_mut() {
+        accounting.stamp_tokenizer();
+    }
     if accounting
         .as_ref()
         .is_some_and(|accounting| accounting.cached_tokens > accounting.billed_tokens)
     {
         return Err("worker token accounting cached_tokens exceeds billed_tokens".to_string());
     }
-    // UTF-8/JSON bytes are a tokenizer-independent upper bound: every token
-    // consumes at least one source byte. Count the complete request args and
-    // returned domain JSON, plus exact declared payload bytes behind refs.
-    // This is intentionally conservative until a vocabulary-backed tokenizer
-    // is linked; it must never be mislabeled as an estimate or exact count.
+    // Domain accounting is the kernel-measure estimate (estimator: or tiktoken:),
+    // never an invented ExactTokenizerIdentity. When the domain omitted
+    // accounting (jobs / background shell), fall back to the byte-mass
+    // estimator rather than an unlabeled conservative id.
     let input_bytes = encoded_len("request args", args)?;
     let output_bytes = encoded_len("domain result", value)?;
     let recovery_bytes = declared_recovery_bytes(value, accounting_optional)?;
-    let raw_tokens = input_bytes
-        .checked_add(output_bytes)
-        .and_then(|value| value.checked_add(recovery_bytes))
-        .ok_or_else(|| "raw token upper bound overflowed".to_string())?;
-    let domain_billed = accounting
+    let raw_tokens = accounting
+        .as_ref()
+        .map(|accounting| checked_u64_count("raw_tokens", accounting.raw_tokens))
+        .transpose()?
+        .unwrap_or(
+            input_bytes
+                .checked_add(output_bytes)
+                .and_then(|value| value.checked_add(recovery_bytes))
+                .ok_or_else(|| "raw token upper bound overflowed".to_string())?,
+        );
+    let visible_tokens = accounting
+        .as_ref()
+        .map(|accounting| checked_u64_count("visible_tokens", accounting.visible_tokens))
+        .transpose()?
+        .unwrap_or(output_bytes);
+    let recovery_tokens = accounting
+        .as_ref()
+        .map(|accounting| checked_u64_count("recovery_tokens", accounting.recovery_tokens))
+        .transpose()?
+        .unwrap_or(recovery_bytes);
+    let billed_tokens = accounting
         .as_ref()
         .map(|accounting| checked_u64_count("billed_tokens", accounting.billed_tokens))
         .transpose()?
@@ -400,18 +418,30 @@ fn worker_token_accounting(
         .map(|accounting| checked_u64_count("cached_tokens", accounting.cached_tokens))
         .transpose()?
         .unwrap_or(0);
+    let exact_ref_tokens = accounting
+        .as_ref()
+        .and_then(|accounting| accounting.exact_ref_tokens)
+        .map(|value| checked_u64_count("exact_ref_tokens", value))
+        .transpose()?;
+    let tokenizer_id = accounting
+        .as_ref()
+        .map(|accounting| accounting.tokenizer_id.clone())
+        .unwrap_or_else(|| crate::BYTES_ESTIMATOR_ID.to_string());
+    let count_kind = if tokenizer_id.starts_with("estimator:") {
+        raw_worker_protocol::WorkerTokenCountKind::Estimate
+    } else {
+        raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound
+    };
     let worker = raw_worker_protocol::WorkerTokenAccounting {
         tokenizer_version_digest: None,
-        tokenizer_id: "conservative:utf8-json-bytes-v1".to_string(),
-        count_kind: raw_worker_protocol::WorkerTokenCountKind::ConservativeUpperBound,
+        tokenizer_id,
+        count_kind,
         raw_tokens,
-        visible_tokens: output_bytes,
-        recovery_tokens: recovery_bytes,
-        billed_tokens: domain_billed.max(output_bytes),
+        visible_tokens,
+        recovery_tokens,
+        billed_tokens,
         cached_tokens,
-        // A ref's exact vocabulary count is unknown on this path. Preserve
-        // that fact rather than forwarding the domain estimator as exact.
-        exact_ref_tokens: None,
+        exact_ref_tokens,
     };
     zero_abi::validate_worker_token_accounting(&worker)
         .map_err(|error| format!("invalid worker token accounting: {error}"))?;
@@ -1003,5 +1033,41 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, maximum: usize) -> std::io::Re
                 BoundedFrame::Line(line)
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+    use serde_json::json;
+    use tokenzero_core::{Accounting, LEXICAL_ESTIMATOR_ID, Mode, ToolResponse};
+
+    #[test]
+    fn worker_accounting_stamps_kernel_estimator_from_domain() {
+        let mut domain = serde_json::to_value(ToolResponse::ok(
+            "mem",
+            Mode::Auto,
+            "ok".into(),
+            Vec::new(),
+            Accounting::measured(8, 3, 1, 3, 0, Some(0)),
+        ))
+        .expect("domain json");
+        domain["refs"] = json!([]);
+        let worker = worker_token_accounting("mem", &json!({}), &domain).expect("accounting");
+        assert_eq!(worker.tokenizer_id, LEXICAL_ESTIMATOR_ID);
+        assert_eq!(
+            worker.count_kind,
+            raw_worker_protocol::WorkerTokenCountKind::Estimate
+        );
+        assert_eq!(worker.raw_tokens, 8);
+        assert_eq!(worker.visible_tokens, 3);
+        assert_eq!(worker.recovery_tokens, 1);
+        assert_eq!(worker.billed_tokens, 3);
+        assert_eq!(worker.cached_tokens, 0);
+        assert_eq!(worker.exact_ref_tokens, Some(0));
+        assert!(
+            !worker.tokenizer_id.contains('@'),
+            "must not invent ExactTokenizerIdentity"
+        );
     }
 }

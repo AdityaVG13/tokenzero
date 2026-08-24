@@ -706,14 +706,14 @@ pub fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResp
         arg_mode(args),
         text,
         refs,
-        Accounting {
+        Accounting::measured(
             raw_tokens,
             visible_tokens,
             recovery_tokens,
-            billed_tokens: visible_tokens,
-            cached_tokens: 0,
-            exact_ref_tokens: Some(exact_ref_tokens),
-        },
+            visible_tokens,
+            0,
+            Some(exact_ref_tokens),
+        ),
     );
     response.telemetry = Some(json!({
         "ops": per_op.len(),
@@ -742,14 +742,7 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
         mode,
         text,
         Vec::new(),
-        Accounting {
-            raw_tokens,
-            visible_tokens,
-            recovery_tokens: 0,
-            billed_tokens: visible_tokens,
-            cached_tokens: 0,
-            exact_ref_tokens: Some(0),
-        },
+        Accounting::measured(raw_tokens, visible_tokens, 0, visible_tokens, 0, Some(0)),
     )
 }
 

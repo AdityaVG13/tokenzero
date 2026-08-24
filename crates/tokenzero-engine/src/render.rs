@@ -287,14 +287,14 @@ pub fn success_response(
         mode,
         text,
         refs,
-        Accounting {
-            raw_tokens: accounting.0,
-            visible_tokens: accounting.1,
-            recovery_tokens: accounting.2,
-            billed_tokens: accounting.1,
-            cached_tokens: 0,
-            exact_ref_tokens: accounting.3,
-        },
+        Accounting::measured(
+            accounting.0,
+            accounting.1,
+            accounting.2,
+            accounting.1,
+            0,
+            accounting.3,
+        ),
     )
 }
 
@@ -874,14 +874,14 @@ pub fn degraded_shell_response(
         Mode::Passthrough,
         output.to_string(),
         Vec::new(),
-        Accounting {
-            raw_tokens: count_tokens(output),
-            visible_tokens: count_tokens(output),
-            recovery_tokens: 0,
-            billed_tokens: count_tokens(output),
-            cached_tokens: 0,
-            exact_ref_tokens: Some(0),
-        },
+        Accounting::measured(
+            count_tokens(output),
+            count_tokens(output),
+            0,
+            count_tokens(output),
+            0,
+            Some(0),
+        ),
     );
     response.content_type = Some(ContentType::ShellOutput.to_string());
     response.diagnostic = Some(tokenzero_core::Diagnostic {
