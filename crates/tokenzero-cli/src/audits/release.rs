@@ -1,4 +1,5 @@
 use crate::*;
+use tokenzero_pulse::{PulseEvent, record_event};
 
 type Json = serde_json::Value;
 

@@ -26,6 +26,16 @@ pub const LEXICAL_ESTIMATOR_ID: &str = "estimator:tokenzero-lexical";
 /// Pulse-grammar estimator id for non-UTF-8 byte mass (1 token per byte).
 pub const BYTES_ESTIMATOR_ID: &str = "estimator:tokenzero-bytes";
 
+/// MCP hub registry labels. Forbidden as tokenizer ids (K-9 identity collision).
+pub const FORBIDDEN_MCP_ENGINE_IDENTITY: &str = "EngineIdentity::TokenZero";
+/// Sibling hub registry label. Forbidden as a tokenizer id for the same reason.
+pub const FORBIDDEN_MCP_REGISTRY_ENGINE: &str = "RegistryEngine::TokenZero";
+
+/// True when `id` is an MCP registry label, not a Pulse/kernel tokenizer.
+pub fn is_forbidden_mcp_tokenizer_identity(id: &str) -> bool {
+    id.contains(FORBIDDEN_MCP_ENGINE_IDENTITY) || id.contains(FORBIDDEN_MCP_REGISTRY_ENGINE)
+}
+
 /// Honesty preflight refusal for tokenizer ids that must never count as exact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenizerIdPreflightError {
@@ -33,6 +43,7 @@ pub enum TokenizerIdPreflightError {
     UnlabeledEstimateAlias,
     Q99IsNotExact,
     ExactLabelIsNotATokenizerId,
+    McpRegistryIdentity,
 }
 
 impl TokenizerIdPreflightError {
@@ -45,6 +56,9 @@ impl TokenizerIdPreflightError {
             Self::Q99IsNotExact => "Q99 is not a tokenizer identity and is never exact",
             Self::ExactLabelIsNotATokenizerId => {
                 "exact is not a tokenizer identity; use provider/model@digest"
+            }
+            Self::McpRegistryIdentity => {
+                "MCP EngineIdentity::TokenZero / RegistryEngine::TokenZero is not a tokenizer id"
             }
         }
     }
@@ -69,6 +83,9 @@ pub fn preflight_tokenizer_id(id: &str) -> Result<(), TokenizerIdPreflightError>
     let id = id.trim();
     if id.is_empty() {
         return Err(TokenizerIdPreflightError::Empty);
+    }
+    if is_forbidden_mcp_tokenizer_identity(id) {
+        return Err(TokenizerIdPreflightError::McpRegistryIdentity);
     }
     if id.starts_with(UNLABELED_ESTIMATE_TOKENIZER_PREFIX) {
         return Err(TokenizerIdPreflightError::UnlabeledEstimateAlias);

@@ -198,6 +198,24 @@ pub fn dispatch_operation(
         Ok(mut response) => {
             crate::cachezero::observe_action_cache(engine, resolved, args, wall_ns, &mut response);
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
+            if let Err(err) = engine.record_tool_pulse(resolved, &response, None, Vec::new()) {
+                crate::perf_profile::sample_collected(
+                    resolved,
+                    surface.as_str(),
+                    wall_ns,
+                    kernel_ns,
+                    overhead_ns,
+                    false,
+                );
+                return pulse_ledger_failure_outcome(
+                    resolved,
+                    surface,
+                    overhead_ns,
+                    wall_ns,
+                    kernel_ns,
+                    err,
+                );
+            }
             let ok = response.status == "ok";
             crate::perf_profile::sample_collected(
                 resolved,
@@ -325,4 +343,43 @@ pub fn dispatch_codemode_method(
 
 pub fn dispatch_cli(engine: &TokenZeroEngine, op_name: &str, args: &Value) -> DispatchOutcome {
     dispatch_operation(engine, DispatchSurface::Cli, op_name, args)
+}
+
+/// Accounting was served by the kernel but Pulse did not persist it. Do not
+/// return an ok envelope with token counts that the ledger does not have.
+fn pulse_ledger_failure_outcome(
+    op: &str,
+    surface: DispatchSurface,
+    overhead_ns: u64,
+    wall_ns: u64,
+    kernel_ns: u64,
+    err: std::io::Error,
+) -> DispatchOutcome {
+    let retryable = err.kind() == std::io::ErrorKind::WouldBlock;
+    let domain_error = DomainError::new(
+        DomainErrorKind::Substrate,
+        format!("Pulse ledger write failed: {err}"),
+    )
+    .with_op(op)
+    .with_retryable(retryable);
+    DispatchOutcome {
+        result: DomainResult::new(
+            op.to_string(),
+            json!({
+                "status": "error",
+                "error": {
+                    "kind": domain_error.kind.as_str(),
+                    "message": domain_error.message,
+                    "retryable": domain_error.retryable,
+                }
+            }),
+        ),
+        tool_response: None,
+        domain_error: Some(domain_error),
+        dispatcher_overhead_ns: overhead_ns,
+        wall_ns,
+        kernel_ns,
+        surface,
+        op: op.to_string(),
+    }
 }

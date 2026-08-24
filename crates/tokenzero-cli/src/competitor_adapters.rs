@@ -288,10 +288,11 @@ pub(crate) fn adapter_approval_audit_report(
         && unsafe_cnt == 0
         && dup_cnt == 0;
     let exec_ok = execution_approval && all_reviewed;
+    let status = if exec_ok { "ok" } else { "blocked" };
 
     Ok(json!({
         "schema_version": "tokenzero.adapter_approval_audit.v1",
-        "status": "ok", "ok": true,
+        "status": status, "ok": exec_ok,
         "release_candidate_id": release_candidate_id,
         "execution_approval_granted": execution_approval,
         "execution_allowed": exec_ok, "public_claims_approved": exec_ok,
@@ -320,7 +321,7 @@ pub(crate) fn adapter_approval_template_report(release_candidate_id: &str) -> se
         .collect();
     json!({
         "schema_version": "tokenzero.adapter_approval_file.v1",
-        "status": "ok", "ok": true,
+        "status": "template", "ok": false, "exit_code": 0,
         "release_candidate_id": release_candidate_id,
         "generated_by": "tokenzero adapter-approval-template",
         "review_scope": "command-shape safety review only; explicit execution approval remains required",

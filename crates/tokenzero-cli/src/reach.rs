@@ -87,8 +87,10 @@ pub(crate) fn run_reach(root: PathBuf, output_json: Option<PathBuf>) -> Result<J
     );
     local["details"] = wrapper_audit.clone();
     rows.push(local);
+    let intercepted = rows.iter().filter(|row| row["intercepted"] == true).count();
+    let all_intercepted = intercepted == rows.len();
     let report = json!({
-        "schema_version":"tokenzero.reach.v1","status":"ok","ok":true,"root":root.display().to_string(),
+        "schema_version":"tokenzero.reach.v1","status":if all_intercepted{"ok"}else{"partial"},"ok":all_intercepted,"exit_code":0,"root":root.display().to_string(),
         "daemon_required":false,"global_writes":false,"installed_wrapper_audit":wrapper_audit,
         "global_tokenzero_release_verification_trusted":wrapper_intercepted,
         "approved_install_required_for_global_update":!wrapper_intercepted,

@@ -45,8 +45,8 @@ use competitor_adapters::{
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
 use tokenzero_pulse::{
-    PulseEvent, SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl,
-    import_jsonl, record_event, report_for_path, sync_jsonl_to_sqlite,
+    SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl,
+    report_for_path, sync_jsonl_to_sqlite,
 };
 use tokenzero_runtime::{
     ExecutionMode, contains_platform_shell_syntax, env_map, plan_command_for_platform, quote_for,
@@ -720,12 +720,8 @@ fn tools_emit(
     engine: &TokenZeroEngine,
     mut responses: Vec<ToolResponse>,
     json: bool,
-    tool: &str,
+    _tool: &str,
 ) -> Result<EmitResponse> {
-    let root = tokenzero_work_root(None);
-    for response in &responses {
-        record_tool_pulse(response, root.clone(), tool)?;
-    }
     if json && slim_envelope_enabled() {
         for response in &mut responses {
             engine.apply_session_visible_ref_aliases(response);
@@ -2233,7 +2229,7 @@ fn client_status_report(
         "missing"
     };
     Ok(
-        json!({"schema_version": "tokenzero.clients.v1", "status": status, "ok": true, "command": format!("clients {command}"), "root": path_display(root), "global": true, "profile": "standard", "agents": clients_agent_labels(agents), "summary": {"installed": installed, "mixed": mixed, "missing": missing, "total": surfaces.len(), "raw_bypass_risk": status != "installed"}, "surfaces": surfaces, "next_action": if status == "installed" {"Run tokenzero doctor --json to verify runtime health."} else {"Run tokenzero clients plan --profile standard --json to review the read-only integration plan."}}),
+        json!({"schema_version": "tokenzero.clients.v1", "status": status, "ok": status == "installed", "exit_code": 0, "command": format!("clients {command}"), "root": path_display(root), "global": true, "profile": "standard", "agents": clients_agent_labels(agents), "summary": {"installed": installed, "mixed": mixed, "missing": missing, "total": surfaces.len(), "raw_bypass_risk": status != "installed"}, "surfaces": surfaces, "next_action": if status == "installed" {"Run tokenzero doctor --json to verify runtime health."} else {"Run tokenzero clients plan --profile standard --json to review the read-only integration plan."}}),
     )
 }
 
@@ -2445,31 +2441,6 @@ fn emit_value<T: serde::Serialize>(value: T, _as_json: bool) -> Result<()> {
     let json_value = serde_json::to_value(value)?;
     print_pretty(&json_value)?;
     exit_if_nonzero(doctor_exit_code(&json_value));
-    Ok(())
-}
-
-fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Result<()> {
-    if let Some(accounting) = response.accounting.as_ref() {
-        let mut event = PulseEvent::tool_call(
-            tool,
-            response.mode.as_deref().unwrap_or("hybrid"),
-            accounting.raw_tokens,
-            accounting.visible_tokens,
-            accounting.recovery_tokens,
-            response.refs.len(),
-            response
-                .telemetry
-                .as_ref()
-                .and_then(|v| v.get("latency_ms"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u128,
-            None,
-        );
-        if let Ok(stamped) = event.clone().with_tokenizer_id(&accounting.tokenizer_id) {
-            event = stamped;
-        }
-        record_event(&default_ledger_path(&root), &event)?;
-    }
     Ok(())
 }
 

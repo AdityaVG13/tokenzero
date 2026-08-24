@@ -9,9 +9,9 @@ use tokenzero_core::model_artifacts::{
     ModelArtifactError, ModelCapsule, TokenPage,
 };
 use tokenzero_core::{
-    Accounting, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
-    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, count_tokens_tokenizer_id, preflight_tokenizer_id,
-    sha256_hex,
+    Accounting, FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, LEXICAL_ESTIMATOR_ID,
+    TokenizerIdPreflightError, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, count_tokens_tokenizer_id,
+    is_forbidden_mcp_tokenizer_identity, preflight_tokenizer_id, sha256_hex,
 };
 use tokenzero_test_support::{
     ExecutionEnvelope, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, scenario,
@@ -85,6 +85,17 @@ fn tokenizer_id_preflight_refuses_unlabeled_estimate_and_q99_as_exact() {
         Err(TokenizerIdPreflightError::ExactLabelIsNotATokenizerId)
     );
     assert_eq!(preflight_tokenizer_id("tiktoken:o200k_base"), Ok(()));
+    assert_eq!(
+        preflight_tokenizer_id(FORBIDDEN_MCP_ENGINE_IDENTITY),
+        Err(TokenizerIdPreflightError::McpRegistryIdentity)
+    );
+    assert_eq!(
+        preflight_tokenizer_id(FORBIDDEN_MCP_REGISTRY_ENGINE),
+        Err(TokenizerIdPreflightError::McpRegistryIdentity)
+    );
+    assert!(is_forbidden_mcp_tokenizer_identity(
+        FORBIDDEN_MCP_ENGINE_IDENTITY
+    ));
 }
 
 #[test]
@@ -130,6 +141,25 @@ fn mcp_accounting_replaces_unlabeled_estimate_and_never_certifies_estimator() {
     )
     .expect("legacy accounting without tokenizer_id");
     assert_eq!(unlabeled.tokenizer_id, LEXICAL_ESTIMATOR_ID);
+}
+
+#[test]
+fn mcp_accounting_does_not_launder_engine_identity_into_estimator() {
+    stamp_subject_ne_oracle();
+    let mut accounting = Accounting::measured(3, 3, 0, 3, 0, None);
+    accounting.tokenizer_id = FORBIDDEN_MCP_ENGINE_IDENTITY.into();
+    accounting.certified = true;
+    accounting.stamp_tokenizer();
+    assert_eq!(accounting.tokenizer_id, FORBIDDEN_MCP_ENGINE_IDENTITY);
+    assert!(!accounting.certified);
+    assert_eq!(
+        preflight_tokenizer_id(&accounting.tokenizer_id),
+        Err(TokenizerIdPreflightError::McpRegistryIdentity)
+    );
+
+    accounting.tokenizer_id = FORBIDDEN_MCP_REGISTRY_ENGINE.into();
+    accounting.stamp_tokenizer();
+    assert_eq!(accounting.tokenizer_id, FORBIDDEN_MCP_REGISTRY_ENGINE);
 }
 
 #[test]

@@ -81,8 +81,9 @@ pub(crate) fn source_currency_report(release_candidate_id: &str) -> serde_json::
     let pin_audit = source_commit_pin_audit(&rows);
     json!({
         "schema_version": "tokenzero.source_currency.v1",
-        "status": "ok",
-        "ok": true,
+        "status": "blocked",
+        "ok": false,
+        "exit_code": 0,
         "release_candidate_id": release_candidate_id,
         "source_date": COMPETITOR_SOURCE_DATE,
         "source_snapshot": "PRD matrix generated 2026-06-03 and spot-checked 2026-06-04",
@@ -214,8 +215,9 @@ pub(crate) fn refreshed_source_currency_report(
 
     json!({
         "schema_version": "tokenzero.source_currency.v1",
-        "status": "ok",
-        "ok": true,
+        "status": "blocked",
+        "ok": false,
+        "exit_code": 0,
         "release_candidate_id": release_candidate_id,
         "source_date": source_refresh_date(),
         "source_snapshot": "release-candidate source refresh",

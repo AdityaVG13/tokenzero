@@ -203,50 +203,61 @@ impl TokenZeroEngine {
         }
     }
 
-    /// Best-effort Pulse write for a served tool call. Surfaces must not
-    /// depend on tokenzero-pulse; session_id attribution lives here.
+    /// Persist one Pulse event when this response claims token accounting.
+    ///
+    /// Fail-closed: a served accounting block without a durable Pulse write, or
+    /// a Pulse row stamped with a different tokenizer than the accounting, is a
+    /// lie. No-op when the response has no accounting.
     pub fn record_tool_pulse(
         &self,
         tool: &str,
         response: &ToolResponse,
         call_id: Option<String>,
         extra_ref_ids: Vec<String>,
-    ) {
-        let (Some(root), Some(accounting)) = (
-            self.config.allowed_roots.first(),
-            response.accounting.as_ref(),
-        ) else {
-            return;
+    ) -> std::io::Result<()> {
+        let Some(accounting) = response.accounting.as_ref() else {
+            return Ok(());
         };
+        let root = self
+            .config
+            .allowed_roots
+            .first()
+            .map(PathBuf::as_path)
+            .or_else(|| self.config.cache_path.parent())
+            .unwrap_or_else(|| Path::new("."));
         let mut ref_ids: Vec<String> = response
             .refs
             .iter()
             .map(|record| record.ref_id.clone())
             .collect();
         ref_ids.extend(extra_ref_ids);
-        let mut event = tokenzero_pulse::PulseEvent::tool_call(
+        let latency_ms = response
+            .telemetry
+            .as_ref()
+            .and_then(|value| value.get("latency_ms"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as u128;
+        let event = tokenzero_pulse::PulseEvent::tool_call(
             tool,
             response.mode.as_deref().unwrap_or("hybrid"),
             accounting.raw_tokens,
             accounting.visible_tokens,
             accounting.recovery_tokens,
             response.refs.len(),
-            0,
+            latency_ms,
             None,
         )
         .with_attribution(Some(self.session_id().to_string()), call_id, ref_ids);
-        if let Ok(stamped) = event.clone().with_tokenizer_id(&accounting.tokenizer_id) {
-            event = stamped;
-        }
+        let mut event = event
+            .with_tokenizer_id(&accounting.tokenizer_id)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         event.failure = response.error.is_some();
         event.task_lossless = tokenzero_pulse::pulse_task_lossless(
             accounting.raw_tokens,
             accounting.visible_tokens,
             accounting.recovery_tokens,
         ) && !event.failure;
-        // Pulse I/O stays fail-open for MCP surfaces; spending fields above
-        // must still be honest when the write succeeds.
-        let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
+        tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event)
     }
 
     /// Snapshot served by `resource://tokenzero/metrics`.

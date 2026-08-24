@@ -72,6 +72,26 @@ fn one_operation_same_dispatcher_from_all_adapters() {
     assert!(cli_out.is_ok(), "cli: {:?}", cli_out.tool_domain_error());
     assert!(cm_out.is_ok(), "cm: {:?}", cm_out.tool_domain_error());
 
+    let mcp_pulse = tokenzero_pulse::default_ledger_path(root.path());
+    let pulse_text = fs::read_to_string(&mcp_pulse).unwrap_or_else(|err| {
+        panic!(
+            "MCP tz_read must persist Pulse accounting at {}: {err}",
+            mcp_pulse.display()
+        )
+    });
+    assert!(
+        pulse_text.contains("\"event\":\"tool_call\"") || pulse_text.contains("tool_call"),
+        "Pulse ledger missing tool_call: {pulse_text}"
+    );
+    assert!(
+        mcp_out
+            .tool_response
+            .as_ref()
+            .and_then(|response| response.accounting.as_ref())
+            .is_some(),
+        "MCP success without accounting would skip Pulse and still look served"
+    );
+
     let normalize = |out: &tokenzero_engine::DispatchOutcome| {
         let resp = out.tool_response.as_ref().expect("tool response");
         (

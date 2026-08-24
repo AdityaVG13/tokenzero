@@ -235,6 +235,13 @@ impl Accounting {
     /// ExactTokenizerIdentity; estimator and tiktoken stay uncertified.
     pub fn stamp_tokenizer(&mut self) {
         let id = self.tokenizer_id.trim();
+        // MCP registry labels are identity collisions, not unlabeled estimates.
+        // Keep them so Pulse/preflight refuse instead of relabeling to the kernel
+        // estimator (which would look like honest accounting).
+        if tokens::is_forbidden_mcp_tokenizer_identity(id) {
+            self.certified = false;
+            return;
+        }
         let labeled = id.starts_with("estimator:")
             || id.starts_with("tiktoken:")
             || (id.contains('/') && id.contains('@'));
@@ -1965,10 +1972,11 @@ pub use shell_quote::{
     split_command_string, split_command_string_for_platform,
 };
 pub use tokens::{
-    BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerFamily, TokenizerIdPreflightError,
-    TokenizerMetadata, UNLABELED_ESTIMATE_TOKENIZER_PREFIX, VISIBLE_BUDGET_LOSSY_DECLARATION,
-    active_model_id, active_tokenizer_metadata, count_tokens, count_tokens_for_model,
-    count_tokens_tokenizer_id, enforce_token_budget, enforce_token_budget_with_ref,
+    BYTES_ESTIMATOR_ID, FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE,
+    LEXICAL_ESTIMATOR_ID, TokenizerFamily, TokenizerIdPreflightError, TokenizerMetadata,
+    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, VISIBLE_BUDGET_LOSSY_DECLARATION, active_model_id,
+    active_tokenizer_metadata, count_tokens, count_tokens_for_model, count_tokens_tokenizer_id,
+    enforce_token_budget, enforce_token_budget_with_ref, is_forbidden_mcp_tokenizer_identity,
     pack_to_token_boundary, pack_to_token_boundary_for_model,
     pack_to_token_boundary_for_model_with_char_limit, pack_to_token_boundary_with_char_limit,
     prefix_end_for_kept_lines, preflight_tokenizer_id, savings_ratio, savings_ratio_u64,
