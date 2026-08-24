@@ -139,23 +139,20 @@ impl ZeroTokenEngine {
             return (text, accounting, false);
         }
 
-        let mut boundaries = Vec::with_capacity(text.chars().count().saturating_add(1));
-        boundaries.push(0);
-        boundaries.extend(text.char_indices().skip(1).map(|(offset, _)| offset));
-        boundaries.push(text.len());
-        let mut low = 0usize;
-        let mut high = boundaries.len().saturating_sub(1);
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            if self.count(text[..boundaries[middle]].as_bytes()).billed <= max_tokens {
-                low = middle;
-            } else {
-                high = middle.saturating_sub(1);
+        // BPE token counts are not monotonic in prefix length, so binary
+        // search can reject a long prefix that fits because a shorter
+        // mid-token prefix counted higher. Longest-to-shortest char prefix
+        // is the exact "largest prefix with billed <= max_tokens" scan.
+        let mut ends: Vec<usize> = text.char_indices().map(|(offset, _)| offset).collect();
+        ends.push(text.len());
+        for &end in ends.iter().rev() {
+            let prefix = &text[..end];
+            let accounting = self.count(prefix.as_bytes());
+            if accounting.billed <= max_tokens {
+                return (prefix, accounting, end != text.len());
             }
         }
-        let visible = &text[..boundaries[low]];
-        let accounting = self.count(visible.as_bytes());
-        (visible, accounting, true)
+        (text.get(..0).unwrap_or(""), self.count(b""), true)
     }
 
     fn store_exact(&self, bytes: &[u8], media_type: &str) -> Result<ZeroHandle, EngineError> {
@@ -297,25 +294,14 @@ impl TokenEngine for ZeroTokenEngine {
             Some(&handle.to_string()),
         )
         .map_err(|error| EngineError::new(EngineErrorKind::Budget, error, false))?;
-        // ZeroKernel guest passes max_tokens=1024, mode="" (Auto) by default.
-        // Auto is passthrough when raw_tokens <= max_tokens, so a 2300-byte
-        // 50x-repeated-line input (400 billed tokens) previously returned the
-        // entire text verbatim with visible==billed and zero savings. For
-        // oversized or highly repetitive inputs compress must still emit a
-        // bounded digest while the handle preserves exact recovery.
-        let is_passthrough = capsule.text.trim_end() == text.trim_end();
+        // Auto+oversized must pick the same honest digest family at every
+        // budget, then clamp. Restricting Dedupe/Structured to the
+        // passthrough case (max_tokens >= billed) made a looser budget
+        // collapse a repetitive payload while a tighter budget kept a
+        // longer summarize_lines view — visible(tight) > visible(loose).
         let oversized = request.bytes.len() > 512 || text.lines().count() > 20;
-        if is_passthrough
-            && capsule.visible_tokens as u64 >= raw_accounting.billed
-            && oversized
-            && mode == tokenzero_core::Mode::Auto
-        {
-            // Prefer run-length collapse for repeated lines; it keeps the
-            // visible view honest (visible < billed) and bounded. Fall back
-            // to structured head+tail elision for non-repetitive oversized
-            // inputs. Both paths already embed the exact handle and enforce
-            // the token budget.
-            let mut best: Option<tokenzero_core::Capsule> = None;
+        if oversized && mode == tokenzero_core::Mode::Auto {
+            let mut best = capsule.clone();
             for alt_mode in [
                 tokenzero_core::Mode::Dedupe,
                 tokenzero_core::Mode::Structured,
@@ -328,23 +314,13 @@ impl TokenEngine for ZeroTokenEngine {
                     request.label.as_deref(),
                     Some(&handle.to_string()),
                 ) {
-                    // Honesty requires visible < billed. Prefer the smallest
-                    // honest digest; otherwise keep any strictly bounded view.
                     let honest = (alt.visible_tokens as u64) < raw_accounting.billed;
-                    let smaller = alt.text.len() < capsule.text.len();
-                    // Honesty first: never adopt a smaller-byte view that
-                    // costs more tokens than the raw payload.
-                    if honest && smaller {
-                        best = Some(alt);
-                        break;
+                    if honest && alt.visible_tokens < best.visible_tokens {
+                        best = alt;
                     }
                 }
             }
-            if let Some(alt) = best
-                && (alt.visible_tokens as u64) < raw_accounting.billed
-            {
-                capsule = alt;
-            }
+            capsule = best;
         }
         let (visible, visible_accounting, truncated) =
             self.clamp_visible_to_budget(&capsule.text, u64::from(request.max_tokens));

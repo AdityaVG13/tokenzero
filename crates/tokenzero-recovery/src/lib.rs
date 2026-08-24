@@ -347,6 +347,13 @@ fn parse_fragment_bounds_core(
     if start > end {
         return Err(true);
     }
+    // `#Bn` is the single byte at n (half-open [n, n+1)). Empty selection
+    // stays `#Bn-n`. Line `#Ln` is already the inclusive singleton [n, n].
+    let end = if allow_single && separated.is_none() && repeated_kind == 'B' {
+        start.checked_add(1).ok_or(false)?
+    } else {
+        end
+    };
     Ok((start, end))
 }
 
@@ -505,8 +512,8 @@ fn parse_portable_or_lenient_fragment(
         Some(&b'L') => ('L', &fragment[1..]),
         _ => return Err(ZeroRefError::Malformed),
     };
-    // allow_single=true for both kinds, matching the shared grammar
-    // (parse_fragment_spec): `#B0` is a valid single-byte selector.
+    // allow_single=true for both kinds, matching parse_fragment_spec:
+    // `#B0` is byte 0 (`[0, 1)`); `#L1` is line 1.
     let (start, end) = parse_fragment_bounds_core(value, kind, true, kind == 'L')
         .map_err(|_| ZeroRefError::Malformed)?;
     match kind {

@@ -128,3 +128,69 @@ fn repeated_input_saves_more_than_half_the_visible_tokens() {
         .unwrap();
     assert!(result.accounting.visible * 2 < measured.billed);
 }
+
+fn compress(
+    engine: &ZeroTokenEngine,
+    invocation: &EngineInvocation,
+    input: &str,
+    budget: u32,
+    mode: &str,
+) -> zero_abi::CompressionResult {
+    engine
+        .compress(
+            invocation,
+            CompressionRequest {
+                bytes: input.as_bytes().to_vec(),
+                max_tokens: budget,
+                mode: mode.to_string(),
+                label: None,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .unwrap()
+}
+
+#[test]
+fn auto_oversized_visible_is_budget_monotonic_and_round_trips() {
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
+    let input = "repeated exact line for compression\n".repeat(50);
+    let mut previous_visible = 0u64;
+    let mut previous_budget = 0u32;
+    for budget in [8, 16, 32, 64, 128, 256, 512, 1024] {
+        let result = compress(&engine, &invocation, &input, budget, "");
+        assert!(
+            result.accounting.visible <= u64::from(budget),
+            "visible={} budget={budget}",
+            result.accounting.visible
+        );
+        let expanded = engine
+            .expand(&invocation, &result.exact, ExpandOptions::default())
+            .unwrap();
+        assert_eq!(expanded, input.as_bytes(), "budget={budget}");
+        if previous_budget > 0 {
+            assert!(
+                result.accounting.visible >= previous_visible,
+                "tighter budget {previous_budget} visible={previous_visible} vs looser {budget} visible={}",
+                result.accounting.visible
+            );
+        }
+        previous_visible = result.accounting.visible;
+        previous_budget = budget;
+    }
+}
+
+#[test]
+fn compress_expand_round_trips_unicode_and_trailing_whitespace() {
+    let ws = workspace();
+    let invocation = invocation_for(&ws);
+    let engine = engine(&ws);
+    for input in ["café 🦀  \n", "hello world\n\n", "a\u{0301}e\n"] {
+        let result = compress(&engine, &invocation, input, 64, "exact");
+        let expanded = engine
+            .expand(&invocation, &result.exact, ExpandOptions::default())
+            .unwrap();
+        assert_eq!(expanded, input.as_bytes(), "payload={input:?}");
+    }
+}

@@ -480,15 +480,24 @@ fn exact_ref_has_selector(reference: &str) -> bool {
     if !exact_recovery_scheme(base) || selector.is_empty() {
         return false;
     }
+    // Same published grammar expand accepts: `#Bstart-end`, `#Bstart+len`,
+    // `#Bn`, `#Lstart-end`, `#Lstart-Lend`, `#Ln`. A recovery cue the
+    // expander cannot parse is not a selector.
     if let Some(bytes) = selector.strip_prefix('B') {
-        return bytes.split_once('-').is_some_and(|(start, len)| {
-            start.parse::<usize>().is_ok() && len.parse::<usize>().is_ok()
-        });
+        if let Some((start, end)) = bytes.split_once('-') {
+            return start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok();
+        }
+        if let Some((start, len)) = bytes.split_once('+') {
+            return start.parse::<usize>().is_ok() && len.parse::<usize>().is_ok();
+        }
+        return bytes.parse::<usize>().is_ok();
     }
     if let Some(lines) = selector.strip_prefix('L') {
-        return lines.split_once("-L").is_some_and(|(start, end)| {
-            start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok()
-        });
+        if let Some((start, end)) = lines.split_once('-') {
+            return start.parse::<usize>().is_ok()
+                && end.trim_start_matches('L').parse::<usize>().is_ok();
+        }
+        return lines.parse::<usize>().is_ok();
     }
     selector
         .strip_prefix("symbol=")
@@ -1913,5 +1922,33 @@ mod never_worse_capsule_tests {
             capsule.visible_tokens,
             count_tokens(text)
         );
+    }
+
+    #[test]
+    fn canonical_line_and_plus_byte_fragments_are_recovery_selectors() {
+        let text = (0..80)
+            .map(|i| format!("tok{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for selector in ["#L1-3", "#L1-L3", "#B0+5"] {
+            let handle = format!("tz://blob/{hash}{selector}");
+            let capsule = make_capsule_with_recovery_ref(
+                &text,
+                count_tokens(&text),
+                Mode::Structured,
+                8,
+                None,
+                Some(&handle),
+            )
+            .expect("capsule");
+            assert!(
+                capsule.exact_refs.iter().any(|r| r.contains(selector))
+                    || capsule.text.contains(selector),
+                "expand grammar {selector} must be a recovery selector, got text={:?} refs={:?}",
+                capsule.text,
+                capsule.exact_refs
+            );
+        }
     }
 }

@@ -6,7 +6,7 @@
 use tokenzero_core::model_artifacts::{
     ExactTokenMap, ExactTokenizerAdapter, ExactTokenizerIdentity, MAX_CAPSULE_EVIDENCE_REFS,
     MAX_CAPSULE_RENDER_BYTES, MAX_CAPSULE_TOKEN_PAGES, MAX_TOKEN_PAGE_BYTES, MAX_TOKEN_PAGE_TOKENS,
-    ModelArtifactError, TokenPage,
+    ModelArtifactError, ModelCapsule, TokenPage,
 };
 use tokenzero_core::sha256_hex;
 use tokenzero_test_support::{
@@ -143,4 +143,41 @@ fn token_page_expand_through_spec_scenario() {
             panic!("in-range page must be BothOk, got subject={subject:?} oracle={oracle:?}")
         }
     }
+}
+
+#[test]
+fn token_page_subrange_expand_equals_source_slice() {
+    stamp_subject_ne_oracle();
+    let adapter = adapter();
+    let source = b"abcdef";
+    let map = ExactTokenMap::tokenize(&adapter, source).expect("map");
+    let anchor = blob_anchor(&map);
+    let page = TokenPage::new(&map, &anchor, 2..5).expect("page");
+    assert_eq!(page.expand(), &source[2..5]);
+    assert_eq!(page.expand(), map.reconstruct()[2..5]);
+}
+
+#[test]
+fn model_capsule_render_is_prefix_concat_tail() {
+    stamp_subject_ne_oracle();
+    let adapter = adapter();
+    let source = b"hello world";
+    let full = ExactTokenMap::tokenize(&adapter, source).expect("full");
+    let prefix = ExactTokenMap::tokenize(&adapter, b"hello").expect("prefix");
+    let tail = ExactTokenMap::tokenize(&adapter, b" world").expect("tail");
+    let anchor = blob_anchor(&full);
+    let page = TokenPage::new(&full, &anchor, 0..source.len()).expect("page");
+    let capsule = ModelCapsule::new(
+        full.source_digest(),
+        ModelCapsule::absent_model_profile_digest(),
+        adapter.identity(),
+        Vec::new(),
+        &[page],
+        &prefix,
+        &tail,
+    )
+    .expect("capsule");
+    assert_eq!(capsule.render(), source);
+    assert_eq!(capsule.stable_prefix(), b"hello");
+    assert_eq!(capsule.dynamic_tail(), b" world");
 }
