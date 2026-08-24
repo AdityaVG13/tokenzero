@@ -166,10 +166,10 @@ pub fn fragment_reason_class_matches(embedded: &str, recovery: &str) -> bool {
 /// TokenZero persist / prune / WAL crash windows.
 ///
 /// Names are protocol events, not SQL `BeforeWalHeaderWrite`. The eight
-/// historical in-process tests were deleted in `d8c0844`. `existing_driver`
-/// is therefore `None` (Uncovered). **None are subprocess-armed**. Do not
-/// treat `is_subprocess_armed() == false` or a deleted census path as a pass
-/// on skill Pattern 65 injection.
+/// historical in-process tests were deleted in `d8c0844`. Live drivers are
+/// `tests/unit/tokenzero-recovery/crash_windows.rs`. **None are
+/// subprocess-armed**. Do not treat `is_subprocess_armed() == false` as a
+/// pass on skill Pattern 65 injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashBoundary {
     BeforePersistOnUnreadableSnapshot,
@@ -230,10 +230,50 @@ impl CrashBoundary {
         false
     }
 
-    /// Live crash-window driver. All eight `d8c0844` files are gone.
-    /// Uncovered, never a silent pass.
+    /// Live crash-window driver. Replaced the `d8c0844` deleted census.
     pub const fn existing_driver(self) -> Option<CrashWindowDriver> {
-        None
+        Some(match self {
+            Self::BeforePersistOnUnreadableSnapshot => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "persist_pending_refuses_unreadable_snapshot",
+                kind: CrashWindowKind::InProcessRefuse,
+            },
+            Self::BeforePruneOnUnreadableSnapshot => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "prune_blob_sidecars_refuses_unreadable_snapshot",
+                kind: CrashWindowKind::InProcessRefuse,
+            },
+            Self::AfterJournalAppendBeforeSnapshotRewrite => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "second_process_persist_appends_journal_without_snapshot_rewrite",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterWalAppendSession => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "missing_snapshot_replays_wal_persist_does_not_drop_it",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterWalTornTailKeepsComplete => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "corrupt_journal_tail_keeps_complete_entries",
+                kind: CrashWindowKind::InProcessRoundTrip,
+            },
+            Self::AfterTmpWriteBeforeRename => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "kill_before_rename_keeps_previous_complete_snapshot",
+                kind: CrashWindowKind::SimulatedKillBeforeRename,
+            },
+            Self::PersistLockConcurrentWriters => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "concurrent_persistence_preserves_all_thread_payloads",
+                kind: CrashWindowKind::ConcurrentLockCoverage,
+            },
+            Self::PersistLockTmpSweep => CrashWindowDriver {
+                path: "tests/unit/tokenzero-recovery/crash_windows.rs",
+                test_fn: "sweep_stale_tmp_reclaims_zero_store_leftovers",
+                kind: CrashWindowKind::ConcurrentLockCoverage,
+            },
+        })
     }
 
     /// Historical paths only. Citing these as coverage is a lie.

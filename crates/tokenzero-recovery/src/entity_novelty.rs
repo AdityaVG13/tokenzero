@@ -194,11 +194,10 @@ pub fn write_entity_novelty(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(record)?;
-    let tmp = path.with_extension("json.tmp");
-    if let Err(err) = fs::write(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path)) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
+    // Unique tmp + rename: a shared `*.json.tmp` plus `fs::write` can clobber
+    // dest when two writers race, and kill-after-truncate of that tmp is not
+    // dest-safe either. Hub replace never truncates dest in place.
+    zero_store::atomic_write_file(&path, &bytes)?;
     Ok(path)
 }
 
@@ -279,4 +278,3 @@ fn validate_entity_id(hex: &str) -> Result<(), NoveltyError> {
 fn now_rfc3339() -> String {
     crate::shared_cas::format_system_time(SystemTime::now())
 }
-

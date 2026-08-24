@@ -191,7 +191,10 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
     assert_eq!(verifiable, 33, "Phase 2 Verifiable count");
     assert_eq!(ambiguous, 7, "Phase 2 Ambiguous count");
     let wired = SPEC_TAG_WIRES.iter().filter(|row| row.is_wired()).count();
-    assert_eq!(wired, 21, "Phase 4 live-wired Verifiable count (METRIC-001)");
+    assert_eq!(
+        wired, 21,
+        "Phase 4 live-wired Verifiable count (METRIC-001)"
+    );
     let root = repo_root();
     for row in SPEC_TAG_WIRES {
         if row.class == SpecTagClass::Ambiguous {
@@ -214,7 +217,7 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
 }
 
 #[test]
-fn crash_boundary_drivers_are_uncovered_after_d8c0844() {
+fn crash_boundary_drivers_are_live_in_process_not_subprocess_armed() {
     let root = repo_root();
     assert_eq!(CrashBoundary::ALL.len(), 8);
     for boundary in CrashBoundary::ALL {
@@ -223,17 +226,30 @@ fn crash_boundary_drivers_are_uncovered_after_d8c0844() {
             "{} must not claim Pattern 65 arming",
             boundary.as_str()
         );
+        let driver = boundary.existing_driver().unwrap_or_else(|| {
+            panic!(
+                "{} existing_driver must name a live in-process test",
+                boundary.as_str()
+            )
+        });
         assert!(
-            boundary.existing_driver().is_none(),
-            "{} existing_driver must be None (Uncovered); do not cite a deleted path as live",
-            boundary.as_str()
+            root.join(driver.path).exists(),
+            "{} driver {} missing on disk",
+            boundary.as_str(),
+            driver.path
         );
         let census = boundary.deleted_driver_census();
         assert!(
             !root.join(census.path).exists(),
-            "{} census path {} reappeared; wire existing_driver to the live file",
+            "{} census path {} reappeared; keep existing_driver on the live file",
             boundary.as_str(),
             census.path
+        );
+        assert_ne!(
+            driver.path,
+            census.path,
+            "{} must not cite the deleted census path as live",
+            boundary.as_str()
         );
     }
 }

@@ -65,7 +65,7 @@ pub fn sweep_stale_tmp_files(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.ends_with(".tmp") || !name.contains(cache_name) {
+        if !is_recovery_tmp_name(name, cache_name) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -89,6 +89,22 @@ pub fn sweep_stale_tmp_files(
         }
     }
     report
+}
+
+/// Persist temps from this crate (`.{cache}.{pid}.{nonce}.tmp`) and hub
+/// `atomic_write_file` leftovers (`.{cache}.tmp-{pid}-{seq}`). Kill-before-rename
+/// leaves the dest complete; sweeping the leftover must not miss the hub name.
+fn is_recovery_tmp_name(name: &str, cache_name: &str) -> bool {
+    if !name.contains(cache_name) {
+        return false;
+    }
+    if name.ends_with(".tmp") {
+        return true;
+    }
+    let Some((_, rest)) = name.rsplit_once(".tmp-") else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
 }
 
 /// Result of enforcing the legacy recovery sidecar byte budget.
@@ -332,4 +348,3 @@ pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
         });
     serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
 }
-

@@ -59,3 +59,7 @@ path = "../../tests/unit/tokenzero-recovery/prefix_stability_floor.rs"
 [[test]]
 name = "expand_fragment_oracle"
 path = "../../tests/unit/tokenzero-recovery/expand_fragment_oracle.rs"
+
+[[test]]
+name = "crash_windows"
+path = "../../tests/unit/tokenzero-recovery/crash_windows.rs"

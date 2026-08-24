@@ -22,7 +22,8 @@ use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex,
 use crate::shared_cas::{SharedCas, SharedCasError};
 use crate::telemetry::CrossEngineTelemetry;
 use zero_store::{
-    AppendOutcome, FileIdentity, SessionWal, SessionWalConfig, SessionWalError, SyncPolicy,
+    AppendOutcome, FileIdentity, SESSION_WAL_DEFAULT_MAX_SEALED_SEGMENTS, SessionWal,
+    SessionWalConfig, SessionWalError, SyncPolicy,
 };
 
 pub mod telemetry;
@@ -1029,6 +1030,9 @@ pub struct RecoveryStore {
     /// A memo hit can make the immediately following persist provably empty.
     /// Any real ref mutation clears this flag through `remember_ref`.
     skip_empty_persist: bool,
+    /// Construction saw an existing unreadable snapshot. Expand must not
+    /// pretend the store is empty; persist re-checks disk and still refuses.
+    unreadable_snapshot: bool,
     /// Hashes of blobs stored via `put_blob` since the last
     /// `publish_pending_cas` call. Tracked in-memory only; the finalizer's
     /// `commit()` publishes these post-durable-commit so CAS publication
@@ -1136,14 +1140,22 @@ impl RecoveryStore {
     }
 
     pub fn with_config(persistence_path: Option<PathBuf>, config: RecoveryConfig) -> Self {
-        let loaded = persistence_path
-            .as_ref()
-            .and_then(|path| load_state(path, &config).ok().flatten());
-        let (disk_identity, journal_identity) = loaded
-            .as_ref()
-            .and(persistence_path.as_deref())
-            .map(cache_identities)
-            .unwrap_or_default();
+        let (loaded, unreadable_snapshot) = match persistence_path.as_ref() {
+            Some(path) => match load_state_if_present(path, &config) {
+                Ok(state) => (state, false),
+                Err(_) => (None, true),
+            },
+            None => (None, false),
+        };
+        let (disk_identity, journal_identity) = if unreadable_snapshot {
+            (None, None)
+        } else {
+            loaded
+                .as_ref()
+                .and(persistence_path.as_deref())
+                .map(cache_identities)
+                .unwrap_or_default()
+        };
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
@@ -1165,6 +1177,7 @@ impl RecoveryStore {
             pending_alias_deletions: BTreeSet::new(),
             payload_memo: None,
             skip_empty_persist: false,
+            unreadable_snapshot,
             pending_cas_hashes: BTreeSet::new(),
         }
     }
@@ -1930,6 +1943,11 @@ impl RecoveryStore {
             ($reason:expr) => {
                 ExpansionResult::missing(requested_ref.clone(), selector_owned.clone(), $reason)
             };
+        }
+        // Unreadable snapshot is not an empty store: persist refuses overwrite;
+        // expand must not look like a clean miss.
+        if self.unreadable_snapshot {
+            return miss!("unreadable-snapshot");
         }
         let early_fragment = ref_id.split_once('#').map(|(_, fragment)| fragment);
         let early_fragment_spec = match early_fragment.map(parse_fragment_spec).transpose() {
@@ -2889,10 +2907,12 @@ impl RecoveryStore {
         if !unchanged_since_last_write {
             let existing = match load_state_if_present(&path, &self.config)? {
                 Some(existing) => {
+                    self.unreadable_snapshot = false;
                     ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
                     existing
                 }
                 None => {
+                    self.unreadable_snapshot = false;
                     let generation = next_ordinal_generation(&path)?;
                     self.state.ordinal_generation = generation;
                     self.state.next_ordinal = initial_next_ordinal();
@@ -3648,6 +3668,7 @@ fn write_ref_index_entries<'a>(
             serde_json::to_writer(&mut file, &stamped)?;
             file.write_all(b"\n")?;
         }
+        file.sync_all()?;
         drop(file);
         fs::rename(&tmp, shard)?;
         Ok(())
@@ -3856,40 +3877,74 @@ pub(crate) fn load_state(
 ) -> Result<Option<RecoveryState>, RecoveryError> {
     config.validate()?;
     refuse_unexpanded_tilde_store_path(path)?;
-    let Some(file) = open_optional_file(path)? else {
-        return Ok(None);
+    let state = match open_optional_file(path)? {
+        Some(file) => {
+            let meta = file.metadata()?;
+            // Compare as u64 so a file larger than usize can't truncate and slip past
+            // the load-size guard on 32-bit targets (which would risk an OOM on read).
+            if !meta.is_file() || meta.len() > config.max_load_bytes as u64 {
+                return Err(unreadable_snapshot_error(path));
+            }
+            let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else {
+                return Err(unreadable_snapshot_error(path));
+            };
+            let mut state = serde_json::from_str::<RecoveryState>(&text)
+                .map_err(|_| unreadable_snapshot_error(path))?;
+            state.configure(config);
+            Some(state)
+        }
+        None => None,
     };
-    let meta = file.metadata()?;
-    // Compare as u64 so a file larger than usize can't truncate and slip past
-    // the load-size guard on 32-bit targets (which would risk an OOM on read).
-    if !meta.is_file() || meta.len() > config.max_load_bytes as u64 {
-        return Ok(None);
+    match state {
+        Some(state) => Ok(Some(apply_session_wal(state, path, config))),
+        None if !session_journal_present(path) => Ok(None),
+        None => {
+            // Snapshot gone, WAL still present: replay complete records onto
+            // empty rather than treating the store as missing and later
+            // publish_snapshot/clear_wal dropping committed journal bytes.
+            Ok(Some(apply_session_wal(
+                RecoveryState::empty(config),
+                path,
+                config,
+            )))
+        }
     }
-    let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else {
-        return Ok(None);
-    };
-    let Ok(mut state) = serde_json::from_str::<RecoveryState>(&text) else {
-        return Ok(None);
-    };
-    state.configure(config);
-    Ok(Some(apply_session_wal(state, path, config)))
 }
 
-/// `None` only when the snapshot file is absent. An existing unreadable,
-/// unparseable, or oversized file is an error so persist/prune cannot treat
-/// it as empty and overwrite or delete dependents.
+fn unreadable_snapshot_error(path: &Path) -> RecoveryError {
+    invalid_data(format!(
+        "recovery snapshot is unreadable: {}",
+        path.display()
+    ))
+    .into()
+}
+
+fn session_journal_present(path: &Path) -> bool {
+    let Ok(wal) = SessionWal::new(path, SessionWalConfig::default()) else {
+        return false;
+    };
+    let active = wal.wal_path();
+    if active.is_file() {
+        return true;
+    }
+    (1..=SESSION_WAL_DEFAULT_MAX_SEALED_SEGMENTS).any(|generation| {
+        let mut sibling = active.as_os_str().to_os_string();
+        sibling.push(format!(".{generation}"));
+        PathBuf::from(sibling).is_file()
+    })
+}
+
+/// `None` only when the snapshot file and session WAL are both absent. An
+/// existing unreadable, unparseable, or oversized snapshot is an error so
+/// persist/prune cannot treat it as empty and overwrite or delete dependents.
 pub(crate) fn load_state_if_present(
     path: &Path,
     config: &RecoveryConfig,
 ) -> Result<Option<RecoveryState>, RecoveryError> {
     match load_state(path, config)? {
         Some(state) => Ok(Some(state)),
-        None if !path.exists() => Ok(None),
-        None => Err(invalid_data(format!(
-            "recovery snapshot is unreadable: {}",
-            path.display()
-        ))
-        .into()),
+        None if !path.exists() && !session_journal_present(path) => Ok(None),
+        None => Err(unreadable_snapshot_error(path)),
     }
 }
 
@@ -4557,9 +4612,10 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     serde_json::to_writer(&mut writer, state)?;
     writer.write_all(b"\n")?;
-    let _file = writer
+    let file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
+    file.sync_all()?;
     Ok(())
 }
 
