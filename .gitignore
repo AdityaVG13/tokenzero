@@ -114,7 +114,6 @@
 
 AGENTS.md
 Agents.md
-!/AGENTS.md
 CLAUDE.md
 Claude.md
 AGENTS.md.*
@@ -135,7 +134,6 @@ __pycache__/
 *.sqlite3
 *.docx
 *.gif
-!/.github/assets/banner.gif
 *.jpeg
 *.jpg
 *.png

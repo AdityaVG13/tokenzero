@@ -1,9 +1,3 @@
-<div align="center">
-
-<img src="../.github/assets/banner.gif" alt="TokenZero: Recovery-Aware Context Compression" width="100%">
-
-</div>
-
 # TokenZero demo
 
 A self-contained, byte-honest demo that walks an AI agent's "day in the life"
