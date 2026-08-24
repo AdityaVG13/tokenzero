@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::conformal::{
+    score_categories, BetaParams, CategoryEvidence, ParityScorecard, DEFAULT_CONFIDENCE,
+};
+
 /// Frozen copy of Phase 2 `supported_surface_matrix.toml`. Tests of the sum
 /// invariant use this. Workspace file must byte-match (see `embedded_matrix_sha256`).
 pub const EMBEDDED_SURFACE_MATRIX: &str = include_str!("fixtures/supported_surface_matrix.toml");
@@ -137,6 +141,35 @@ pub struct CategoryStats {
     pub missing: usize,
     pub excluded: usize,
     pub weight_sum: f64,
+}
+
+impl Default for CategoryStats {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            passing: 0,
+            partial: 0,
+            missing: 0,
+            excluded: 0,
+            weight_sum: 0.0,
+        }
+    }
+}
+
+impl CategoryStats {
+    /// Partial is half a success and half a failure. Excluded is a failure
+    /// (coverage debt). Trials equal `total`.
+    pub fn successes(&self) -> f64 {
+        self.passing as f64 + 0.5 * self.partial as f64
+    }
+
+    pub fn failures(&self) -> f64 {
+        self.missing as f64 + self.excluded as f64 + 0.5 * self.partial as f64
+    }
+
+    pub fn trials(&self) -> f64 {
+        self.successes() + self.failures()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,10 +543,43 @@ impl FeatureUniverse {
         truncate_score(acc)
     }
 
-    /// Strict-100% fails if any Excluded, Missing, or Partial remains.
+    /// Count-based debt check. Not a release gate: a 100% point estimate
+    /// with small N still cannot certify. Use [`Self::conformal_scorecard`].
     pub fn strict_100_certifiable(&self) -> bool {
         let s = self.stats();
         s.excluded == 0 && s.missing == 0 && s.partial == 0 && s.passing == s.total && s.total > 0
+    }
+
+    /// Per-category pass/fail counts → Beta posterior + conformal LOWER bound.
+    /// Category weights mix the per-category intervals into the global score.
+    pub fn conformal_scorecard(&self) -> ParityScorecard {
+        self.conformal_scorecard_at(DEFAULT_CONFIDENCE, &[])
+    }
+
+    pub fn conformal_scorecard_at(&self, confidence: f64, residuals: &[f64]) -> ParityScorecard {
+        let stats = self.stats();
+        let evidence: Vec<CategoryEvidence> = self
+            .category_weights
+            .iter()
+            .map(|(cat, weight)| {
+                let cs = stats.per_category.get(cat).cloned().unwrap_or_default();
+                CategoryEvidence {
+                    category: cat.clone(),
+                    weight: *weight,
+                    successes: cs.successes(),
+                    failures: cs.failures(),
+                }
+            })
+            .collect();
+        score_categories(&evidence, BetaParams::UNIFORM_PRIOR, confidence, residuals)
+            .with_origin(self.origin.clone())
+    }
+
+    /// Release predicate: conformal LOWER bound vs `threshold`. Using
+    /// [`Self::effective_coverage`] (point estimate) as the bound is a
+    /// fail-closed miss — call this, not a raw 100% comparison.
+    pub fn conformal_release_eligible(&self, threshold: f64) -> bool {
+        self.conformal_scorecard().conformal_certifiable(threshold)
     }
 }
 

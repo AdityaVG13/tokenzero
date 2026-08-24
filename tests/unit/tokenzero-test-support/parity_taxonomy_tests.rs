@@ -1,7 +1,7 @@
 use super::*;
 use crate::gauntlet::{
-    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, GauntletOracle, SUBJECT_IDENTITY,
-    assert_distinct, is_forbidden_gauntlet_identity,
+    assert_distinct, is_forbidden_gauntlet_identity, GauntletOracle, FORBIDDEN_MCP_ENGINE_IDENTITY,
+    FORBIDDEN_MCP_REGISTRY_ENGINE, SUBJECT_IDENTITY,
 };
 use std::panic::catch_unwind;
 
@@ -122,6 +122,15 @@ fn estimator_tiktoken_and_exact_are_labeled_not_conflated() {
         "Pass 10: live kernel emits tiktoken:<encoding>; matrix must name it: {}",
         feat.title
     );
+}
+
+#[test]
+fn conformal_scorecard_is_the_release_gate_not_effective_coverage() {
+    let u = universe();
+    assert!(!u.conformal_release_eligible(1.0));
+    let sc = u.conformal_scorecard();
+    assert!(sc.global_lower < sc.global_point);
+    assert_ne!(sc.global_lower, u.effective_coverage());
 }
 
 #[test]
