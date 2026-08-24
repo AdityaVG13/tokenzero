@@ -36,6 +36,7 @@ zero-process.workspace = true
 [dev-dependencies]
 zerostack-conformance.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tokenzero-test-support = { path = "../tokenzero-test-support" }
 zerostack-test-support.workspace = true
@@ -57,3 +58,7 @@ path = "../../tests/engine/irx9_conformance_corpus.rs"
 [[test]]
 name = "certify"
 path = "../../tests/unit/tokenzero-engine/certify.rs"
+
+[[test]]
+name = "prefix_probe_eligibility"
+path = "../../tests/unit/tokenzero-engine/prefix_probe_eligibility.rs"

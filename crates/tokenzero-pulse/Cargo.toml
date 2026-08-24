@@ -27,3 +27,7 @@ zero-store.workspace = true
 proptest.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "tokenizer_id_grammar"
+path = "../../tests/unit/tokenzero-pulse/tokenizer_id_grammar.rs"

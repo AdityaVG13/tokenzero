@@ -1,7 +1,7 @@
 use super::*;
 use crate::gauntlet::{
-    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, GauntletOracle, SUBJECT_IDENTITY,
-    assert_distinct, is_forbidden_gauntlet_identity,
+    assert_distinct, is_forbidden_gauntlet_identity, GauntletOracle, FORBIDDEN_MCP_ENGINE_IDENTITY,
+    FORBIDDEN_MCP_REGISTRY_ENGINE, SUBJECT_IDENTITY,
 };
 use std::panic::catch_unwind;
 
@@ -46,10 +46,10 @@ fn partial_does_not_count_as_passing() {
     let s = u.stats();
     assert!(s.partial > 0, "fixture must include Partial rows");
     assert_eq!(
-        s.passing, 6,
-        "Phase 2 supported_count=6; Partial must not join Passing"
+        s.passing, 5,
+        "Phase 2 supported_count=5; Partial must not join Passing"
     );
-    assert_eq!(s.partial, 11);
+    assert_eq!(s.partial, 12);
     for feat in u.features() {
         if feat.status == ParityStatus::Partial {
             assert!(
@@ -157,6 +157,39 @@ fn features_sorted_by_id() {
     let pos_001 = ids.iter().position(|id| *id == "F-TZ-001").unwrap();
     let pos_est = ids.iter().position(|id| *id == "F-TZ-001-EST").unwrap();
     assert!(pos_001 < pos_est);
+}
+
+#[test]
+fn pages_capsules_roundtrip_does_not_claim_fragment_fuzz() {
+    let u = universe();
+    let feat = u.get("F-TZ-002-RT").expect("F-TZ-002-RT");
+    assert_eq!(
+        feat.status,
+        ParityStatus::Partial,
+        "TokenPage expand exists; dual-store fragment fuzz is not pages/capsules RT"
+    );
+    let rationale = feat.partial_rationale.as_deref().unwrap_or("");
+    assert!(
+        rationale.contains("expand_fragment_differential"),
+        "rationale must name the mis-mapped fuzz: {rationale}"
+    );
+    assert_eq!(feat.status.score_contribution(), 0.5);
+}
+
+#[test]
+fn mcp_cli_does_not_claim_missing_discriminator() {
+    let u = universe();
+    let feat = u.get("F-TZ-016").expect("F-TZ-016");
+    assert_eq!(feat.status, ParityStatus::Partial);
+    let rationale = feat.partial_rationale.as_deref().unwrap_or("");
+    assert!(
+        !rationale.contains("still missing"),
+        "discriminator exists; do not claim it is missing: {rationale}"
+    );
+    assert!(
+        rationale.contains("discriminator exists"),
+        "rationale must say the discriminator exists: {rationale}"
+    );
 }
 
 #[test]

@@ -2,14 +2,14 @@
 //! labels are forbidden. Missing drivers must be `None`, not a deleted path.
 
 use std::collections::HashSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokenzero_test_support::{
-    ExecutionEnvelope, FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE,
-    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
-    ScenarioAgreement, SpecTagClass, assert_distinct, is_forbidden_gauntlet_identity, scenario,
+    assert_distinct, is_forbidden_gauntlet_identity, scenario, CrashBoundary, ExecutionEnvelope,
+    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass,
+    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
 };
 
 fn repo_root() -> PathBuf {
@@ -137,6 +137,8 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
         .count();
     assert_eq!(verifiable, 33, "Phase 2 Verifiable count");
     assert_eq!(ambiguous, 7, "Phase 2 Ambiguous count");
+    let wired = SPEC_TAG_WIRES.iter().filter(|row| row.is_wired()).count();
+    assert_eq!(wired, 19, "Phase 2 live-wired Verifiable count");
     let root = repo_root();
     for row in SPEC_TAG_WIRES {
         if row.class == SpecTagClass::Ambiguous {
@@ -153,6 +155,74 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
                 "{} driver {} missing on disk (use None, do not cite a deleted path)",
                 row.tag,
                 driver
+            );
+        }
+    }
+}
+
+#[test]
+fn crash_boundary_drivers_are_uncovered_after_d8c0844() {
+    let root = repo_root();
+    assert_eq!(CrashBoundary::ALL.len(), 8);
+    for boundary in CrashBoundary::ALL {
+        assert!(
+            !boundary.is_subprocess_armed(),
+            "{} must not claim Pattern 65 arming",
+            boundary.as_str()
+        );
+        assert!(
+            boundary.existing_driver().is_none(),
+            "{} existing_driver must be None (Uncovered); do not cite a deleted path as live",
+            boundary.as_str()
+        );
+        let census = boundary.deleted_driver_census();
+        assert!(
+            !root.join(census.path).exists(),
+            "{} census path {} reappeared; wire existing_driver to the live file",
+            boundary.as_str(),
+            census.path
+        );
+    }
+}
+
+#[test]
+fn hub_002_no_fszero_graphzero_crate_deps() {
+    let root = repo_root();
+    let mut tomls = vec![root.join("Cargo.toml")];
+    let crates = root.join("crates");
+    for entry in std::fs::read_dir(&crates).expect("crates/") {
+        let entry = entry.expect("crate dir");
+        let cargo = entry.path().join("Cargo.toml");
+        if cargo.is_file() {
+            tomls.push(cargo);
+        }
+    }
+    assert!(
+        tomls.len() > 1,
+        "expected workspace + crate Cargo.toml files"
+    );
+    for path in &tomls {
+        for (idx, line) in std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+            .lines()
+            .enumerate()
+        {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            assert!(
+                !lower.contains("fszero"),
+                "{}:{} imports FSZero: {trimmed}",
+                path.display(),
+                idx + 1
+            );
+            assert!(
+                !lower.contains("graphzero"),
+                "{}:{} imports GraphZero: {trimmed}",
+                path.display(),
+                idx + 1
             );
         }
     }
@@ -182,4 +252,31 @@ fn provider_tokenizer_fixture_and_cli_golden_still_exist() {
     let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
     assert!(toolchain.contains("clippy"));
     assert!(toolchain.contains("nightly-2026-05-31"));
+
+    assert_eq!(
+        GauntletOracle::Spec.as_str(),
+        "GauntletOracle::Spec::tokenzero-spec@HEAD-fb73416"
+    );
+    assert!(
+        SUBJECT_IDENTITY.contains("862e3e682cb8aee0e150c1cb0b116cb2e23a44e2"),
+        "Subject identity stays Self-oracle prior-commit 862e3e6, not retargeted to HEAD"
+    );
+}
+
+#[test]
+fn embedded_surface_matrix_byte_matches_gauntlet_workspace_when_present() {
+    let fixture = repo_root()
+        .join("crates/tokenzero-test-support/src/fixtures/supported_surface_matrix.toml");
+    let fixture_bytes = std::fs::read(&fixture).expect("embedded fixture");
+    let workspace = repo_root()
+        .parent()
+        .expect("sibling")
+        .join("TokenZero__gauntlet_workspace/docs/contracts/supported_surface_matrix.toml");
+    if workspace.is_file() {
+        let workspace_bytes = std::fs::read(&workspace).expect("workspace matrix");
+        assert_eq!(
+            fixture_bytes, workspace_bytes,
+            "workspace supported_surface_matrix.toml must byte-match the TokenZero fixture"
+        );
+    }
 }

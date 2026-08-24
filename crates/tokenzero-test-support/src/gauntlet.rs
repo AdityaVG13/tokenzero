@@ -48,7 +48,7 @@ impl GauntletOracle {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Spec => "GauntletOracle::Spec::tokenzero-spec@HEAD-862e3e6",
+            Self::Spec => "GauntletOracle::Spec::tokenzero-spec@HEAD-fb73416",
             Self::Property => "GauntletOracle::Property::proptest-1.11.0",
             Self::SelfOracle => "GauntletOracle::Self::prior-commit+cli-golden",
             Self::RoundTrip => "GauntletOracle::RoundTrip::pages-capsules-dual-store",
@@ -163,11 +163,12 @@ pub fn fragment_reason_class_matches(embedded: &str, recovery: &str) -> bool {
     }
 }
 
-/// TokenZero persist / prune / WAL crash windows that already have tests.
+/// TokenZero persist / prune / WAL crash windows.
 ///
-/// Names are protocol events, not SQL `BeforeWalHeaderWrite`. Every variant
-/// maps to an existing test. **None are subprocess-armed** (`arm_crash_boundary`
-/// is not implemented). Do not treat `is_subprocess_armed() == false` as a pass
+/// Names are protocol events, not SQL `BeforeWalHeaderWrite`. The eight
+/// historical in-process tests were deleted in `d8c0844`. `existing_driver`
+/// is therefore `None` (Uncovered). **None are subprocess-armed**. Do not
+/// treat `is_subprocess_armed() == false` or a deleted census path as a pass
 /// on skill Pattern 65 injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashBoundary {
@@ -229,7 +230,14 @@ impl CrashBoundary {
         false
     }
 
-    pub const fn existing_driver(self) -> CrashWindowDriver {
+    /// Live crash-window driver. All eight `d8c0844` files are gone.
+    /// Uncovered, never a silent pass.
+    pub const fn existing_driver(self) -> Option<CrashWindowDriver> {
+        None
+    }
+
+    /// Historical paths only. Citing these as coverage is a lie.
+    pub const fn deleted_driver_census(self) -> CrashWindowDriver {
         match self {
             Self::BeforePersistOnUnreadableSnapshot => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/store_hygiene_prune_option_tests.rs",
@@ -429,22 +437,22 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-TOK-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-core/model_artifact_limits.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-TOK-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-pulse/tokenizer_id_grammar.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-CAP-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-core/model_artifact_limits.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-CAP-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-core/model_artifact_limits.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-DV-001",
@@ -454,17 +462,17 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-PFX-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-recovery/prefix_stability_floor.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-ELIG-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-engine/prefix_probe_eligibility.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-ELIG-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-engine/prefix_probe_eligibility.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-RS-001",
@@ -524,7 +532,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-HUB-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-FAIL-001",
@@ -564,7 +572,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-SKIP-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-test-support/parity_taxonomy_tests.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-TELE-001",

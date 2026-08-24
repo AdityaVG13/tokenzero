@@ -9,10 +9,12 @@ schema_version = "gauntlet.supported_surface_matrix"
 [meta]
 project_class = "Greenfield-Rust-class"
 reference_name = "tokenzero-spec"
-reference_version = "HEAD-862e3e6"
-subject_git_sha = "862e3e682cb8aee0e150c1cb0b116cb2e23a44e2"
-generated_at_utc = "2026-08-16T10:35:00Z"
-revision = 1
+reference_version = "HEAD-fb73416"
+subject_git_sha = "fb734162b4a9dbe692fe4e9abc4bd246b87b03d6"
+generated_at_utc = "2026-08-24T18:00:00Z"
+revision = 2
+identity_subject_pin = "GauntletSubject::TokenZero@862e3e682cb8aee0e150c1cb0b116cb2e23a44e2"
+identity_pin_note = "Gauntlet Subject identity stays prior-commit 862e3e6 (Self-oracle baseline). subject_git_sha is the Phase 2 audit HEAD. Do not conflate the two."
 status_vocabulary = ["supported", "partial", "excluded", "missing"]
 partial_never_rounds_up = true
 
@@ -95,11 +97,12 @@ evidence = "tokenzero-core model_artifacts.rs MAX_*; engine_read tests; census i
 
 [[features]]
 id = "F-TZ-002-RT"
-title = "Pages/capsules/expand round-trip (MAX_* + expand_fragment_differential)"
+title = "Pages/capsules expand round-trip (TokenPage MAX_* + expand; not dual-store fragment fuzz)"
 category = "pages-capsules"
 weight = 0.30
-status = "supported"
-evidence = "fuzz/fuzz_targets/expand_fragment_differential.rs; intake round-trip plan"
+status = "partial"
+partial_rationale = "TokenPage constructors, MAX_* limits, and expand() exist. Dual-store fragment expand fuzz (expand_fragment_differential.rs) is SPEC-TZ-RT-002, not TokenPage/ModelCapsule RT. ModelCapsule encode/decode still has no live driver after d8c0844. Partial MUST NOT round up."
+evidence = "tests/unit/tokenzero-core/model_artifact_limits.rs; crates/tokenzero-core/src/model_artifacts.rs MAX_*"
 
 [[features]]
 id = "F-TZ-003"
@@ -118,7 +121,7 @@ category = "prefix-geometry"
 weight = 1.00
 status = "supported"
 authority_axis = 4
-evidence = "tokenzero-core + recovery; DV tests; prefix_stability estimator 5/4 floor"
+evidence = "tokenzero-core StablePrefixGeometry; recovery PrefixStabilityGuard 5/4 floor; tests/unit/tokenzero-recovery/prefix_stability_floor.rs"
 
 [[features]]
 id = "F-TZ-005"
@@ -127,7 +130,7 @@ category = "eligibility-hit"
 weight = 1.00
 status = "supported"
 authority_axis = 5
-evidence = "prefix-probe-replay.json: eligibility_declared vs hit_declared_by_provider are declared facts; LCP full + hit_declared_by_provider=false"
+evidence = "tests/engine/fixtures/prefix-probe-replay.json; tests/unit/tokenzero-engine/prefix_probe_eligibility.rs: raw_retained LCP full + hit_declared_by_provider=false"
 
 [[features]]
 id = "F-TZ-006"
@@ -213,8 +216,8 @@ title = "MCP/CLI honesty (CLI .golden, skip≠green, no insta self-compare)"
 category = "mcp-cli-honesty"
 weight = 0.35
 status = "partial"
-partial_rationale = "8 CLI .golden files + PROVENANCE.md (manual UPDATE_GOLDENS=1). Ship tests skip without env (honest skip). Gauntlet Subject/Oracle discriminator still missing. Partial MUST NOT round up."
-evidence = "tests/cli/golden/; census insta_snapshots=0; recon ship-tests skip note"
+partial_rationale = "8 CLI .golden files remain as Self-oracle corpus; the golden_outputs [[test]] was deleted in d8c0844 so they are not live-compared. Ship tests skip without env (honest skip≠green). Gauntlet Subject/Oracle discriminator exists in tokenzero-test-support (do not claim it is missing). Partial MUST NOT round up."
+evidence = "tests/cli/golden/cli/ (8 files); tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs; no cargo-insta in Cargo.lock"
 
 [[features]]
 id = "F-TZ-011"
@@ -261,7 +264,7 @@ category = "durability-recovery"
 weight = 0.40
 status = "supported"
 authority_axis = 14
-evidence = "workspace Cargo.toml zero-* only at rev be8867ee99a14fc78a75db220358096bf3874c76. String/URI/comment coupling documented, not an import violation."
+evidence = "workspace Cargo.toml: zero-* path deps to ../ZeroStack/crates plus zero-mcp git rev bae540d3fe16b1d5f53948f293eb04a8c93e68c6. No fszero/graphzero crate names. URI/comment coupling is not an import violation. Driver: tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs"
 
 [[features]]
 id = "F-TZ-020"
@@ -273,8 +276,8 @@ exclusion_rationale = "Forbidden by AGENTS.md. Composition is the hub's job. fz:
 retry_condition_predicate = "Do not retry. If a Cargo dependency on FSZero or GraphZero appears, that is a law violation, not a gauntlet feature to add."
 
 [coverage_debt]
-supported_count = 6
-partial_count = 11
+supported_count = 5
+partial_count = 12
 missing_count = 1
 excluded_count = 4
 na_count = 0

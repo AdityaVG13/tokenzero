@@ -51,3 +51,7 @@ path = "../../tests/recovery/zeroref_conformance_matrix.rs"
 [[test]]
 name = "recovery_zeroref_lifecycle_smokes"
 path = "../../tests/recovery/zeroref_lifecycle_smokes.rs"
+
+[[test]]
+name = "prefix_stability_floor"
+path = "../../tests/unit/tokenzero-recovery/prefix_stability_floor.rs"
