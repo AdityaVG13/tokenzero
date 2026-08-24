@@ -15,7 +15,3 @@ zero-store.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[[test]]
-name = "zero_kernel"
-path = "../../tests/engine/zero_kernel.rs"

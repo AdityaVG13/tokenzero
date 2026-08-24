@@ -63,8 +63,6 @@ static ACTIVE_CANCEL: Mutex<Option<Arc<CancelState>>> = Mutex::new(None);
 /// binding. Numeric pid/pgid values are never signaled; the hub-owned handle
 /// is the only authority.
 fn cancel_child(child: &VerifiedChild) {
-    #[cfg(test)]
-    tests::pause_during_child_teardown();
     let _ = child.signal_graceful_for(
         tokenzero_runtime::PROCESS_OWNER_SESSION,
         tokenzero_runtime::PROCESS_GENERATION,
@@ -1007,4 +1005,3 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R, maximum: usize) -> std::io::Re
         }
     }
 }
-

@@ -71,7 +71,11 @@ fn map_stdout_write(result: io::Result<()>) -> Result<()> {
 
 fn write_stdout(text: &str) -> Result<()> {
     let mut stdout = io::stdout();
-    map_stdout_write(stdout.write_all(text.as_bytes()).and_then(|_| stdout.flush()))
+    map_stdout_write(
+        stdout
+            .write_all(text.as_bytes())
+            .and_then(|_| stdout.flush()),
+    )
 }
 
 fn writeln_stdout(text: impl AsRef<str>) -> Result<()> {
@@ -1489,8 +1493,8 @@ fn emit_pulse_result<T: serde::Serialize>(
         Err(err) if as_json => {
             let kind = err.kind();
             writeln_stdout(serde_json::to_string_pretty(
-                    &json!({"schema_version": "tokenzero.pulse.error.v1", "ok": false, "status": "error", "operation": operation, "error_kind": io_error_kind_name(kind), "retryable": kind == std::io::ErrorKind::WouldBlock, "error": err.to_string(), "exit_code": 1})
-                )?)?;
+                &json!({"schema_version": "tokenzero.pulse.error.v1", "ok": false, "status": "error", "operation": operation, "error_kind": io_error_kind_name(kind), "retryable": kind == std::io::ErrorKind::WouldBlock, "error": err.to_string(), "exit_code": 1}),
+            )?)?;
             std::process::exit(1);
         }
         Err(err) => Err(err.into()),
@@ -1593,6 +1597,15 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
     print_pretty(&report)
 }
 
+/// Hub install engine owns its own `McpToolSurface` (zerostack-install).
+/// TokenZero core owns the CLI/MCP wire enum. Same names, distinct types.
+fn install_mcp_surface(surface: McpToolSurface) -> install::McpToolSurface {
+    match surface {
+        McpToolSurface::Classic => install::McpToolSurface::Classic,
+        McpToolSurface::CodeMode => install::McpToolSurface::CodeMode,
+    }
+}
+
 fn install_apply_or_plan(
     root: &Path,
     global: bool,
@@ -1602,6 +1615,7 @@ fn install_apply_or_plan(
     apply: bool,
     as_json: bool,
 ) -> Result<()> {
+    let surface = install_mcp_surface(surface);
     if apply {
         let applied = install::apply_for_agents(root, global, capabilities, agents, surface)
             .with_context(
@@ -1710,7 +1724,7 @@ fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
         true,
         &clients_capabilities(&profile),
         &agents,
-        clients_mcp_surface(&profile),
+        install_mcp_surface(clients_mcp_surface(&profile)),
     ))?;
     if let Some(object) = value.as_object_mut() {
         object.extend([
@@ -1787,10 +1801,10 @@ fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {
 
 fn handle_robot_docs(args: RobotDocsArgs) -> Result<()> {
     write_stdout(match args.command {
-            RobotDocsCommand::Guide => robot_docs_guide(),
-            RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
-            RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
-        })
+        RobotDocsCommand::Guide => robot_docs_guide(),
+        RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
+        RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
+    })
 }
 
 fn handle_package_audit(args: PackageAuditArgs) -> Result<serde_json::Value> {
@@ -2218,7 +2232,7 @@ fn client_status_report(
         true,
         &clients_capabilities("standard"),
         agents,
-        McpToolSurface::Classic,
+        install_mcp_surface(McpToolSurface::Classic),
     );
     let surfaces: Vec<serde_json::Value> = plan
         .writes
@@ -2317,10 +2331,7 @@ fn emit(value: EmitResponse) -> Result<()> {
                     write_stdout(&visible.text)?;
                 }
             } else {
-                write_stdout(&render_cli_text_options(
-                    response,
-                    complete_read_source,
-                ))?;
+                write_stdout(&render_cli_text_options(response, complete_read_source))?;
             }
         }
     }
@@ -2389,10 +2400,7 @@ fn emit_with_json_options(
             write_stdout(&visible.text)?;
         }
     } else {
-        write_stdout(&render_cli_text_options(
-            &response,
-            complete_read_source,
-        ))?;
+        write_stdout(&render_cli_text_options(&response, complete_read_source))?;
     }
     if exit_error {
         std::process::exit(1);

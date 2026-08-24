@@ -40,19 +40,8 @@ tempfile.workspace = true
 tokenzero-test-support = { path = "../tokenzero-test-support" }
 zerostack-test-support.workspace = true
 
-# Relocated standalone tests live under the workspace tests/ tree.
-[[test]]
-name = "engine_cache_crossover"
-path = "../../tests/engine/cache_crossover.rs"
-
-[[test]]
-name = "engine_cache_meter"
-path = "../../tests/engine/cache_meter.rs"
-
-[[test]]
-name = "engine_cache_slo"
-path = "../../tests/engine/cache_slo.rs"
-
+# Live contract proofs only. d8c0844 pruned the rest; missing test
+# targets were deleted in Phase 1 rather than left compile-broken.
 [[test]]
 name = "engine_codemode_bindings_dispatcher"
 path = "../../tests/engine/codemode_bindings_dispatcher.rs"
@@ -62,44 +51,8 @@ name = "engine_dispatcher"
 path = "../../tests/engine/dispatcher.rs"
 
 [[test]]
-name = "engine_eviction_scheduler"
-path = "../../tests/engine/eviction_scheduler.rs"
-
-[[test]]
-name = "engine_fastmcp_adapter_from_registry"
-path = "../../tests/engine/fastmcp_adapter_from_registry.rs"
-
-[[test]]
 name = "engine_irx9_conformance_corpus"
 path = "../../tests/engine/irx9_conformance_corpus.rs"
-
-[[test]]
-name = "engine_irx9_surface_bench"
-path = "../../tests/engine/irx9_surface_bench.rs"
-
-[[test]]
-name = "engine_prefix_probe"
-path = "../../tests/engine/prefix_probe.rs"
-
-[[test]]
-name = "engine_progressive_disclosure"
-path = "../../tests/engine/progressive_disclosure.rs"
-
-[[test]]
-name = "engine_ta_registry"
-path = "../../tests/engine/ta_registry.rs"
-
-[[test]]
-name = "engine_tokenizer_goldens"
-path = "../../tests/engine/provider_tokenizer_goldens.rs"
-
-[[test]]
-name = "engine_warmkeeper"
-path = "../../tests/engine/warmkeeper.rs"
-
-[[test]]
-name = "engine_zero_ledger_pin"
-path = "../../tests/engine/zero_ledger_pin.rs"
 
 [[test]]
 name = "certify"

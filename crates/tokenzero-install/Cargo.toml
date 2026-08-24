@@ -33,15 +33,12 @@ zero-store.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
-# Relocated standalone tests live under the workspace tests/ tree.
-[[test]]
-name = "install_surfaces"
-path = "../../tests/install/install_surfaces.rs"
-
-[[test]]
-name = "install_unit_packaging"
-path = "../../tests/install/unit/packaging.rs"
-
+# Live contract proofs only. d8c0844 pruned the rest; missing test
+# targets were deleted in Phase 1 rather than left compile-broken.
 [[test]]
 name = "install_unit_package_audit"
 path = "../../tests/install/unit/package_audit/mod.rs"
+
+[[test]]
+name = "rollback_drift"
+path = "../../tests/unit/tokenzero-install/rollback_drift.rs"

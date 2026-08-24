@@ -88,9 +88,6 @@ pub use store_hygiene::{
     prune_blob_sidecars, prune_recovery_blobs, recovery_blob_status, sweep_stale_tmp_files,
 };
 
-#[cfg(test)]
-use test_hooks::set_ref_index_test_override;
-
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
@@ -4776,4 +4773,3 @@ fn mtime_ns(meta: &fs::Metadata) -> u128 {
         .map(|d| d.as_nanos())
         .unwrap_or_default()
 }
-

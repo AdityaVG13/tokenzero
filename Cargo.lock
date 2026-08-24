@@ -1456,6 +1456,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tiktoken-rs",
+ "tokenzero-test-support",
  "zero-abi",
  "zero-gauge",
  "zero-ledger",

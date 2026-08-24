@@ -26,36 +26,14 @@ ah-ah-ah = "0.1"
 criterion = "0.8"
 proptest.workspace = true
 tiktoken-rs = "0.12"
+tokenzero-test-support = { path = "../tokenzero-test-support" }
 
 [[bench]]
 name = "hotpaths"
 harness = false
 
-# Relocated standalone tests live under the workspace tests/ tree.
+# Live contract proofs only. d8c0844 pruned the rest; missing test
+# targets were deleted in Phase 1 rather than left compile-broken.
 [[test]]
-name = "core_ce_probe"
-path = "../../tests/core/ce_probe.rs"
-
-[[test]]
-name = "core_greenfield_proptest"
-path = "../../tests/core/greenfield_proptest.rs"
-
-[[test]]
-name = "core_protocol_atoms"
-path = "../../tests/core/protocol_atoms.rs"
-
-[[test]]
-name = "core_shell_segment_attribution"
-path = "../../tests/core/shell_segment_attribution.rs"
-
-[[test]]
-name = "core_shell_semantics"
-path = "../../tests/core/shell_semantics.rs"
-
-[[test]]
-name = "core_visible_budget_model_counting"
-path = "../../tests/core/visible_budget_model_counting.rs"
-
-[[test]]
-name = "core_unit"
-path = "../../tests/core/unit/mod.rs"
+name = "provider_tokenizer_goldens"
+path = "../../tests/unit/tokenzero-core/provider_tokenizer_goldens.rs"

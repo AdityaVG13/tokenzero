@@ -424,14 +424,10 @@ impl LedgerWriter {
     fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
         let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
         line.push(b'\n');
-        #[cfg(test)]
-        ledger_tests::pause_during_append();
         self.write_serialized_line(line)
     }
 
     fn append_stamped_record(&self, mut record: LedgerRecord) -> io::Result<()> {
-        #[cfg(test)]
-        ledger_tests::pause_during_append();
         let mut mode = self
             .io
             .lock()
@@ -1192,4 +1188,3 @@ fn now_ms() -> u64 {
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
-

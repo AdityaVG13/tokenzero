@@ -27,8 +27,3 @@ zero-store.workspace = true
 proptest.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
-
-# Relocated standalone tests live under the workspace tests/ tree.
-[[test]]
-name = "pulse_unit"
-path = "../../tests/pulse/unit.rs"

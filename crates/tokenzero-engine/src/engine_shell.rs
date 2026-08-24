@@ -13,9 +13,6 @@ use tokenzero_runtime::{
 };
 use zero_process::VerifiedChild;
 
-#[cfg(test)]
-pub(crate) use test_hooks::reset_background_job_termination_for_tests;
-
 struct BackgroundJobState {
     status: &'static str,
     /// Evidence-only root pid for the job JSON surface; never signaled.
@@ -570,8 +567,6 @@ impl BackgroundJobRegistry {
         // the bytes immediately observable instead of losing the wake-up.
         let snapshot_version = lock(&job.state).version;
         let available_before_wait = job_log_len(&job)?;
-        #[cfg(test)]
-        test_hooks::wait_poll_interleave();
         let mut state = lock(&job.state);
         let observed_version = state.version;
         if state.status == "running"

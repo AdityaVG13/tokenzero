@@ -63,8 +63,6 @@ impl TokenZeroEngine {
                 // load stalled lease Drop (put-back) and other checkouts.
                 // Sibling of session cold-load-off-mutex: copy the occupancy
                 // result out, drop, then construct.
-                #[cfg(test)]
-                preview_tests::pause_during_cold_store();
                 let store = taken
                     .unwrap_or_else(|| RecoveryStore::new(Some(self.config.cache_path.clone())));
                 RecoveryStoreLease::Shared { store, slot }

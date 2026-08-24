@@ -32,8 +32,6 @@ fn engine_store_dir(cache_path: &Path) -> &Path {
 }
 
 fn marker_fresh(path: &Path, interval: Duration) -> bool {
-    #[cfg(test)]
-    tests::pause_during_fs();
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .and_then(|modified| modified.elapsed().map_err(io::Error::other))
@@ -327,4 +325,3 @@ pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
 pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
     crate::recall::build_session_pack(cache_path, max_tokens)
 }
-

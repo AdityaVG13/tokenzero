@@ -534,7 +534,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-GOLD-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-core/provider_tokenizer_goldens.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-ID-001",
@@ -589,7 +589,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-RB-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/install/inline/lib__rollback_drift_tests.rs"),
+        existing_driver: Some("tests/unit/tokenzero-install/rollback_drift.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-STRICT-001",
