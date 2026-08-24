@@ -1,430 +1,291 @@
-<div align="center">
+# TokenZero
 
-<img src=".github/assets/banner.gif" alt="TokenZero: Recovery-Aware Context Compression" width="100%">
+The output authority for measurement, bounded projection, compression, and byte-exact recovery.
 
-<br/>
-<br/>
-<br/>
-
-A local-first Rust runtime that shrinks what AI agents see, while keeping a
-**byte-exact recovery handle** for everything it hides.
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-58a6ff?style=for-the-badge)](LICENSE)
-&nbsp;
-[![FastMCP](https://img.shields.io/badge/FastMCP-ready-3fb950?style=for-the-badge)](#mcp)
-&nbsp;
-[![Platforms](https://img.shields.io/badge/win%20%C2%B7%20linux%20%C2%B7%20macos-30363d?style=for-the-badge)](#download--install)
-&nbsp;
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/adityavg13)
-&nbsp;
-[![rust nightly](https://img.shields.io/badge/rust-nightly-orange?style=for-the-badge&logo=rust)](https://rust-lang.org)
-
-<br/>
-
-<a href="#highlights">Highlights</a> &nbsp;·&nbsp;
-<a href="#how-racc-works">How it works</a> &nbsp;·&nbsp;
-<a href="#demo">Demo</a> &nbsp;·&nbsp;
-<a href="#architecture">Architecture</a> &nbsp;·&nbsp;
-<a href="#download--install">Install</a> &nbsp;·&nbsp;
-<a href="#commands">Commands</a> &nbsp;·&nbsp;
-<a href="#mcp">MCP</a> &nbsp;·&nbsp;
-<a href="#codemode">CodeMode</a> &nbsp;·&nbsp;
-<a href="#choosing-a-mode">Choosing a mode</a> &nbsp;·&nbsp;
-<a href="#zerostack">ZeroStack</a> &nbsp;·&nbsp;
-<a href="#docs">Docs</a> &nbsp;·&nbsp;
-<a href="#support">Support</a>
-
-</div>
+**Status:** released · active development · local-first · recovery-aware · MIT
 
 ---
 
-### Privacy and usage telemetry
+## TL;DR
 
-Shareable usage telemetry is **off by default**. To opt in, set
-`TOKENZERO_TELEMETRY=1`. To turn it off, unset the variable or set it to `0`.
-When enabled, TokenZero appends only these three fields:
-`execution_path`, `raw_tokens`, and `spent_tokens`.
+### The problem
 
-Records stay in the local `usage-telemetry.jsonl` file beside the recovery
-cache. TokenZero has no telemetry exporter. Nothing leaves the machine unless
-you deliberately copy or export local data.
+Large file reads, search results, and process logs can consume the model's context. Ordinary summarization saves space by making an irreversible guess about which omitted detail will never matter.
 
-<h3 id="highlights"><img src=".github/assets/h-highlights.svg" alt="Highlights" width="100%"></h3>
+### The answer
 
-<div align="center">
+TokenZero measures the real serialized output, returns a bounded capsule when that saves context, and keeps every omitted byte behind a local exact ref. Savings are counted after any later recovery.
 
-<img src=".github/assets/highlights.svg" alt="Compress aggressively · Recover exactly · Run anywhere" width="100%">
+> **Status:** TokenZero is released and is the output authority behind ZeroKernel. Coordinated engine releases are planned, but parity with FSZero and GraphZero is not claimed until those releases begin.
 
-</div>
+## What exists now
 
-> Most compressors win context back by **throwing information away**, so the agent
-> silently loses a detail it turns out to need. TokenZero returns a compact capsule
-> *now* and keeps the omitted bytes behind an exact local ref. Savings are counted
-> **after** any recovery, not from visible-token shrinkage alone.
+- Recovery-Aware Context Compression, or RACC, for reads, search results, shell output, and external payloads.
+- Content classification, token measurement, bounded projection, protected anchors, and exact `tz://` refs.
+- A crash-safe local recovery store with bounded eviction and byte-exact expansion.
+- Cross-platform process capture with stream spill for output too large to retain in memory.
+- Local Pulse accounting that subtracts tokens later recovered from claimed savings.
+- Release archives for Windows, Linux, macOS Apple Silicon, and macOS Intel.
 
-Small reads pass through untouched; large reads collapse to a capsule, and both stay
-**byte-exact recoverable**. Reproduce any row with `tokenzero read <file> --json`
-and read the `accounting` block:
+Compression is useful only when the hidden information stays recoverable and the accounting remains honest after the agent asks for some of it back.
 
-| Input | Raw tokens | Visible | Result |
-| :-- | --: | --: | :-- |
-| 204-line source file | 1,698 | 1,698 | returned whole; a capsule never costs more than raw |
-| 796-line source file | 7,722 | 287 | **96.3%** smaller, exact bytes one `expand` away |
-| 1,539-line source file | 12,908 | 259 | **98.0%** smaller, exact bytes one `expand` away |
-| noisy shell output | 1,237 | 212 | **82.9%** smaller, full stream recoverable |
+## A complete turn in 30 seconds
 
-Hot paths are measured, not asserted: `cargo bench` pins token counting, capsule
-framing, and shell rendering at microsecond scale on the workspace's criterion suite.
+Inside ZeroKernel, TokenZero runs automatically at operation and response boundaries:
 
-#### Benchmarks
+```
+const result = await z.run(
+  ["cargo", "test", "-p", "zero-kernel", "--test", "direct_host"],
+  { timeoutMs: 120_000 },
+);
 
-`benchmarks/run_all.sh` runs the retained CLI cold-read, competitor, and
-million-line navigation benchmarks with one pinned release binary. It writes
-exact commands, provenance, failures, byte counts, and explicitly labeled
-non-Q99 estimates to [`docs/benchmarks.md`](docs/benchmarks.md).
+return {
+  status: result.status,
+  output: result.stdout,
+  handles: result.handles,
+  accounting: result.accounting,
+};
+```
 
-Large synthetic fixtures are generated on demand from
-`tests/perf-corpus-manifest.json`; they are never source or release artifacts.
-Use `uv run python scripts/perf_corpus.py generate`, then `verify`, and finish
-with `clean --all`. Remote runs use the same disposable path:
-`rch exec -- uv run python scripts/perf_corpus.py generate`.
+Short output passes through. Large or repetitive output may become a capsule with anchors and exact handles. Passing a handle to `z.read` recovers the original bytes.
 
-Path-only outputs like `glob` pass through nearly unchanged: there is nothing
-to hide, and a capsule never costs more than raw.
+## What this repository owns
 
-#### Measured in production
+| Owns | Meaning |
+| --- | --- |
+| Measurement | Tokenizer identity and token counts over the actual serialized value. |
+| Projection | A bounded model-visible representation that preserves protected anchors. |
+| Compression | Content-aware capsules produced only when they beat raw output. |
+| Recovery | Stable local refs to byte-exact omitted payloads and selections. |
+| Accounting | Raw, visible, recovered, and net-spent tokens measured from observed output. |
+| Output caps | Deterministic limits and typed outcomes at operation and terminal response boundaries. |
 
-Across **~20,000 routed tool calls** from real agent sessions on one
-development machine (six days, multiple AI harnesses): raw tool output
-totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
-context**. Counting back every token agents later recovered with `expand`,
-net savings were **30%** in that local Pulse ledger. Treat this as deployment
-telemetry, not a release claim; release-facing claims are gated by
-`tokenzero claim-audit` artifacts. The auditable evidence bundle for this paragraph was pruned from the public
-checkout; regenerate the ledger with `tokenzero pulse export-jsonl` if you
-need it. Historical totals are not release-audited in this checkout until a
-matching ledger is attached.
+**Not owned here:** file identity and effects belong to FSZero. Structural relationships belong to GraphZero. Process ownership, cell cancellation, and final publication belong to ZeroStack.
 
-<h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
+## Where TokenZero fits
 
-**RACC** is short for **Recovery-Aware Context Compression**. The goal is not the
-shortest possible response; it is the **lowest total task cost** while exact recovery
-stays one call away.
+| Boundary | TokenZero action |
+| --- | --- |
+| `z.read` | Measure large byte views and preserve exact recovery behind the returned handle. |
+| `z.find` | Project large hit sets without erasing evidence identity. |
+| `z.run` | Project combined stdout and stderr; preserve exact omitted stream bytes. |
+| Cell return | Bound the final visible value and record the exact projection in the terminal event. |
+
+TokenZero does not decide which engine runs an operation. It controls what reaches the model and how hidden bytes remain recoverable.
+
+FSZero, GraphZero, and TokenZero are the released products in the family. Once coordinated releases begin, all three engines will publish the same version to signal contract parity. ZeroStack remains source-only and is not part of that version sequence.
+
+## How RACC works
 
 ```mermaid
 flowchart LR
-    A[Agent request<br/>read · find · tree · shell] --> TZ{{TokenZero<br/>RACC runtime}}
-    TZ -->|returned now| V[Compact visible capsule<br/>+ protected anchors]
-    TZ -->|stored locally| C[(Byte-exact cache<br/>content-addressed)]
-    C -.->|stable handle| R["tz:// ref<br/>raw · range · symbol · anchor · hit"]
-    V --> AGENT[Agent continues]
-    AGENT -.->|needs a hidden detail| EX[tokenzero expand ref]
-    EX --> C
-    C -.->|exact bytes| AGENT
+  R[Raw result] --> M[Measure]
+  M --> P[Project]
+  P --> V[Visible capsule]
+  P --> S[Exact local store]
+  S --> H[Recovery ref]
+  H -->|expand on demand| X[Original bytes]
+  X --> A[Recovery-aware accounting]
 ```
 
-TokenZero may omit text from the visible capsule **only** when it is already
-represented by a protected anchor, recoverable through an exact local ref, or the
-mode explicitly declares lossy compression and reports that recovery may be needed.
-Exact refs are local handles, not model-readable payloads, so honest evaluation
-counts any later `expand` output the agent actually uses.
+TokenZero may omit text only when the original remains represented by an exact local ref, protected anchor, or an explicitly lossy mode that reports its recovery limits. A capsule never costs more than raw output: small or already-compact values pass through.
 
-**Why recovery-aware beats lossy summarization.** A summarizer makes an
-irreversible bet: it decides, before the task is finished, which details the
-agent will never need. When it bets wrong, the agent re-reads files, re-runs
-commands, or quietly fills the gap with a guess. RACC never has to bet.
-It hides aggressively because hiding is reversible: every omitted byte stays
-addressable behind a local `tz://` ref, and an agent that needs one gets the
-exact original bytes back in a single call. The accounting follows the same
-principle: tokens an agent later recovers are subtracted from claimed savings,
-because compression you had to undo was never a saving at all.
+## Install
 
-<h3 id="demo"><img src=".github/assets/h-demo.svg" alt="Demo" width="100%"></h3>
+Download the archive for your operating system from the latest GitHub Release, verify its checksum, place the binary on `PATH`, then preview and apply local setup.
 
-Run the self-contained RACC demo from the repo root:
-
-```powershell
-pwsh -File ./demo/run_demo.ps1 -OpenViz
+```
+tokenzero install --global --plan  --mcp --shell --cli --json
+tokenzero install --global --apply --mcp --shell --cli --json
+tokenzero doctor --json
 ```
 
-The demo requires PowerShell 7+ (`pwsh`) on Windows, Linux, or macOS. It
-resolves `tokenzero` from `PATH`, reuses `demo/.tokenzero-bin/`, or downloads
-the matching release asset for the current OS. It writes `demo/demo_results.json`
-and `demo/demo_viz.html`, then shows raw tokens, visible tokens,
-recovery-aware savings, and byte-exact expansion proof.
+Every install apply records rollback data:
 
-For live agent runs:
-
-```powershell
-pwsh -File ./demo/run_agent_demo.ps1 -Replicates 3
+```
+tokenzero install --rollback <id>
 ```
 
-See [`demo/README.md`](demo/README.md) for options and the generated viewers.
+### Build from source
 
-<h3 id="architecture"><img src=".github/assets/h-architecture.svg" alt="Architecture" width="100%"></h3>
-
-TokenZero is a layered Rust workspace of eight focused crates. Everything builds on a
-single foundation crate; the MCP server and CLI compose the rest. The dependency graph
-is acyclic; no crate reaches back up a layer.
-
-```mermaid
-flowchart TD
-    CORE["tokenzero-core<br/>capsules · shell rendering · token accounting · recovery refs"]
-    REC[tokenzero-recovery] --> CORE
-    RUN[tokenzero-runtime] --> CORE
-    FIL[tokenzero-filters] --> CORE
-    INST[tokenzero-install] --> CORE
-    PUL[tokenzero-pulse] --> CORE
-    MCP["tokenzero-mcp<br/>stdio MCP server"] --> REC
-    MCP --> RUN
-    MCP --> FIL
-    CLI["tokenzero<br/>the tokenzero binary"] --> MCP
-    CLI --> INST
-    CLI --> PUL
 ```
-
-| Crate | Responsibility |
-| :-- | :-- |
-| `tokenzero-core` | Capsules, adaptive shell rendering, token accounting, content typing: the foundation every other crate depends on |
-| `tokenzero-recovery` | Content-addressed, byte-exact store behind `tz://` refs; bounded eviction and crash-safe persistence |
-| `tokenzero-runtime` | Cross-platform process execution with stream capture and disk spill |
-| `tokenzero-filters` | Conservative command rewriting and destructive-command safety verdicts |
-| `tokenzero-install` | Agent integration (plan / apply / rollback), `doctor` diagnostics, archive `package-audit` |
-| `tokenzero-pulse` | Local telemetry ledger (JSONL ↔ SQLite) so savings are accounted honestly, after recovery |
-| `tokenzero-mcp` | The deterministic stdio MCP server: engine, tool dispatch, crash-transparent supervisor |
-| `tokenzero` | The `tokenzero` binary and its command surface |
-
-Building from source and the full workspace layout live in [`docs/development.md`](docs/development.md).
-
-<h3 id="download--install"><img src=".github/assets/h-download.svg" alt="Download & Install" width="100%"></h3>
-
-Download the archive for your OS from the [latest Release](https://github.com/AdityaVG13/tokenzero/releases):
-
-| OS | Asset |
-| :-- | :-- |
-| Windows | `tokenzero-<version>-x86_64-pc-windows-msvc.zip` |
-| Linux | `tokenzero-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS (Apple Silicon) | `tokenzero-<version>-aarch64-apple-darwin.tar.gz` |
-| macOS (Intel) | `tokenzero-<version>-x86_64-apple-darwin.tar.gz` |
-
-Extract it, put `tokenzero` (or `tokenzero.exe`) on `PATH`, then:
-
-```bash
-tokenzero install --global --plan  --mcp --shell --cli --json   # preview, no writes
-tokenzero install --global --apply --mcp --shell --cli --json   # apply safe local setup
-tokenzero doctor --json                                         # confirm health
-```
-
-Every install step plans before it writes and records rollback data; replay it with
-`tokenzero install --rollback <id>` to reverse an apply.
-
-<details>
-<summary><b>Prefer to let your AI agent do it?</b> Paste this prompt.</summary>
-
-<br/>
-
-```text
-Install TokenZero for me from the latest GitHub Release at
-https://github.com/AdityaVG13/tokenzero/releases. Pick the asset for my OS,
-verify the SHA256 checksum, put the tokenzero binary on PATH, run the global
-install plan, apply MCP/shell/CLI setup only if the plan is safe, then run
-tokenzero doctor --json and show me the result.
-```
-
-</details>
-
-A Homebrew tap (AdityaVG13/homebrew-zerostack) is being prepared; source builds
-are the supported channel today. See [`docs/development.md`](docs/development.md).
-
-## Install / Build
-
-```bash
 git clone https://github.com/AdityaVG13/tokenzero
 cd tokenzero
 cargo build --release
 ```
 
-`rust-toolchain.toml` pins the nightly toolchain automatically. The binary lands at
-`target/release/tokenzero`.
+`rust-toolchain.toml` pins the required nightly toolchain.
 
-## Easy start (agents)
+## Measure, project, recover, account
 
-Paste this into your AI agent and it will set TokenZero up end to end:
+1. **Measure.** Count the actual serialized value with an identified tokenizer.
+2. **Classify.** Detect source, logs, paths, tabular output, errors, or already-small content.
+3. **Project.** Return complete output or a bounded capsule with protected anchors.
+4. **Recover.** Expand an exact ref, range, symbol, anchor, or hit only when needed.
+5. **Account.** Subtract recovered tokens from the savings attributed to the original projection.
 
-```text
-Set up TokenZero from https://github.com/AdityaVG13/tokenzero for me:
-1. Clone it and run `cargo build --release` (rust-toolchain.toml pins the toolchain).
-2. Register `target/release/tokenzero mcp-server --mode=mcp` as a stdio MCP server named "TokenZero" in my agent config.
-3. For multi-engine or multi-step plans, enable the ZeroStack aggregate host; it launches `tokenzero-codemode` only as a planner-free raw worker.
-4. Verify: call `tokenzero read README.md --json` against this repo and report the response envelope plus token savings.
+### Standalone reproduction
+
+```
+tokenzero read path/to/large-file.rs --json
+tokenzero expand 'tz://blob/<digest>' --json
+tokenzero stats --json
 ```
 
-One ZeroStack-wide prompt will ship when the unified ZeroStack meta-release lands; until then each engine sets up standalone.
+## Benchmarks
 
-<h3 id="commands"><img src=".github/assets/h-commands.svg" alt="Commands" width="100%"></h3>
+These rows are reproducible examples from the current README evidence. They describe specific fixtures, not every input.
 
-Every command takes `--json` for a stable, schema-versioned envelope. Aliases match the
-MCP tool names below.
+| Input | Raw tokens | Visible | Observed result |
+| --- | --- | --- | --- |
+| 204-line source file | 1,698 | 1,698 | Returned whole |
+| 796-line source file | 7,722 | 287 | 96.3% smaller, exact bytes recoverable |
+| 1,539-line source file | 12,908 | 259 | 98.0% smaller, exact bytes recoverable |
+| Noisy shell output | 1,237 | 212 | 82.9% smaller, full stream recoverable |
 
-<table>
-<tr>
-<td valign="top" width="50%">
+Reproduce a file row with `tokenzero read <file> --json` and inspect its `accounting` block. The retained benchmark runner records exact commands, provenance, failures, byte counts, and labeled non-Q99 estimates.
 
-**Read & search**
+```
+benchmarks/run_all.sh
+```
 
-- `read <path>`: compact visible output + exact refs
-- `find <query> [path]`: recoverable content search
-- `grep <pattern> [path]`: exact-first regex / literal search
-- `glob <pattern>`: match file paths, no contents
-- `tree [path] --depth N`: bounded repo shape
-- `run -- <command>`: shell / test / log capture
+Historical local Pulse totals are deployment telemetry, not a release claim, unless a matching public ledger and claim-audit artifact are attached.
 
-**Recover & transform**
+## Privacy and telemetry
 
-- `expand <ref>`: recover payloads, ranges, symbols, anchors
-- `recall <query>`: full-text search across the cache
-- `fetch <url>`: cached HTTP fetch behind a ref
-- `ingest --stdin --kind <k>`: store external output behind refs
-- `edit <path>`: multi-hunk, all-or-nothing file edits
+Shareable usage telemetry is off by default. To opt in, set `TOKENZERO_TELEMETRY=1`. The local `usage-telemetry.jsonl` file records only:
 
-</td>
-<td valign="top" width="50%">
+- `execution_path`
+- `raw_tokens`
+- `spent_tokens`
 
-**Measure & inspect**
+TokenZero has no telemetry exporter. Nothing leaves the machine unless the operator copies or exports local data.
 
-- `stats`: savings accounting (raw vs visible, after recovery)
-- `pulse`: telemetry ledger sync, export, doctor
-- `mem`: inspect recovery / cache state
-- `cache`: cache status and pruning
-- `cache-pack`: compact a session into a portable pack
-- `discover`: command / filter / runtime readiness
-- `rewrite-command <cmd>`: conservative rewrite decisions
+Recovery objects are separate from the usage ledger and can contain complete source files or command output. Protect the recovery root with appropriate filesystem permissions and retention limits. Turning telemetry off stops new accounting rows; it does not remove recovery objects that active refs still depend on.
 
-**Install, health & MCP**
+## Standalone operator surface
 
-- `doctor --json`: core health + config boundaries
-- `install --plan` / `--apply` / `--rollback <id>`: planned setup with rollback
-- `clients --json`: detect installed AI agents
-- `mcp-server`: run the Rust stdio MCP server
-- `mcp-smoke` / `mcp-soak --json`: conformance + chaos durability
-- `package-audit --json`: release packaging audit
+| Area | Commands |
+| --- | --- |
+| Read and search | `read`, `find`, `grep`, `glob`, `tree` |
+| Recover | `expand`, `recall`, `fetch`, `ingest` |
+| Measure | `stats`, `pulse`, `mem`, `cache` |
+| Operate | `doctor`, `install`, `package-audit` |
+| Compatibility | `mcp-server --mode=mcp` |
 
-</td>
-</tr>
-</table>
+Classic MCP exists for direct compatibility. Planner-free engine bindings feed ZeroStack. TokenZero does not own multi-engine plan parsing or scheduling.
 
-<h3 id="mcp"><img src=".github/assets/h-mcp.svg" alt="MCP" width="100%"></h3>
+## Troubleshooting
 
-`tokenzero mcp-server` exposes deterministic stdio tools, each with a short alias. The
-canonical `tz_*` name and the alias are interchangeable.
+TokenZero exposes enough accounting to explain why a value passed through, compressed, spilled, or later lost some of its apparent savings. Start with content kind, tokenizer identity, raw and visible counts, recovery handles, and any subsequent expansion events.
 
-| Tool | Alias | | Tool | Alias |
-| :-- | :-- | :-: | :-- | :-- |
-| `tz_read` | `read` | | `tz_ingest` | `ingest` |
-| `tz_find` | `find` | | `tz_expand` | `expand` |
-| `tz_grep` | `grep` | | `tz_recall` | `recall` |
-| `tz_glob` | `glob` | | `tz_fetch` | `fetch` |
-| `tz_tree` | `tree` | | `tz_mem` | `mem` |
-| `tz_shell` | `shell` | | `tz_cache_pack` | `cache_pack` |
-| `tz_edit` | `edit` | | `tz_rewrite` | `rewrite` |
-| `tz_batch` | `batch` | | `tz_discover` | `discover` |
+<details>
+<summary><strong>A small read was not compressed</strong></summary>
 
-The server is built on **FastMCP**: same tools, schemas, and payloads, with a
-construction that bakes in production-grade failure semantics.
+This is expected when raw output is already below the visibility budget or when capsule framing, anchors, and refs would cost as much as the original. TokenZero optimizes total task cost, not the percentage shown on every operation.
 
-- **Request budgets.** Every call carries a timeout budget. A hung operation returns a
-  clean budget-exceeded error, not an agent stall.
-- **Cancel-correct.** A client disconnect cannot leave a half-written result. The
-  server cancels in-flight work atomically; the next call sees a consistent state.
-- **4-valued outcomes.** Every invocation resolves to exactly `success`, `cancelled`,
-  `failed`, or `panicked`. Cancelled is not failed, and failed is not panicked;
-  the harness can branch on the distinction instead of guessing from a
-  catch-all error string.
+Inspect the accounting block to confirm raw and visible counts are equal and the content kind was classified correctly. Do not lower thresholds solely to force a compression badge; tiny capsules add indirection without saving context. If a genuinely large repetitive value passes through, capture its content classification and projection decision for diagnosis.
 
-The server negotiates the MCP protocol across `2025-03-26`, `2025-06-18` (default), and
-the `2026-07-28` release candidate. Malformed JSON and cancelled or failed calls return
-structured errors **without terminating the server**; a crash-transparent supervisor
-restarts a faulted worker mid-session.
+</details>
 
-`tokenzero mcp-server --mode=mcp` launches the explicit classic compatibility catalog. Engine-local CodeMode mode was retired and fails loudly. Per-tool documentation lives at `resource://tokenzero/tools`.
+<details>
+<summary><strong>An exact ref does not expand</strong></summary>
 
-<h3 id="codemode"><img src=".github/assets/h-codemode.svg" alt="CodeMode" width="100%"></h3>
+The ref identifies content; it does not carry the content or guarantee that every process can reach its store. Expansion fails when the configured recovery root lacks the object, the object was evicted, the ref belongs to another isolated store, or digest verification detects corruption.
 
-TokenZero publishes dotted aggregate bindings and a planner-free raw-worker v2 artifact. ZeroStack owns plan parsing, scheduling, transaction policy, permits, and multi-engine composition. The aggregate host dispatches TokenZero operations through `tokenzero-codemode`; despite its retained rollout name, that binary contains no local planner or MCP server.
+Run `tokenzero doctor --json` and inspect the recovery root, store health, and ref scheme. Confirm that the resolving process uses the same durable store or an explicitly shared verified store. Do not rewrite the scheme or fabricate a new digest. If the object was pruned, regenerate it from the original source rather than treating a similar payload as equivalent.
 
-TokenZero remains authoritative for tokenizer identity, roots, typed domain dispatch, exact refs, effects, output caps, and telemetry. See [`docs/codemode.md`](docs/codemode.md) for the ownership boundary and binding catalog.
+</details>
 
-<h3 id="choosing-a-mode"><img src=".github/assets/h-choosing.svg" alt="Choosing a mode" width="100%"></h3>
+<details>
+<summary><strong>Reported savings dropped after an expand</strong></summary>
 
-Choose classic MCP for direct per-operation compatibility. Choose the ZeroStack aggregate host for plans and multi-engine composition.
+That is the intended recovery-aware accounting model. The original projection avoided sending some tokens, but expansion later sent a subset back to the model. Those recovered tokens are therefore subtracted from net savings.
 
-| | Classic MCP compatibility | ZeroStack aggregate |
-| :-- | :-- | :-- |
-| **Surface** | Per-operation `tz_*` tools | Dotted `zero.*` bindings across engines |
-| **Pattern** | One MCP call per operation | Plans composed by the hub |
-| **TokenZero process** | `tokenzero mcp-server --mode=mcp` | Planner-free `tokenzero-codemode raw-worker` |
-| **Owner** | TokenZero compatibility package | ZeroStack |
+Compare raw, initially visible, recovered, and final spent counts rather than only the first response. A task that eventually expands everything may still benefit from delayed selection, but it should not claim the original headline percentage as net savings. This prevents compression from looking successful merely because its cost moved to a later turn.
 
-<h3 id="zerostack"><img src=".github/assets/h-zerostack.svg" alt="ZeroStack" width="100%"></h3>
+</details>
 
-TokenZero is complete on its own; everything above works with this repo
-alone. It is also the context runtime of the **ZeroStack** suite: three
-engines that each stand alone, plus an optional hub that unifies them under
-one `zero.*` surface for users who want all three.
+<details>
+<summary><strong>Telemetry is missing</strong></summary>
 
-| Engine | Role | Status |
-| :-- | :-- | :-- |
-| **TokenZero** | Context compression + recovery | `stable` |
-| [**FSZero**](https://github.com/AdityaVG13/FSZero) | Executable filesystem + repo RAG + access memory | coming soon, hardening |
-| [**GraphZero**](https://github.com/AdityaVG13/graphzero) | Code graph + causality + decision memory | coming soon, hardening |
+Shareable usage telemetry is off by default, and TokenZero has no exporter. Normal operation still returns per-call accounting; what is absent is the optional local cross-call ledger.
 
-The engines share content-addressed blob identity: the same bytes hash to the
-same ref whether it was minted as `tz://`, `fz://`, or `gz://`. `fz://` and
-`gz://` still act as **same-store scheme aliases** when rewritten into the
-TokenZero store. Release publication of cross-engine **blob** expand under a verified shared
-ZeroStack CAS (and sibling-engine store fallback) is blocked until CI retains a
-green macOS/Linux/Windows ZeroRef v1 3×3 matrix. The checked-in fixture may be
-a host-only diagnostic snapshot and does not authorize release. Non-blob
-portable refs remain unsupported; see `docs/codemode.md`.
+Set `TOKENZERO_TELEMETRY=1` before starting the process if you want the local three-field JSONL ledger. Confirm the recovery directory is writable and inspect it with the Pulse commands. The setting is not retroactive, and enabling it does not upload records or recover calls made while it was disabled.
 
-The [ZeroStack hub](https://github.com/AdityaVG13/ZeroStack) ships the unified
-CodeMode server (one `zero_execute` tool spanning all three engines), an
-agent-executable install runbook, and the combined benchmark suite.
+</details>
 
-<h3 id="docs"><img src=".github/assets/h-docs.svg" alt="Docs" width="100%"></h3>
+## FAQ
 
-| Doc | Covers |
-| :-- | :-- |
-| [docs/codemode.md](docs/codemode.md) | Plan execution, MCP comparison, background jobs, refs, and bounds |
-| [docs/mcp.md](docs/mcp.md) | Direct MCP compatibility contract and protocol versions |
-| [docs/install.md](docs/install.md) | Install, surface selection, migration, and rollback |
-| [docs/command-coverage.md](docs/command-coverage.md) | Command surface coverage |
-| [docs/pulse.md](docs/pulse.md) | Telemetry, sync strategy, and recovery runbook |
-| [docs/racc.md](docs/racc.md) | RACC contract and savings accounting |
-| [docs/benchmarks.md](docs/benchmarks.md) | Reproducible savings and microbenchmarks |
-| [docs/development.md](docs/development.md) | Build from source, targeted verification, and workspace layout |
+RACC separates what the model needs to see now from what the system must preserve exactly. These answers explain where that differs from summarization, caching, shell execution, and ordinary token-count claims.
 
-<h3 id="contributing"><img src=".github/assets/h-contributing.svg" alt="Contributing" width="100%"></h3>
+<details>
+<summary><strong>How is RACC different from summarization?</strong></summary>
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build/verify loop and
-[`SECURITY.md`](SECURITY.md) for disclosure. The verify gate is
-`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and
-`cargo fmt --all -- --check`.
+Summarization replaces source detail with an interpretation chosen before the task is complete. When that interpretation omits the wrong fact, the agent must re-read, re-run, or guess, and there may be no way to prove what the summary changed.
 
-<h3 id="license"><img src=".github/assets/h-license.svg" alt="License" width="100%"></h3>
+RACC keeps omitted bytes in a content-addressed local store and returns exact refs plus protected anchors. The visible capsule can therefore be aggressive without becoming the only copy. Expansion returns original bytes, not a second summary.
 
-[MIT](LICENSE) © AdityaVG13
+</details>
 
----
+<details>
+<summary><strong>Is TokenZero just a cache?</strong></summary>
 
-<h3 id="support"><img src=".github/assets/h-support.svg" alt="Support" width="100%"></h3>
+No. The recovery store is cache-like in that it retains content-addressed objects, but RACC also classifies content, measures serialized values, chooses projection policy, preserves anchors, enforces output budgets, and accounts for later recovery.
 
-<div align="center">
+A cache primarily avoids recomputation or I/O. TokenZero's main contract is model-visible output economics with exact recovery. Eviction policy matters because it bounds local storage, but a cache hit alone does not establish token savings.
 
-If TokenZero saves you tokens, consider fueling its development. ☕
+</details>
 
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/adityavg13)
+<details>
+<summary><strong>Does TokenZero own shell execution?</strong></summary>
 
-<sub><b>Compress aggressively. Recover exactly. One install.</b></sub>
+No. ZeroStack owns command admission, working-directory validation, process creation, timeout, cancellation, exact child-tree termination, and reaping. Those responsibilities determine whether an execution is safe and complete.
 
-</div>
+TokenZero receives captured stdout and stderr, measures their serialized form, projects a bounded visible result, and preserves omitted stream bytes behind exact handles. Keeping these boundaries separate prevents output formatting from changing process lifecycle semantics.
+
+</details>
+
+<details>
+<summary><strong>Can a capsule cost more than raw output?</strong></summary>
+
+The policy should pass through content when capsule framing, anchors, and refs do not reduce the visible cost. That is why small files and path-only outputs often look unchanged.
+
+There can still be local storage and measurement overhead, so “visible tokens did not increase” is not a universal performance claim. Benchmark token counting, projection latency, storage, and end-to-end task behavior separately. TokenZero's README reports measured fixtures rather than promising a saving for every value.
+
+</details>
+
+<details>
+<summary><strong>How are token savings calculated after recovery?</strong></summary>
+
+The raw count measures the original serialized value. The visible count measures what entered context initially. Expansion adds recovered tokens to the task's spent total. Net savings compare raw cost with visible plus recovered cost under the same tokenizer.
+
+Exact ref tokens and framing also belong in the visible side of the accounting. Cached or estimated values must be labeled by count kind rather than mixed into exact totals. This is why Pulse can report a lower net percentage than a single compressed response.
+
+</details>
+
+<details>
+<summary><strong>Do recovery refs expose private content?</strong></summary>
+
+A `tz://` ref is an identifier, not a public endpoint or an encoded copy of the payload. Someone who sees the string still needs access to a store containing the object.
+
+The underlying bytes remain sensitive and should be protected with the same filesystem permissions and retention policy as other local agent data. Sharing a store or exporting a pack is an explicit data transfer; digest verification proves identity, not authorization.
+
+</details>
+
+<details>
+<summary><strong>Is classic MCP still supported?</strong></summary>
+
+Yes. Classic MCP remains useful for clients that require explicit per-operation tools and cannot embed the ZeroKernel host. Its schemas and process model are compatibility concerns owned by the TokenZero package.
+
+Multi-engine agent workflows should use ZeroKernel so filesystem, graph, output, state, cancellation, and transactions share one lifecycle. Registering classic MCP beside ZeroKernel in the same session creates overlapping read and recovery paths and makes accounting harder to interpret.
+
+</details>
+
+## Contributing and security
+
+See `CONTRIBUTING.md` for the focused verification loop and `SECURITY.md` for disclosure. New savings claims require reproducible fixtures and claim-audit evidence.
+
+## License
+
+MIT. See `LICENSE`.
