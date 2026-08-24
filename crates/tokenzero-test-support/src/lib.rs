@@ -4,6 +4,7 @@ pub mod conformal;
 pub mod gauntlet;
 pub mod invariant_catalog;
 pub mod parity_taxonomy;
+pub mod ratchet;
 pub use conformal::{
     apply_conformal_residuals, release_pass_on_point_estimate, residual_quantile, score_categories,
     score_passes_trials, BetaParams, CategoryEvidence, CategoryScore, ConformalInterval,
@@ -27,4 +28,8 @@ pub use invariant_catalog::{
 };
 pub use parity_taxonomy::{
     truncate_score, Feature, FeatureId, FeatureUniverse, LoaderError, ParityStatus, Stats,
+};
+pub use ratchet::{
+    apply_ratchet, apply_ratchet_with_waiver, RatchetState, RatchetVerdict, RatchetWaiver,
+    CATEGORY_QUARANTINE_THRESHOLD, RATCHET_STATE_SCHEMA,
 };
