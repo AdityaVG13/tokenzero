@@ -421,12 +421,6 @@ impl LedgerWriter {
         let _ = self.append_stamped_record(record);
     }
 
-    fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
-        let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
-        line.push(b'\n');
-        self.write_serialized_line(line)
-    }
-
     fn append_stamped_record(&self, mut record: LedgerRecord) -> io::Result<()> {
         let mut mode = self
             .io
@@ -446,16 +440,6 @@ impl LedgerWriter {
         }
         let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
         line.push(b'\n');
-        let pending = self.write_line_locked(&mut mode, line)?;
-        drop(mode);
-        Self::register_pending_flush(pending)
-    }
-
-    fn write_serialized_line(&self, line: Vec<u8>) -> io::Result<()> {
-        let mut mode = self
-            .io
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let pending = self.write_line_locked(&mut mode, line)?;
         drop(mode);
         Self::register_pending_flush(pending)
@@ -527,7 +511,7 @@ impl LedgerWriter {
         };
         // SAFETY: `io` only selects Direct vs Buffered. Buffered persist is
         // serialized by `LedgerIo.state`. Drop `io` before disk flush so a
-        // hung write cannot stall `append_record`'s mode switch.
+        // hung write cannot stall `append_stamped_record`'s mode switch.
         if let Some(io) = buffered {
             let _ = io.flush();
         }
@@ -1187,4 +1171,42 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod stamp_persist_tests {
+    use super::*;
+    use tokenzero_core::{Accounting, ToolResponse};
+
+    #[test]
+    fn append_stamped_record_prefix_sums_visible_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let writer = LedgerWriter::new(
+            &cache,
+            "sess".into(),
+            "/repo".into(),
+            Vec::new(),
+            crate::config::RatcWeights::default(),
+        );
+        let response = |visible: usize| ToolResponse {
+            accounting: Some(Accounting::measured(visible, visible, 0, visible, 0, None)),
+            ..ToolResponse::default()
+        };
+        writer.record_response("read", &response(10));
+        writer.record_response("read", &response(5));
+        writer.flush();
+        let records = read_records(&ledger_path_for_cache(&cache)).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "stamped persist must write both JSONL lines"
+        );
+        assert_eq!(records[0].cumulative_session_cost_tokens, 10);
+        assert_eq!(records[1].cumulative_session_cost_tokens, 15);
+        assert_ne!(
+            records[0].cumulative_session_cost_tokens, 0,
+            "unstamped append_record would leave the placeholder 0"
+        );
+    }
 }

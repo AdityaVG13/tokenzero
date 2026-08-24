@@ -313,3 +313,70 @@ fn concurrent_persistence_preserves_all_thread_payloads() {
         assert_eq!(got.content, text);
     }
 }
+
+/// Must match `BLOB_EXTERNALIZE_MIN_BYTES` in recovery persist.
+const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
+
+fn snapshot_text(cache: &Path) -> String {
+    String::from_utf8_lossy(&fs::read(cache).unwrap()).into_owned()
+}
+
+#[test]
+fn small_blob_persist_keeps_inline_even_after_cas_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let payload = "small-inline-body\n";
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let ref_id = store.store_blob(payload, ContentType::Unknown).unwrap();
+    store
+        .publish_pending_cas()
+        .expect("small blobs still publish to CAS for full-hash expand");
+    let snap = snapshot_text(&cache);
+    assert!(
+        snap.contains("small-inline-body"),
+        "bodies below the externalize floor must stay inline in the snapshot"
+    );
+    assert!(
+        !snap.contains("tzx:v1:"),
+        "small bodies must not be replaced with a CAS marker"
+    );
+    let expanded = expand_raw(&mut store, &ref_id);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, payload);
+}
+
+#[test]
+fn large_blob_persist_replaces_inline_with_cas_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let payload = "L".repeat(BLOB_EXTERNALIZE_MIN_BYTES);
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let ref_id = store
+        .store_blob(&payload, ContentType::Unknown)
+        .expect("large blob persist");
+    let snap = snapshot_text(&cache);
+    assert!(
+        snap.contains("tzx:v1:"),
+        "persist must marker-replace blobs at the externalize floor; snapshot still inline"
+    );
+    assert!(
+        !snap.contains(&payload),
+        "snapshot must not still carry the megabyte inline body"
+    );
+    let expanded = expand_raw(&mut store, &ref_id);
+    assert!(
+        expanded.found,
+        "marker expand lost bytes: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, payload);
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let again = expand_raw(&mut restarted, &ref_id);
+    assert!(
+        again.found,
+        "restart expand lost marker blob: {}",
+        again.reason
+    );
+    assert_eq!(again.content, payload);
+}

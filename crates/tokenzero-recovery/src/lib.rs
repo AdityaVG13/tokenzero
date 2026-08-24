@@ -1515,19 +1515,18 @@ impl RecoveryStore {
     /// Publish pending inline blobs to hub CAS after the recovery root is
     /// durably committed (zerostack-5u7 / tokenzero-cas-fsync-ovn).
     ///
-    /// `put_blob` keeps bodies inline until this call. Each successful publish
-    /// replaces the inline body with a `\0tzx:v1:` marker and persists so the
-    /// snapshot no longer carries megabytes. A failed publish leaves that
-    /// blob inline (crash authority) and is reported.
+    /// `put_blob` keeps bodies inline until this call. Every successful
+    /// publish lands the object in CAS (full-hash expand still needs that).
+    /// Only blobs ≥ [`BLOB_EXTERNALIZE_MIN_BYTES`] replace the snapshot
+    /// inline with a `\0tzx:v1:` marker so the root no longer carries
+    /// megabytes. Smaller bodies stay inline (crash authority). A failed
+    /// publish leaves that blob inline and is reported.
     pub fn publish_pending_cas(&mut self) -> Result<(), RecoveryError> {
         let Some(cas) = self.shared_cas.clone() else {
             self.pending_cas_hashes.clear();
             return Ok(());
         };
-        let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
-            .into_iter()
-            .collect();
-        if hashes.is_empty() {
+        if self.pending_cas_hashes.is_empty() {
             return Ok(());
         }
         let path = self.persistence_path.clone();
@@ -1543,6 +1542,54 @@ impl RecoveryStore {
             }
             None => None,
         };
+        self.publish_pending_cas_locked(&cas)
+    }
+
+    fn inline_blob_len(&self, hash: &str) -> Option<usize> {
+        match self.state.blobs.get(&format!("tz://blob/{hash}")) {
+            Some(BlobEntry::Inline(text)) if !text.starts_with(BLOB_MARKER_PREFIX) => {
+                Some(text.len())
+            }
+            _ => None,
+        }
+    }
+
+    /// CAS-publish pending blobs ≥ [`BLOB_EXTERNALIZE_MIN_BYTES`] and marker
+    /// them. Small hashes stay queued for an explicit [`publish_pending_cas`]
+    /// (TokenZeroStore full-hash expand still needs CAS for tiny descriptors).
+    /// WAL/snapshot is already crash authority; CAS miss must not look like
+    /// persist failure.
+    fn externalize_large_pending_cas_locked(&mut self) {
+        let Some(cas) = self.shared_cas.clone() else {
+            return;
+        };
+        let small: Vec<String> = self
+            .pending_cas_hashes
+            .iter()
+            .filter(|hash| {
+                self.inline_blob_len(hash)
+                    .is_none_or(|len| len < BLOB_EXTERNALIZE_MIN_BYTES)
+            })
+            .cloned()
+            .collect();
+        if small.len() == self.pending_cas_hashes.len() {
+            return;
+        }
+        for hash in &small {
+            self.pending_cas_hashes.remove(hash);
+        }
+        let _ = self.publish_pending_cas_locked(&cas);
+        self.pending_cas_hashes.extend(small);
+    }
+
+    fn publish_pending_cas_locked(&mut self, cas: &SharedCas) -> Result<(), RecoveryError> {
+        let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
+            .into_iter()
+            .collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        let path = self.persistence_path.clone();
         let project = crate::shared_cas::project_id(cas.root())
             .map_err(|err| io::Error::other(format!("CAS project id for leased publish: {err}")))?;
         let mut failed = 0usize;
@@ -1569,6 +1616,9 @@ impl RecoveryStore {
             let Some(len) = published_len else {
                 continue;
             };
+            if len < BLOB_EXTERNALIZE_MIN_BYTES {
+                continue;
+            }
             self.state
                 .blobs
                 .insert(ref_id, BlobEntry::Inline(blob_cas_marker(&hash, len)));
@@ -2582,8 +2632,10 @@ impl RecoveryStore {
         // `publish_pending_cas`.
         //
         // Durable stores always attach a local hub CAS. Keep the body inline
-        // until `publish_pending_cas` (zerostack-5u7). Never write the private
-        // `<cache>.blobs/` tree; leftover sidecars stay read-only.
+        // until `publish_pending_cas` (zerostack-5u7). Snapshot marker
+        // replacement is gated at `BLOB_EXTERNALIZE_MIN_BYTES`; smaller
+        // bodies stay inline. Never write the private `<cache>.blobs/` tree;
+        // leftover sidecars stay read-only.
         let value = Some(BlobEntry::Inline(text.to_string()));
         if self.shared_cas.is_some() {
             self.pending_cas_hashes.insert(full_hash.clone());
@@ -2932,11 +2984,20 @@ impl RecoveryStore {
             self.pending_blob_deletions.iter().map(String::as_str),
             self.pending_alias_deletions.iter().map(String::as_str),
         );
-        if self.try_append_session_journal(&path, unchanged_since_last_write, has_pending_deletions)
-        {
-            return Ok(());
-        }
-        self.publish_snapshot(&path)
+        let result = if self.try_append_session_journal(
+            &path,
+            unchanged_since_last_write,
+            has_pending_deletions,
+        ) {
+            Ok(())
+        } else {
+            self.publish_snapshot(&path)
+        };
+        result?;
+        // PersistLock is already held (`acquire_lock` or caller). Nested
+        // `publish_pending_cas` would deadlock on the exclusive file lock.
+        self.externalize_large_pending_cas_locked();
+        Ok(())
     }
 
     fn persist_skip_empty(&self, storage_unchanged: bool) -> bool {
@@ -3948,7 +4009,7 @@ pub(crate) fn load_state_if_present(
     }
 }
 
-// Large blobs use verified content-addressed sidecars.
+// Large blobs use verified content-addressed CAS objects + snapshot markers.
 const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
 const STREAM_READ_BUFFER_BYTES: usize = 64 * 1024;
 const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";

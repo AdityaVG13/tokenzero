@@ -1,70 +1,6 @@
 use serde::Serialize;
-use std::ops::Range;
 
 use crate::PulseEvent;
-
-/// Typed failures for digest-before-fragment CAS serves.
-///
-/// Digest mismatch is fail-closed: no fragment bytes are returned once the
-/// on-disk blob hash diverges from the requested identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FragmentServeError {
-    NotFound,
-    Io(String),
-    DigestMismatch { expected: String, actual: String },
-    RangeOutOfBounds {
-        len: usize,
-        start: usize,
-        end: usize,
-    },
-}
-
-impl std::fmt::Display for FragmentServeError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => formatter.write_str("cas fragment: object not found"),
-            Self::Io(message) => write!(formatter, "cas fragment io: {message}"),
-            Self::DigestMismatch { expected, actual } => write!(
-                formatter,
-                "cas fragment digest_mismatch: expected {expected}, got {actual}"
-            ),
-            Self::RangeOutOfBounds { len, start, end } => write!(
-                formatter,
-                "cas fragment range out of bounds: len={len} requested={start}..{end}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FragmentServeError {}
-
-/// Load a CAS blob, verify its full SHA-256 identity, then slice a fragment.
-///
-/// Order is deliberate: digest is computed and compared before any fragment
-/// bytes are returned. Corrupt on-disk bytes therefore fail closed as
-/// [`FragmentServeError::DigestMismatch`] with no slice leak.
-pub(crate) fn serve_fragment_after_digest(
-    store: &zero_store::SharedCas,
-    hash: &str,
-    byte_range: Range<usize>,
-) -> Result<Vec<u8>, FragmentServeError> {
-    let bytes = match store.get_verified(hash) {
-        Ok(bytes) => bytes,
-        Err(zero_store::CasError::NotFound) => return Err(FragmentServeError::NotFound),
-        Err(zero_store::CasError::DigestMismatch { expected, actual }) => {
-            return Err(FragmentServeError::DigestMismatch { expected, actual });
-        }
-        Err(error) => return Err(FragmentServeError::Io(error.to_string())),
-    };
-    if byte_range.end > bytes.len() || byte_range.start > byte_range.end {
-        return Err(FragmentServeError::RangeOutOfBounds {
-            len: bytes.len(),
-            start: byte_range.start,
-            end: byte_range.end,
-        });
-    }
-    Ok(bytes[byte_range].to_vec())
-}
 
 /// Anytime-valid Bernoulli e-process for the live Pulse failure stream.
 ///
@@ -190,4 +126,3 @@ impl AnytimeFailureMonitor {
         }
     }
 }
-
