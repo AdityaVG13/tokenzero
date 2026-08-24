@@ -21,7 +21,8 @@
 //! of scope); they serialize as null until a per-task roll-up sets them.
 //!
 //! The first record writes synchronously through a retained O_APPEND handle.
-//! Later records batch for at most 250 ms under normal scheduler operation.
+//! A failed first write fails the caller (fail-closed). Later records batch
+//! for at most 250 ms under normal scheduler operation.
 //! Drop and explicit flush drain without per-turn fsync. Before a write would
 //! exceed DEFAULT_MAX_LEDGER_BYTES, the active file rotates to .jsonl.1.
 //! Queries scan both generations and ignore malformed lines, including a torn
@@ -339,8 +340,12 @@ impl LedgerWriter {
         }
     }
 
-    /// Snapshot existing response accounting and append one record. Fail-open.
-    pub(crate) fn record_response(&self, tool: &str, response: &ToolResponse) {
+    /// Snapshot existing response accounting and append one record.
+    ///
+    /// Fail-closed: a served accounting block without a durable JSONL line is a
+    /// lie to `tokenzero ledger`. No-op when the response has no accounting
+    /// and no typed expand miss.
+    pub(crate) fn record_response(&self, tool: &str, response: &ToolResponse) -> io::Result<()> {
         let accounting = response.accounting.as_ref();
         let telemetry = response.telemetry.as_ref();
         let typed_expand_miss = telemetry
@@ -348,7 +353,7 @@ impl LedgerWriter {
             .and_then(Value::as_u64)
             .is_some_and(|count| count > 0);
         if accounting.is_none() && !typed_expand_miss {
-            return;
+            return Ok(());
         }
         let get = |pointer: &str| {
             telemetry
@@ -418,7 +423,7 @@ impl LedgerWriter {
             recovery_costs,
             racc_charge,
         };
-        let _ = self.append_stamped_record(record);
+        self.append_stamped_record(record)
     }
 
     fn append_stamped_record(&self, mut record: LedgerRecord) -> io::Result<()> {
@@ -427,9 +432,10 @@ impl LedgerWriter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         {
-            let Ok(mut cumulative) = self.cumulative_visible_tokens.lock() else {
-                return Ok(());
-            };
+            let mut cumulative = self
+                .cumulative_visible_tokens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *cumulative = cumulative.saturating_add(record.token_mass.visible_tokens);
             record.cumulative_session_cost_tokens = *cumulative;
             // SAFETY: `cumulative_visible_tokens` is an in-memory counter, not
@@ -462,11 +468,9 @@ impl LedgerWriter {
             unreachable!()
         };
         if !*accepted_record {
+            write_bytes_locked(&self.path, self.max_bytes, open_file, &line)?;
             *accepted_record = true;
-            if write_bytes_locked(&self.path, self.max_bytes, open_file, &line).is_ok() {
-                return Ok(None);
-            }
-            // A failed first write is retained and retried on the bounded timer.
+            return Ok(None);
         } else if line.len() >= LEDGER_FLUSH_BYTES {
             write_bytes_locked(&self.path, self.max_bytes, open_file, &line)?;
             return Ok(None);
@@ -1193,8 +1197,12 @@ mod stamp_persist_tests {
             accounting: Some(Accounting::measured(visible, visible, 0, visible, 0, None)),
             ..ToolResponse::default()
         };
-        writer.record_response("read", &response(10));
-        writer.record_response("read", &response(5));
+        writer
+            .record_response("read", &response(10))
+            .expect("first ledger record");
+        writer
+            .record_response("read", &response(5))
+            .expect("second ledger record");
         writer.flush();
         let records = read_records(&ledger_path_for_cache(&cache)).unwrap();
         assert_eq!(

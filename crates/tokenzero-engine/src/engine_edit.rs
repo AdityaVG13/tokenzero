@@ -126,7 +126,6 @@ impl TokenZeroEngine {
                 ),
             );
         }
-        let mut session_persist_error: Option<std::io::Error> = None;
         if !dry_run {
             if let Err(err) = write_atomic(&path, applied.text.as_bytes()) {
                 return failure_response(
@@ -157,9 +156,30 @@ impl TokenZeroEngine {
                     )],
                     &SessionSummary::default(),
                 ) {
-                    // File already landed; do not reverse the write. Surface
-                    // persist failure instead of claiming a durable seen-set.
-                    session_persist_error = Some(err);
+                    // File already landed; do not reverse the write. Fail the
+                    // envelope so clients do not treat the seen-set as durable.
+                    let mut response = failure_response(
+                        "edit",
+                        "session_persist_failed",
+                        format!(
+                            "edit applied to {} but session memory persist failed: {err}; do not retry — the file was already written",
+                            path.display(),
+                        ),
+                        Some("fix session-memory directory permissions or TOKENZERO_REF_INDEX_PATH"),
+                    );
+                    response.telemetry = Some(json!({
+                        "path": path.display().to_string(),
+                        "hunks": edits.len(),
+                        "lines_added": applied.lines_added,
+                        "lines_removed": applied.lines_removed,
+                        "create": create,
+                        "dry_run": dry_run,
+                        "edit_applied": true,
+                        "transport_status": "error",
+                        "degraded": true,
+                        "session_persist_error": err.to_string(),
+                    }));
+                    return response;
                 }
             }
         }
@@ -207,14 +227,11 @@ impl TokenZeroEngine {
                 accounting.billed_tokens = 0;
             }
         }
-        if let Some(err) = session_persist_error.as_ref() {
-            response.diagnostic = Some(session_persist_diagnostic(err));
-        } else if storage_error.is_some() {
+        if storage_error.is_some() {
             response.diagnostic = Some(cache_write_diagnostic(
                 "could not persist recovery cache for edit pre/post images",
             ));
         }
-        let persist_failed = session_persist_error.is_some();
         response.telemetry = Some(json!({
             "path": path.display().to_string(),
             "hunks": edits.len(),
@@ -222,10 +239,9 @@ impl TokenZeroEngine {
             "lines_removed": applied.lines_removed,
             "create": create,
             "dry_run": dry_run,
-            "transport_status": if storage_error.is_some() || persist_failed { "degraded" } else { "ok" },
-            "degraded": storage_error.is_some() || persist_failed,
+            "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
+            "degraded": storage_error.is_some(),
             "storage_error": storage_error,
-            "session_persist_error": session_persist_error.as_ref().map(|err| err.to_string()),
             "exact_refs_available": exact_refs_available
         }));
         response

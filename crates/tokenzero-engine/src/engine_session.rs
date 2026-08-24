@@ -196,10 +196,16 @@ impl TokenZeroEngine {
     }
 
     /// Append one response to the session ledger when this engine owns
-    /// accounting. Persistence is fail-open.
-    pub fn record_ledger_response(&self, tool: &str, response: &ToolResponse) {
-        if let Some(ledger) = &self.ledger {
-            ledger.record_response(tool, response);
+    /// accounting. Persistence is fail-closed: a served accounting block
+    /// without a durable JSONL line is a lie to `tokenzero ledger`.
+    pub fn record_ledger_response(
+        &self,
+        tool: &str,
+        response: &ToolResponse,
+    ) -> std::io::Result<()> {
+        match &self.ledger {
+            Some(ledger) => ledger.record_response(tool, response),
+            None => Ok(()),
         }
     }
 

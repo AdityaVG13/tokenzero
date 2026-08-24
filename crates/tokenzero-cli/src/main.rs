@@ -770,7 +770,6 @@ fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value
             None,
         )
     };
-    engine.record_ledger_response(op, &response);
     response
 }
 

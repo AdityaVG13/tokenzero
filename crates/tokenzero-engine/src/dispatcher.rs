@@ -198,22 +198,26 @@ pub fn dispatch_operation(
         Ok(mut response) => {
             crate::cachezero::observe_action_cache(engine, resolved, args, wall_ns, &mut response);
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
-            if let Err(err) = engine.record_tool_pulse(resolved, &response, None, Vec::new()) {
-                crate::perf_profile::sample_collected(
-                    resolved,
-                    surface.as_str(),
-                    wall_ns,
-                    kernel_ns,
-                    overhead_ns,
-                    false,
-                );
-                return pulse_ledger_failure_outcome(
+            if let Err(err) = engine.record_ledger_response(resolved, &response) {
+                return persist_accounting_failure(
                     resolved,
                     surface,
                     overhead_ns,
                     wall_ns,
                     kernel_ns,
                     err,
+                    "response ledger",
+                );
+            }
+            if let Err(err) = engine.record_tool_pulse(resolved, &response, None, Vec::new()) {
+                return persist_accounting_failure(
+                    resolved,
+                    surface,
+                    overhead_ns,
+                    wall_ns,
+                    kernel_ns,
+                    err,
+                    "Pulse ledger",
                 );
             }
             let ok = response.status == "ok";
@@ -345,20 +349,29 @@ pub fn dispatch_cli(engine: &TokenZeroEngine, op_name: &str, args: &Value) -> Di
     dispatch_operation(engine, DispatchSurface::Cli, op_name, args)
 }
 
-/// Accounting was served by the kernel but Pulse did not persist it. Do not
-/// return an ok envelope with token counts that the ledger does not have.
-fn pulse_ledger_failure_outcome(
+/// Accounting was served by the kernel but a durable ledger write failed.
+/// Do not return an ok envelope with token counts that the ledger does not have.
+fn persist_accounting_failure(
     op: &str,
     surface: DispatchSurface,
     overhead_ns: u64,
     wall_ns: u64,
     kernel_ns: u64,
     err: std::io::Error,
+    what: &str,
 ) -> DispatchOutcome {
+    crate::perf_profile::sample_collected(
+        op,
+        surface.as_str(),
+        wall_ns,
+        kernel_ns,
+        overhead_ns,
+        false,
+    );
     let retryable = err.kind() == std::io::ErrorKind::WouldBlock;
     let domain_error = DomainError::new(
         DomainErrorKind::Substrate,
-        format!("Pulse ledger write failed: {err}"),
+        format!("{what} write failed: {err}"),
     )
     .with_op(op)
     .with_retryable(retryable);

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
 use tokenzero_engine::session_persist::{session_memory_path, with_session_root};
+use tokenzero_engine::ledger::ledger_path_for_cache;
 use tokenzero_engine::{
     DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
     dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
@@ -531,5 +532,113 @@ fn mcp_read_session_persist_fail_closed_and_soak_lite() {
         Some("session_persist_failed"),
         "persist failure must be typed, not an ok envelope: {:?}",
         failed.tool_response
+    );
+}
+
+/// MCP/CodeMode/CLI share dispatch: a served accounting block must land in
+/// ledger.jsonl. A directory occupying that path must fail the envelope.
+#[test]
+fn mcp_read_writes_response_ledger_and_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("note.txt"), b"ledger-product").unwrap();
+    let args = json!({"path": root.path().join("note.txt").display().to_string()});
+    let engine = engine_for(root.path());
+    let out = dispatch_mcp_tool(&engine, "tz_read", &args).expect("mcp");
+    assert!(out.is_ok(), "mcp read: {:?}", out.tool_domain_error());
+    let ledger_path = ledger_path_for_cache(&engine.config.cache_path);
+    let pulse_path = tokenzero_pulse::default_ledger_path(root.path());
+    let text = fs::read_to_string(&ledger_path).unwrap_or_else(|err| {
+        panic!(
+            "MCP tz_read must persist response ledger at {}: {err}",
+            ledger_path.display()
+        )
+    });
+    assert!(
+        text.contains("\"tool\"") && (text.contains("read") || text.contains("tz_read")),
+        "response ledger missing tool record: {text}"
+    );
+    assert_ne!(
+        ledger_path, pulse_path,
+        "response ledger.jsonl is not the Pulse JSONL"
+    );
+
+    let blocked = tempfile::tempdir().unwrap();
+    fs::write(blocked.path().join("note.txt"), b"ledger-blocked").unwrap();
+    let mut config = EngineConfig::for_root(blocked.path());
+    config.session_dedup = false;
+    config.diff_reads = false;
+    config.fetch_enabled = false;
+    let blocked_ledger = ledger_path_for_cache(&config.cache_path);
+    if let Some(parent) = blocked_ledger.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::create_dir_all(&blocked_ledger).unwrap();
+    let engine = TokenZeroEngine::new(config);
+    let failed = dispatch_mcp_tool(
+        &engine,
+        "tz_read",
+        &json!({"path": blocked.path().join("note.txt").display().to_string()}),
+    )
+    .expect("mcp dispatch typed");
+    assert!(
+        !failed.is_ok(),
+        "directory-as ledger.jsonl must fail closed: {:?}",
+        failed.result
+    );
+    let message = failed
+        .domain_error
+        .as_ref()
+        .map(|err| err.message.as_str())
+        .unwrap_or("");
+    assert!(
+        message.contains("response ledger"),
+        "ledger persist failure must be typed, not an ok envelope: {:?}",
+        failed.domain_error
+    );
+}
+
+/// Edit persist-after-write is envelope-fail, not ok+diagnostic. The file
+/// stays applied so clients must not retry the hunks.
+#[test]
+fn mcp_edit_session_persist_after_write_fails_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let note = dir.path().join("note.txt");
+    fs::write(&note, b"hello-edit").unwrap();
+    let args = json!({
+        "path": note.display().to_string(),
+        "edits": [{"find": "hello-edit", "replace": "hello-applied"}],
+    });
+    let blocker = dir.path().join("blocked-root");
+    fs::write(&blocker, b"not-a-directory").unwrap();
+    let failed = with_session_root(&blocker, || {
+        let engine = engine_with_session_dedup(dir.path());
+        dispatch_mcp_tool(&engine, "tz_edit", &args).expect("mcp dispatch typed")
+    });
+    assert!(
+        !failed.is_ok(),
+        "edit persist-after-write must fail the envelope: {:?}",
+        failed.result
+    );
+    let error = failed
+        .tool_response
+        .as_ref()
+        .and_then(|response| response.error.as_ref());
+    assert_eq!(
+        error.map(|err| err.code.as_str()),
+        Some("session_persist_failed"),
+        "persist failure must be typed, not an ok envelope: {:?}",
+        failed.tool_response
+    );
+    assert!(
+        error
+            .map(|err| err.message.contains("do not retry"))
+            .unwrap_or(false),
+        "error must say the file landed: {:?}",
+        error
+    );
+    let body = fs::read_to_string(&note).unwrap();
+    assert_eq!(
+        body, "hello-applied",
+        "file must stay applied; do not reverse the write"
     );
 }

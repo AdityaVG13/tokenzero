@@ -305,7 +305,7 @@ pub struct TokenZeroEngine {
     /// vz89.10 session exposure ledger, shared process-wide per session scope
     /// so per-call CodeMode engines never re-inline bytes the session holds.
     exposure: std::sync::Arc<Mutex<exposure::SessionExposureLedger>>,
-    /// Fail-open append-only response accounting beside the recovery cache.
+    /// Fail-closed append-only response accounting beside the recovery cache.
     ledger: Option<ledger::LedgerWriter>,
     /// Per-connection MCP initialize lifecycle (stdio session / engine).
     pub lifecycle: Mutex<InitializeState>,
