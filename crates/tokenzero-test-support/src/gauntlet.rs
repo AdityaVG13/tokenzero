@@ -165,11 +165,10 @@ pub fn fragment_reason_class_matches(embedded: &str, recovery: &str) -> bool {
 
 /// TokenZero persist / prune / WAL crash windows.
 ///
-/// Names are protocol events, not SQL `BeforeWalHeaderWrite`. The eight
-/// historical in-process tests were deleted in `d8c0844`. Live drivers are
-/// `tests/unit/tokenzero-recovery/crash_windows.rs`. **None are
-/// subprocess-armed**. Do not treat `is_subprocess_armed() == false` as a
-/// pass on skill Pattern 65 injection.
+/// Names are protocol events, not SQL `BeforeWalHeaderWrite`. Live drivers
+/// are `tests/unit/tokenzero-recovery/crash_windows.rs`. Protocol windows
+/// arm Pattern 65 via `TOKENZERO_ARM_CRASH_BOUNDARY`. Concurrent lock and
+/// torn-tail windows stay in-process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashBoundary {
     BeforePersistOnUnreadableSnapshot,
@@ -189,6 +188,7 @@ pub enum CrashWindowKind {
     InProcessRoundTrip,
     SimulatedKillBeforeRename,
     ConcurrentLockCoverage,
+    SubprocessAbort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,9 +225,16 @@ impl CrashBoundary {
         }
     }
 
-    /// Subprocess abort injection. Always false: do not invent armed.
+    /// Pattern 65: env-armed `std::process::abort` at this persist/WAL window.
     pub const fn is_subprocess_armed(self) -> bool {
-        false
+        matches!(
+            self,
+            Self::BeforePersistOnUnreadableSnapshot
+                | Self::BeforePruneOnUnreadableSnapshot
+                | Self::AfterJournalAppendBeforeSnapshotRewrite
+                | Self::AfterWalAppendSession
+                | Self::AfterTmpWriteBeforeRename
+        )
     }
 
     /// Live crash-window driver. Replaced the `d8c0844` deleted census.
@@ -235,23 +242,23 @@ impl CrashBoundary {
         Some(match self {
             Self::BeforePersistOnUnreadableSnapshot => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
-                test_fn: "persist_pending_refuses_unreadable_snapshot",
-                kind: CrashWindowKind::InProcessRefuse,
+                test_fn: "subprocess_abort_before_persist_on_unreadable",
+                kind: CrashWindowKind::SubprocessAbort,
             },
             Self::BeforePruneOnUnreadableSnapshot => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
-                test_fn: "prune_blob_sidecars_refuses_unreadable_snapshot",
-                kind: CrashWindowKind::InProcessRefuse,
+                test_fn: "subprocess_abort_before_prune_on_unreadable",
+                kind: CrashWindowKind::SubprocessAbort,
             },
             Self::AfterJournalAppendBeforeSnapshotRewrite => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
-                test_fn: "second_process_persist_appends_journal_without_snapshot_rewrite",
-                kind: CrashWindowKind::InProcessRoundTrip,
+                test_fn: "subprocess_abort_after_journal_append",
+                kind: CrashWindowKind::SubprocessAbort,
             },
             Self::AfterWalAppendSession => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
-                test_fn: "missing_snapshot_replays_wal_persist_does_not_drop_it",
-                kind: CrashWindowKind::InProcessRoundTrip,
+                test_fn: "subprocess_abort_after_wal_append",
+                kind: CrashWindowKind::SubprocessAbort,
             },
             Self::AfterWalTornTailKeepsComplete => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
@@ -260,8 +267,8 @@ impl CrashBoundary {
             },
             Self::AfterTmpWriteBeforeRename => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",
-                test_fn: "kill_before_rename_keeps_previous_complete_snapshot",
-                kind: CrashWindowKind::SimulatedKillBeforeRename,
+                test_fn: "subprocess_abort_after_tmp_before_rename",
+                kind: CrashWindowKind::SubprocessAbort,
             },
             Self::PersistLockConcurrentWriters => CrashWindowDriver {
                 path: "tests/unit/tokenzero-recovery/crash_windows.rs",

@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokenzero_test_support::{
-    CrashBoundary, ExecutionEnvelope, FAILURE_BUNDLE_SCHEMA, FAILURE_FIRST_DIVERGENCE_JSONPTR,
-    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, GauntletEngineIdentity,
-    GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY, ScenarioAgreement,
-    SpecTagClass, assert_distinct, compare_bytes, is_forbidden_gauntlet_identity, scenario,
+    CrashBoundary, CrashWindowKind, ExecutionEnvelope, FAILURE_BUNDLE_SCHEMA,
+    FAILURE_FIRST_DIVERGENCE_JSONPTR, FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE,
+    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+    ScenarioAgreement, SpecTagClass, assert_distinct, compare_bytes,
+    is_forbidden_gauntlet_identity, scenario,
 };
 
 fn repo_root() -> PathBuf {
@@ -221,17 +222,31 @@ fn crash_boundary_drivers_are_live_in_process_not_subprocess_armed() {
     let root = repo_root();
     assert_eq!(CrashBoundary::ALL.len(), 8);
     for boundary in CrashBoundary::ALL {
-        assert!(
-            !boundary.is_subprocess_armed(),
-            "{} must not claim Pattern 65 arming",
-            boundary.as_str()
-        );
         let driver = boundary.existing_driver().unwrap_or_else(|| {
             panic!(
-                "{} existing_driver must name a live in-process test",
+                "{} existing_driver must name a live crash-window test",
                 boundary.as_str()
             )
         });
+        match boundary {
+            CrashBoundary::PersistLockConcurrentWriters
+            | CrashBoundary::PersistLockTmpSweep
+            | CrashBoundary::AfterWalTornTailKeepsComplete => {
+                assert!(
+                    !boundary.is_subprocess_armed(),
+                    "{} is not a Pattern 65 abort window",
+                    boundary.as_str()
+                );
+            }
+            _ => {
+                assert!(
+                    boundary.is_subprocess_armed(),
+                    "{} must arm Pattern 65 subprocess abort",
+                    boundary.as_str()
+                );
+                assert_eq!(driver.kind, CrashWindowKind::SubprocessAbort);
+            }
+        }
         assert!(
             root.join(driver.path).exists(),
             "{} driver {} missing on disk",

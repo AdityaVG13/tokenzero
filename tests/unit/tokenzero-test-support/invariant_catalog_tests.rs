@@ -134,7 +134,7 @@ fn only_pass_and_allowed_closes() {
 }
 
 #[test]
-fn live_catalog_cannot_close_while_crash_subprocess_is_pending() {
+fn live_catalog_closes_when_pattern_65_is_satisfied() {
     let root = repo_root();
     let mut catalog = InvariantCatalog::tokenzero_phase7();
     assert!(unique_invariant_ids(&catalog));
@@ -148,16 +148,12 @@ fn live_catalog_cannot_close_while_crash_subprocess_is_pending() {
                 .any(|o| o.status == ProofStatus::Pending)
         })
         .count();
-    assert!(
-        pending >= 1,
-        "Pattern 65 subprocess arming must stay Pending"
-    );
+    assert_eq!(pending, 0, "Pattern 65 subprocess abort must be Satisfied");
     let status = catalog.contract_status(&root);
-    assert_ne!(status, ContractStatus::Pass, "Pending must block Pass");
-    assert_ne!(
+    assert_eq!(status, ContractStatus::Pass);
+    assert_eq!(
         close_decision(status, BaseGate::Allowed),
-        CloseDecision::Close,
-        "TokenZero must not close a certification bead on in-process windows plus Pending subprocess"
+        CloseDecision::Close
     );
     let satisfied_violations: Vec<_> = catalog
         .validate(&root)

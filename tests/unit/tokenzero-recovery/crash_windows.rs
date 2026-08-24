@@ -1,10 +1,12 @@
 //! Phase 6 crash windows: persist / prune / WAL / tmp-rename / lock.
 //!
-//! In-process only. Do not invent subprocess abort injection.
-//! CrashBoundary names live in `tokenzero_test_support::CrashBoundary`.
+//! In-process refuse/round-trip tests plus Pattern 65 subprocess abort
+//! (`TOKENZERO_ARM_CRASH_BOUNDARY`). CrashBoundary names live in
+//! `tokenzero_test_support::CrashBoundary`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use tokenzero_core::ContentType;
@@ -475,4 +477,217 @@ fn persist_pending_does_not_panic_when_ref_index_compact_fails() {
         got.reason
     );
     assert_eq!(got.content, collide);
+}
+
+fn crash_child_mode() -> bool {
+    std::env::var("TOKENZERO_CRASH_CHILD").as_deref() == Ok("1")
+}
+
+fn spawn_armed_child(
+    test_fn: &str,
+    cache: &Path,
+    boundary: &str,
+    payload: Option<&str>,
+) -> std::process::ExitStatus {
+    let exe = std::env::current_exe().expect("crash_windows test binary");
+    let mut cmd = Command::new(exe);
+    cmd.arg("--exact")
+        .arg(test_fn)
+        .arg("--test-threads")
+        .arg("1")
+        .env("TOKENZERO_CRASH_CHILD", "1")
+        .env(tokenzero_recovery::ARM_ENV, boundary)
+        .env("TOKENZERO_CRASH_CACHE", cache);
+    if let Some(text) = payload {
+        cmd.env("TOKENZERO_CRASH_PAYLOAD", text);
+    }
+    cmd.status().expect("spawn Pattern 65 child")
+}
+
+fn child_persist_payload() {
+    let cache = std::env::var("TOKENZERO_CRASH_CACHE").expect("TOKENZERO_CRASH_CACHE");
+    let payload =
+        std::env::var("TOKENZERO_CRASH_PAYLOAD").unwrap_or_else(|_| "child\n".to_string());
+    let mut store = RecoveryStore::new(Some(PathBuf::from(cache)));
+    let _ = store.store_blob(&payload, ContentType::Unknown);
+    let _ = store.persist_pending();
+}
+
+fn child_persist_empty() {
+    let cache = std::env::var("TOKENZERO_CRASH_CACHE").expect("TOKENZERO_CRASH_CACHE");
+    let mut store = RecoveryStore::new(Some(PathBuf::from(cache)));
+    let _ = store.persist_pending();
+}
+
+fn child_prune() {
+    let cache = std::env::var("TOKENZERO_CRASH_CACHE").expect("TOKENZERO_CRASH_CACHE");
+    let _ = prune_blob_sidecars(Path::new(&cache), u64::MAX, false);
+}
+
+fn json_or_absent_is_not_torn(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let bytes = fs::read(path).unwrap_or_default();
+    if bytes.is_empty() {
+        return;
+    }
+    if bytes.first() == Some(&b'{') {
+        assert!(
+            bytes.contains(&b'}'),
+            "snapshot must not be a torn JSON object after abort"
+        );
+    }
+}
+
+#[test]
+fn subprocess_abort_after_wal_append() {
+    if crash_child_mode() {
+        child_persist_payload();
+        panic!("Pattern 65 child must abort at AfterWalAppendSession");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_blob("alpha\n", ContentType::Unknown)
+            .expect("seed persist")
+    };
+    let status = spawn_armed_child(
+        "subprocess_abort_after_wal_append",
+        &cache,
+        tokenzero_recovery::AFTER_WAL_APPEND,
+        Some("beta\n"),
+    );
+    assert!(!status.success(), "child must abort, got {status}");
+    json_or_absent_is_not_torn(&cache);
+    let mut recovered = RecoveryStore::new(Some(cache));
+    let a = expand_raw(&mut recovered, &first);
+    assert!(
+        a.found,
+        "acknowledged alpha must survive abort: {}",
+        a.reason
+    );
+    assert_eq!(a.content, "alpha\n");
+}
+
+#[test]
+fn subprocess_abort_after_journal_append() {
+    if crash_child_mode() {
+        child_persist_payload();
+        panic!("Pattern 65 child must abort at AfterJournalAppendBeforeSnapshotRewrite");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_blob("alpha\n", ContentType::Unknown)
+            .expect("seed persist")
+    };
+    let status = spawn_armed_child(
+        "subprocess_abort_after_journal_append",
+        &cache,
+        tokenzero_recovery::AFTER_JOURNAL_APPEND,
+        Some("beta\n"),
+    );
+    assert!(!status.success(), "child must abort, got {status}");
+    json_or_absent_is_not_torn(&cache);
+    let mut recovered = RecoveryStore::new(Some(cache));
+    let a = expand_raw(&mut recovered, &first);
+    assert!(
+        a.found,
+        "acknowledged alpha must survive abort: {}",
+        a.reason
+    );
+    assert_eq!(a.content, "alpha\n");
+}
+
+#[test]
+fn subprocess_abort_after_tmp_before_rename() {
+    if crash_child_mode() {
+        child_persist_payload();
+        panic!("Pattern 65 child must abort at AfterTmpWriteBeforeRename");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_blob("alpha\n", ContentType::Unknown)
+            .expect("seed persist")
+    };
+    let dest_before = fs::read(&cache).ok();
+    let status = spawn_armed_child(
+        "subprocess_abort_after_tmp_before_rename",
+        &cache,
+        tokenzero_recovery::AFTER_TMP_BEFORE_RENAME,
+        Some("beta\n"),
+    );
+    assert!(!status.success(), "child must abort, got {status}");
+    if let Some(before) = dest_before {
+        if cache.exists() {
+            let after = fs::read(&cache).unwrap();
+            if after != before {
+                json_or_absent_is_not_torn(&cache);
+            }
+        }
+    }
+    let mut recovered = RecoveryStore::new(Some(cache));
+    let a = expand_raw(&mut recovered, &first);
+    assert!(
+        a.found,
+        "acknowledged alpha must survive abort: {}",
+        a.reason
+    );
+    assert_eq!(a.content, "alpha\n");
+}
+
+#[test]
+fn subprocess_abort_before_persist_on_unreadable() {
+    if crash_child_mode() {
+        child_persist_empty();
+        panic!("Pattern 65 child must abort at BeforePersistOnUnreadableSnapshot");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let poison = [0xffu8, 0xfe, 0x00];
+    fs::write(&cache, poison).unwrap();
+    let status = spawn_armed_child(
+        "subprocess_abort_before_persist_on_unreadable",
+        &cache,
+        tokenzero_recovery::BEFORE_PERSIST_UNREADABLE,
+        None,
+    );
+    assert!(!status.success(), "child must abort, got {status}");
+    assert_eq!(
+        fs::read(&cache).unwrap(),
+        poison,
+        "poison snapshot must stay"
+    );
+}
+
+#[test]
+fn subprocess_abort_before_prune_on_unreadable() {
+    if crash_child_mode() {
+        child_prune();
+        panic!("Pattern 65 child must abort at BeforePruneOnUnreadableSnapshot");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let poison = [0xffu8, 0xfe, 0x00];
+    fs::write(&cache, poison).unwrap();
+    let status = spawn_armed_child(
+        "subprocess_abort_before_prune_on_unreadable",
+        &cache,
+        tokenzero_recovery::BEFORE_PRUNE_UNREADABLE,
+        None,
+    );
+    assert!(!status.success(), "child must abort, got {status}");
+    assert_eq!(
+        fs::read(&cache).unwrap(),
+        poison,
+        "poison snapshot must stay"
+    );
 }

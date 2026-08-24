@@ -146,8 +146,8 @@ impl InvariantCatalog {
         &self.invariants
     }
 
-    /// TokenZero Phase 7 catalog. Pending crash-subprocess arming stays
-    /// Pending: in-process windows are not Pattern 65 injection.
+    /// TokenZero Phase 7 catalog. Pattern 65 subprocess abort is Satisfied
+    /// by env-armed `crash_inject` tests in crash_windows.rs.
     pub fn tokenzero_phase7() -> Self {
         Self::new(vec![
             invariant(
@@ -206,12 +206,12 @@ impl InvariantCatalog {
             ),
             invariant(
                 "INV-TZ-CRASH-065",
-                "Subprocess abort injection at persist/WAL windows (Pattern 65). In-process crash_windows.rs is not this obligation.",
+                "Subprocess abort injection at persist/WAL windows (Pattern 65). TOKENZERO_ARM_CRASH_BOUNDARY aborts the child; recovery is committed-or-not, never a torn middle.",
                 &["F-TZ-013"],
                 ProofKind::CrashBoundary,
                 "tests/unit/tokenzero-recovery/crash_windows.rs",
                 "tokenzero.crash-subprocess.v1",
-                ProofStatus::Pending,
+                ProofStatus::Satisfied,
             ),
         ])
     }

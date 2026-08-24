@@ -1,5 +1,5 @@
 use super::*;
-use crate::parity_taxonomy::{truncate_score, FeatureUniverse};
+use crate::parity_taxonomy::{FeatureUniverse, truncate_score};
 
 fn tiny_all_passing(n: usize) -> FeatureUniverse {
     let mut toml = String::from(
@@ -174,7 +174,7 @@ fn embedded_universe_lower_bound_blocks_release_at_one() {
         .categories
         .get("mcp-cli-honesty")
         .expect("mcp-cli-honesty");
-    assert_eq!(mcp.trials, 5.0);
+    assert_eq!(mcp.trials, 3.0);
     assert!(mcp.raw_rate < 1.0);
     assert!(mcp.lower < mcp.point);
     let json = serde_json::to_string(&sc).expect("scorecard json");

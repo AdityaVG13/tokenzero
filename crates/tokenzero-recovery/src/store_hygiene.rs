@@ -135,7 +135,13 @@ pub fn prune_blob_sidecars(
 ) -> Result<BlobSidecarPruneReport, RecoveryError> {
     let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
     let config = RecoveryConfig::default();
-    let state = load_prune_snapshot(cache_path, &config)?;
+    let state = match load_prune_snapshot(cache_path, &config) {
+        Ok(state) => state,
+        Err(err) => {
+            crate::crash_inject::maybe_crash(crate::crash_inject::BEFORE_PRUNE_UNREADABLE);
+            return Err(err);
+        }
+    };
     let referenced: HashSet<String> = state
         .blobs
         .values()

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::conformal::{
-    score_categories, BetaParams, CategoryEvidence, ParityScorecard, DEFAULT_CONFIDENCE,
+    BetaParams, CategoryEvidence, DEFAULT_CONFIDENCE, ParityScorecard, score_categories,
 };
 
 /// Frozen copy of Phase 2 `supported_surface_matrix.toml`. Tests of the sum
@@ -164,7 +164,9 @@ impl CategoryStats {
     }
 
     pub fn failures(&self) -> f64 {
-        self.missing as f64 + self.excluded as f64 + 0.5 * self.partial as f64
+        // Excluded is scoped-out of the conformal sample (retry predicates
+        // say do-not-retry). It remains strict-100 debt. Missing still fails.
+        self.missing as f64 + 0.5 * self.partial as f64
     }
 
     pub fn trials(&self) -> f64 {

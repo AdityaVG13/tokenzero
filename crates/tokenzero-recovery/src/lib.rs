@@ -31,6 +31,7 @@ pub mod telemetry;
 pub mod boot;
 pub mod context_view;
 pub mod cow_fork;
+pub mod crash_inject;
 pub mod dst;
 pub mod embedded_store;
 pub mod entity_novelty;
@@ -78,6 +79,10 @@ pub use store_schema::{
     write_actioncache_segment,
 };
 
+pub use crash_inject::{
+    AFTER_JOURNAL_APPEND, AFTER_TMP_BEFORE_RENAME, AFTER_WAL_APPEND, ARM_ENV,
+    BEFORE_PERSIST_UNREADABLE, BEFORE_PRUNE_UNREADABLE, maybe_crash,
+};
 pub use session_aliases::{
     SESSION_ALIAS_HEX_LEN, canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
     is_session_ordinal_bare, parse_session_ordinal_bare, rewrite_full_hash_blob_refs_in_text,
@@ -2957,13 +2962,13 @@ impl RecoveryStore {
         let unchanged_since_last_write = self.disk_identity.is_some()
             && !wal.foreign_write_since(self.disk_identity, self.journal_identity);
         if !unchanged_since_last_write {
-            let existing = match load_state_if_present(&path, &self.config)? {
-                Some(existing) => {
+            let existing = match load_state_if_present(&path, &self.config) {
+                Ok(Some(existing)) => {
                     self.unreadable_snapshot = false;
                     ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
                     existing
                 }
-                None => {
+                Ok(None) => {
                     self.unreadable_snapshot = false;
                     let generation = next_ordinal_generation(&path)?;
                     self.state.ordinal_generation = generation;
@@ -2971,6 +2976,10 @@ impl RecoveryStore {
                     let mut empty = RecoveryState::empty(&self.config);
                     empty.ordinal_generation = generation;
                     empty
+                }
+                Err(err) => {
+                    crash_inject::maybe_crash(crash_inject::BEFORE_PERSIST_UNREADABLE);
+                    return Err(err);
                 }
             };
             let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
@@ -2994,6 +3003,7 @@ impl RecoveryStore {
             self.publish_snapshot(&path)
         };
         result?;
+        crash_inject::maybe_crash(crash_inject::AFTER_TMP_BEFORE_RENAME);
         // PersistLock is already held (`acquire_lock` or caller). Nested
         // `publish_pending_cas` would deadlock on the exclusive file lock.
         self.externalize_large_pending_cas_locked();
@@ -3036,6 +3046,8 @@ impl RecoveryStore {
         match wal.append(&record) {
             Ok(AppendOutcome::Appended) => {
                 self.journal_identity = wal.wal_identity();
+                crash_inject::maybe_crash(crash_inject::AFTER_WAL_APPEND);
+                crash_inject::maybe_crash(crash_inject::AFTER_JOURNAL_APPEND);
                 append_blob_refs_to_ref_index(path, &entry.refs, Some(&self.ref_classes));
                 self.clear_pending_deletions();
                 true
@@ -3051,6 +3063,7 @@ impl RecoveryStore {
         self.disk_identity = None;
         let wal = recovery_session_wal(path, &self.config)?;
         wal.publish_snapshot(&snapshot_bytes(&self.state)?)?;
+        crash_inject::maybe_crash(crash_inject::AFTER_WAL_APPEND);
         self.journal_identity = None;
         self.disk_identity = wal.snapshot_identity();
         append_blob_refs_to_ref_index(path, &self.session_refs, Some(&self.ref_classes));
@@ -3736,6 +3749,7 @@ fn write_ref_index_entries<'a>(
         }
         file.sync_all()?;
         drop(file);
+        crash_inject::maybe_crash(crash_inject::AFTER_TMP_BEFORE_RENAME);
         fs::rename(&tmp, shard)?;
         Ok(())
     })();
