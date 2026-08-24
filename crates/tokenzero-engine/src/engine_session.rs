@@ -295,12 +295,15 @@ impl TokenZeroEngine {
         )
     }
 
-    /// Fail-open write-back of this call's serve records and rollup counters.
+    /// Write-back of this call's serve records and rollup counters.
+    ///
+    /// Persist is fail-closed when session persistence is enabled: a served
+    /// seen-set without a journal/snapshot write is a lie on resume.
     pub(crate) fn session_apply(
         &self,
         pending: Vec<(ServeKey, ServedRecord)>,
         summary: &SessionSummary,
-    ) -> (u64, u64) {
+    ) -> std::io::Result<(u64, u64)> {
         let persist_enabled = self.session_persist.is_some();
         let (watermark, snapshot) = self.with_session_memory(
             || ((0, 0), None),
@@ -324,9 +327,9 @@ impl TokenZeroEngine {
         );
         if let (Some(persist), Some(snapshot)) = (self.session_persist.as_ref(), snapshot.as_ref())
         {
-            persist.persist(snapshot);
+            persist.persist(snapshot)?;
         }
-        watermark
+        Ok(watermark)
     }
 
     /// Claim a set of ServeKeys for single-flight serving. Blocks until none

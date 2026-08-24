@@ -399,6 +399,26 @@ pub fn cache_write_diagnostic(message: impl Into<String>) -> tokenzero_core::Dia
     }
 }
 
+pub fn session_persist_diagnostic(err: &std::io::Error) -> tokenzero_core::Diagnostic {
+    tokenzero_core::Diagnostic {
+        code: "session_persist_failed".to_string(),
+        message: format!("session memory persist failed: {err}"),
+        repair: Some(
+            "fix session-memory directory permissions or TOKENZERO_REF_INDEX_PATH".to_string(),
+        ),
+    }
+}
+
+pub fn session_persist_failure(tool: &str, err: &std::io::Error) -> ToolResponse {
+    let diagnostic = session_persist_diagnostic(err);
+    failure_response(
+        tool,
+        &diagnostic.code,
+        diagnostic.message.clone(),
+        diagnostic.repair.as_deref(),
+    )
+}
+
 pub fn failure_response(
     tool: &str,
     code: &str,

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
+use tokenzero_engine::session_persist::{session_memory_path, with_session_root};
 use tokenzero_engine::{
     DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
     dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
@@ -13,6 +14,14 @@ use tokenzero_engine::{
 fn engine_for(root: &Path) -> TokenZeroEngine {
     let mut config = EngineConfig::for_root(root);
     config.session_dedup = false;
+    config.diff_reads = false;
+    config.fetch_enabled = false;
+    TokenZeroEngine::new(config)
+}
+
+fn engine_with_session_dedup(root: &Path) -> TokenZeroEngine {
+    let mut config = EngineConfig::for_root(root);
+    config.session_dedup = true;
     config.diff_reads = false;
     config.fetch_enabled = false;
     TokenZeroEngine::new(config)
@@ -470,5 +479,57 @@ fn shell_timeout_units_agree() {
     assert!(
         delta < std::time::Duration::from_secs(2),
         "timeout_ms ({ms_elapsed:?}) and timeout_seconds ({secs_elapsed:?}) disagree"
+    );
+}
+
+/// Session memory persist is fail-closed on the MCP product path: a served
+/// read must write session-memory.json, and a file-as-root must not return ok.
+#[test]
+fn mcp_read_session_persist_fail_closed_and_soak_lite() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("note.txt"), b"session-persist-product").unwrap();
+    let args = json!({"path": dir.path().join("note.txt").display().to_string()});
+    let session_root = dir.path().join("session-root");
+    fs::create_dir_all(&session_root).unwrap();
+
+    let ok = with_session_root(&session_root, || {
+        let engine = engine_with_session_dedup(dir.path());
+        dispatch_mcp_tool(&engine, "tz_read", &args).expect("mcp")
+    });
+    assert!(
+        ok.is_ok(),
+        "writable session root: {:?}",
+        ok.tool_domain_error()
+    );
+    let memory_path = with_session_root(&session_root, || {
+        session_memory_path(&EngineConfig::for_root(dir.path()).cache_path)
+    });
+    assert!(
+        memory_path.is_file(),
+        "MCP tz_read with session_dedup must persist session-memory.json at {}",
+        memory_path.display()
+    );
+
+    let blocker = dir.path().join("blocked-root");
+    fs::write(&blocker, b"not-a-directory").unwrap();
+    let failed = with_session_root(&blocker, || {
+        let engine = engine_with_session_dedup(dir.path());
+        dispatch_mcp_tool(&engine, "tz_read", &args).expect("mcp dispatch typed")
+    });
+    assert!(
+        !failed.is_ok(),
+        "file-as session root must fail closed, not drop persist_inner: {:?}",
+        failed.result
+    );
+    let code = failed
+        .tool_response
+        .as_ref()
+        .and_then(|response| response.error.as_ref())
+        .map(|error| error.code.as_str());
+    assert_eq!(
+        code,
+        Some("session_persist_failed"),
+        "persist failure must be typed, not an ok envelope: {:?}",
+        failed.tool_response
     );
 }

@@ -459,9 +459,11 @@ impl TokenZeroEngine {
                 }
             }
         }
-        crate::perf_profile::_profile_expand_session_apply(|| {
-            self.session_apply(pending, &summary);
-        });
+        if let Err(err) = crate::perf_profile::_profile_expand_session_apply(|| {
+            self.session_apply(pending, &summary)
+        }) {
+            return session_persist_failure("expand", &err);
+        }
         response
     }
 
@@ -552,9 +554,11 @@ impl TokenZeroEngine {
             exact_bytes: false, // diff render, not verbatim bytes
         });
         response.telemetry = summary.telemetry();
-        crate::perf_profile::_profile_expand_session_apply(|| {
-            self.session_apply(std::mem::take(pending), summary);
-        });
+        if let Err(err) = crate::perf_profile::_profile_expand_session_apply(|| {
+            self.session_apply(std::mem::take(pending), summary)
+        }) {
+            return session_persist_failure("expand", &err);
+        }
         response
     }
 

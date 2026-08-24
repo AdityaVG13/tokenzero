@@ -126,6 +126,7 @@ impl TokenZeroEngine {
                 ),
             );
         }
+        let mut session_persist_error: Option<std::io::Error> = None;
         if !dry_run {
             if let Err(err) = write_atomic(&path, applied.text.as_bytes()) {
                 return failure_response(
@@ -145,7 +146,7 @@ impl TokenZeroEngine {
                 && self.config.session_dedup
                 && !applied.text.is_empty()
             {
-                self.session_apply(
+                if let Err(err) = self.session_apply(
                     vec![(
                         ServeKey::File {
                             path: comparable_path(&path),
@@ -155,7 +156,11 @@ impl TokenZeroEngine {
                         served_record(&applied.text, &post_stored),
                     )],
                     &SessionSummary::default(),
-                );
+                ) {
+                    // File already landed; do not reverse the write. Surface
+                    // persist failure instead of claiming a durable seen-set.
+                    session_persist_error = Some(err);
+                }
             }
         }
         let (prefix, status) = if dry_run {
@@ -202,11 +207,14 @@ impl TokenZeroEngine {
                 accounting.billed_tokens = 0;
             }
         }
-        if storage_error.is_some() {
+        if let Some(err) = session_persist_error.as_ref() {
+            response.diagnostic = Some(session_persist_diagnostic(err));
+        } else if storage_error.is_some() {
             response.diagnostic = Some(cache_write_diagnostic(
                 "could not persist recovery cache for edit pre/post images",
             ));
         }
+        let persist_failed = session_persist_error.is_some();
         response.telemetry = Some(json!({
             "path": path.display().to_string(),
             "hunks": edits.len(),
@@ -214,12 +222,12 @@ impl TokenZeroEngine {
             "lines_removed": applied.lines_removed,
             "create": create,
             "dry_run": dry_run,
-            "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
-            "degraded": storage_error.is_some(),
+            "transport_status": if storage_error.is_some() || persist_failed { "degraded" } else { "ok" },
+            "degraded": storage_error.is_some() || persist_failed,
             "storage_error": storage_error,
+            "session_persist_error": session_persist_error.as_ref().map(|err| err.to_string()),
             "exact_refs_available": exact_refs_available
         }));
         response
     }
 }
-

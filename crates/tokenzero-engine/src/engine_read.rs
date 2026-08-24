@@ -252,8 +252,10 @@ impl TokenZeroEngine {
         // A serve whose refs failed to persist, or whose visible bytes were
         // replaced by working-set eviction, must not become a dedup base.
         if storage_errors.is_empty() && refs_complete && !working_set_replaced {
-            let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
-            summary.set_watermark(from_hwm, to_hwm);
+            match self.session_apply(pending, &summary) {
+                Ok((from_hwm, to_hwm)) => summary.set_watermark(from_hwm, to_hwm),
+                Err(err) => return session_persist_failure("read", &err),
+            }
         }
         // Merge — never overwrite — so degraded-storage markers survive a
         // dedup/diff serve in the same response.
@@ -612,4 +614,3 @@ impl TokenZeroEngine {
         }
     }
 }
-

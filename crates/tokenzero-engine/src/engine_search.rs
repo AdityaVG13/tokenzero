@@ -348,7 +348,10 @@ impl TokenZeroEngine {
                 .map_or(0, |visible| visible.text.len());
             summary.note_wire_bytes(full_bytes, delta_bytes);
         }
-        let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
+        let (from_hwm, to_hwm) = match self.session_apply(pending, &summary) {
+            Ok(hwm) => hwm,
+            Err(err) => return session_persist_failure(tool, &err),
+        };
         summary.set_watermark(from_hwm, to_hwm);
         // Merge — never overwrite — so backend/storage telemetry survives a
         // dedup serve in the same response.

@@ -104,8 +104,11 @@ impl SessionPersistence {
         memory.restore_from_persist(records, scope.rollup.clone(), scope.session_hwm);
     }
 
-    pub(crate) fn persist(&self, snapshot: &SessionPersistSnapshot) {
-        let _ = crate::perf_profile::_profile_session_persist(|| self.persist_inner(snapshot));
+    /// Persist the snapshot. Fail-closed: dropping `persist_inner` would leave
+    /// in-memory session memory claiming a durable seen-set that resume cannot
+    /// restore.
+    pub(crate) fn persist(&self, snapshot: &SessionPersistSnapshot) -> std::io::Result<bool> {
+        crate::perf_profile::_profile_session_persist(|| self.persist_inner(snapshot))
     }
 
     fn persist_inner(&self, snapshot: &SessionPersistSnapshot) -> std::io::Result<bool> {
@@ -493,3 +496,80 @@ impl Drop for SessionPersistLock {
     }
 }
 
+#[cfg(test)]
+mod persist_fail_closed_tests {
+    use super::*;
+    use crate::session::{ServeKey, ServedRecord, SessionMemory};
+    use std::time::SystemTime;
+
+    fn snapshot_with(label: &str) -> SessionPersistSnapshot {
+        let mut memory = SessionMemory::default();
+        memory.record(
+            ServeKey::File {
+                path: PathBuf::from(label),
+                start: None,
+                end: None,
+            },
+            ServedRecord {
+                content_sha256: format!("{label}-hash"),
+                blob_ref: format!("tz://{label}"),
+                file_ref: format!("file://{label}"),
+                raw_tokens: 1,
+                line_count: 1,
+                byte_len: label.len(),
+                served_at: SystemTime::UNIX_EPOCH,
+                serve_count: 1,
+            },
+        );
+        SessionPersistSnapshot::from_memory(&memory, &[])
+    }
+
+    #[test]
+    fn persist_returns_err_when_root_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"not-a-dir").unwrap();
+        let cache = dir.path().join("cache.json");
+        fs::write(&cache, b"{}").unwrap();
+        let err = with_session_root(&blocker, || {
+            let persist = SessionPersistence::for_cache(&cache, true).expect("persist");
+            persist.persist(&snapshot_with("blocked"))
+        })
+        .expect_err("file-as-root must fail closed, not drop persist_inner");
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn persist_soak_lite_repeated_deltas_land_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("session-root");
+        fs::create_dir_all(&root).unwrap();
+        let cache = dir.path().join("cache.json");
+        fs::write(&cache, b"{}").unwrap();
+        with_session_root(&root, || {
+            let persist = SessionPersistence::for_cache(&cache, true).expect("persist");
+            for i in 0..32 {
+                persist
+                    .persist(&snapshot_with(&format!("k{i}")))
+                    .expect("persist cycle");
+            }
+        });
+        let memory_path = with_session_root(&root, || session_memory_path(&cache));
+        assert!(
+            memory_path.is_file(),
+            "soak-lite must write session-memory.json at {}",
+            memory_path.display()
+        );
+        let journal = session_journal_path(&memory_path);
+        assert!(
+            journal.is_file(),
+            "soak-lite must append a journal at {}",
+            journal.display()
+        );
+        let body = fs::read_to_string(&journal).unwrap();
+        assert!(
+            body.lines().filter(|line| !line.trim().is_empty()).count() >= 1,
+            "journal should contain at least one complete delta: {body}"
+        );
+    }
+}
