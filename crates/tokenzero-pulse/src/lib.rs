@@ -51,13 +51,21 @@ fn is_tokenizer_slug(component: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// Validate the one Pulse tokenizer-id grammar at every trust boundary.
+/// Validate the Pulse tokenizer-id grammar at every trust boundary.
 ///
-/// Estimators are explicit slugs. Exact adapters use the canonical identity
-/// emitted by `ExactTokenizerIdentity::ledger_identity`.
+/// Three labeled classes, never conflated:
+/// - `estimator:<slug>` — approximate lexical/family/byte gauges
+/// - `tiktoken:<encoding>` — bundled BPE, exact for that vocab, **not**
+///   `ExactTokenizerIdentity` (no provider-locked revision digest)
+/// - `provider/model@<64hex>` — `ExactTokenizerIdentity::ledger_identity`
+///
+/// Bare `Q99`, `exact`, MCP registry labels, and unlabeled model ids fail.
 fn valid_tokenizer_id(id: &str) -> bool {
     if let Some(name) = id.strip_prefix("estimator:") {
         return is_tokenizer_slug(name);
+    }
+    if let Some(encoding) = id.strip_prefix("tiktoken:") {
+        return is_tokenizer_slug(encoding);
     }
     let Some((provider_and_model, digest)) = id.rsplit_once('@') else {
         return false;
@@ -1329,7 +1337,7 @@ impl SessionLedgerReport {
             },
             "entry": {
                 "session_id": "string — verbatim local Pulse session identifier (MCP session id or 'unknown'); correlatable and not anonymized",
-                "tokenizer_id": "estimator:<slug> or provider/model@<64 lowercase hex identity digest>; built-in tool_call counts use the explicitly labelled estimator:tokenzero-core gauge until an exact adapter is linked",
+                "tokenizer_id": "estimator:<slug>, tiktoken:<encoding-slug>, or provider/model@<64 lowercase hex identity digest>. tiktoken: is bundled BPE (certified for that vocab) and is not ExactTokenizerIdentity. Built-in tool_call counts use estimator:tokenzero-core until an exact adapter is linked",
                 "turns": "usize — number of tool calls in this session (decision count proxy)",
                 "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
                 "visible_tokens": "usize — total visible (compressed) tokens across all turns",

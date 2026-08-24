@@ -301,10 +301,12 @@ fn tiktoken_bpe_is_certified_but_not_pulse_exact_identity() {
         measured.tokenizer, "gpt-4o",
         "bare model ids are unlabeled exact identities"
     );
+    let recorded = PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
+        .with_tokenizer_id(&measured.tokenizer)
+        .expect("kernel tiktoken: must be Pulse-legal after Pass 10 grammar");
+    assert_eq!(recorded.tokenizer_id, "tiktoken:o200k_base");
     assert!(
-        PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
-            .with_tokenizer_id(&measured.tokenizer)
-            .is_err(),
+        !measured.tokenizer.contains('@'),
         "tiktoken:encoding is not Pulse provider/model@hex; do not smuggle it as ExactTokenizerIdentity"
     );
 }

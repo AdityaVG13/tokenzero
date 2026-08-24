@@ -46,8 +46,8 @@ fn partial_does_not_count_as_passing() {
     let s = u.stats();
     assert!(s.partial > 0, "fixture must include Partial rows");
     assert_eq!(
-        s.passing, 5,
-        "Phase 2 supported_count=5; Partial must not join Passing"
+        s.passing, 6,
+        "Pass 10 supported_count=6 (F-TZ-021 kernel orifices); Partial must not join Passing"
     );
     assert_eq!(s.partial, 12);
     for feat in u.features() {
@@ -93,6 +93,35 @@ fn excluded_still_debt_for_strict_100() {
             );
         }
     }
+}
+
+#[test]
+fn kernel_orifices_are_supported_token_engine() {
+    let u = universe();
+    let feat = u
+        .get(KERNEL_ORIFICES_FEATURE_ID)
+        .unwrap_or_else(|| panic!("{KERNEL_ORIFICES_FEATURE_ID} must exist"));
+    assert_eq!(
+        feat.status,
+        ParityStatus::Passing,
+        "TokenEngine z.measure/project/compress/expand is live; do not round down"
+    );
+    assert_eq!(feat.category, "mcp-cli-honesty");
+    assert_eq!(truncate_score(feat.weight), 0.15);
+    assert!(feat.status.counts_as_passing());
+    assert_eq!(feat.status.score_contribution(), 1.0);
+}
+
+#[test]
+fn estimator_tiktoken_and_exact_are_labeled_not_conflated() {
+    let u = universe();
+    let feat = u.get("F-TZ-001-EST").expect("F-TZ-001-EST");
+    assert_eq!(feat.status, ParityStatus::Passing);
+    assert!(
+        feat.title.to_lowercase().contains("tiktoken"),
+        "Pass 10: live kernel emits tiktoken:<encoding>; matrix must name it: {}",
+        feat.title
+    );
 }
 
 #[test]

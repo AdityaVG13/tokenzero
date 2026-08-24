@@ -1,4 +1,4 @@
-# TokenZero supported surface matrix (Phase 2 greenfield).
+# TokenZero supported surface matrix (Phase 2 greenfield; Pass 10 re-audit).
 # Status vocabulary: supported | partial | excluded | missing
 # Partial NEVER rounds up to supported.
 # Axis 11 strict-mode is MISSING; do not invent a flag.
@@ -10,11 +10,11 @@ schema_version = "gauntlet.supported_surface_matrix"
 project_class = "Greenfield-Rust-class"
 reference_name = "tokenzero-spec"
 reference_version = "HEAD-fb73416"
-subject_git_sha = "fb734162b4a9dbe692fe4e9abc4bd246b87b03d6"
-generated_at_utc = "2026-08-24T18:00:00Z"
-revision = 2
+subject_git_sha = "65ce648"
+generated_at_utc = "2026-08-24T10:24:00Z"
+revision = 3
 identity_subject_pin = "GauntletSubject::TokenZero@862e3e682cb8aee0e150c1cb0b116cb2e23a44e2"
-identity_pin_note = "Gauntlet Subject identity stays prior-commit 862e3e6 (Self-oracle baseline). subject_git_sha is the Phase 2 audit HEAD. Do not conflate the two."
+identity_pin_note = "Gauntlet Subject identity stays prior-commit 862e3e6 (Self-oracle baseline). subject_git_sha is the Pass 10 re-audit HEAD (Phase 6 crash windows). Do not conflate the two."
 status_vocabulary = ["supported", "partial", "excluded", "missing"]
 partial_never_rounds_up = true
 
@@ -60,7 +60,7 @@ description = "Never-worse-than-raw + workspace gate. Unit estimator:bytes-ceil-
 
 [categories.mcp-cli-honesty]
 weight = 0.08
-description = "MCP/CLI honesty, CLI .golden, skip≠green, Subject≠Oracle. Strict-mode MISSING (do not invent a flag)."
+description = "MCP/CLI honesty, CLI .golden, skip≠green, Subject≠Oracle, TokenEngine z.* kernel orifices. Strict-mode MISSING (do not invent a flag)."
 
 [categories.durability-recovery]
 weight = 0.08
@@ -80,11 +80,11 @@ evidence = "phase1_unified_recon.md axis 1; tests/engine/fixtures/provider-token
 
 [[features]]
 id = "F-TZ-001-EST"
-title = "Estimator vs exact count_class labeling (Pulse tokenizer_id grammar)"
+title = "Estimator vs exact vs tiktoken count_class labeling (Pulse tokenizer_id grammar)"
 category = "tokenizer-identity"
 weight = 0.45
 status = "supported"
-evidence = "Pulse tokenizer_id grammar estimator:<slug> vs provider/model@<64hex>; goldens encode unverified=null"
+evidence = "Pulse tokenizer_id grammar estimator:<slug> | tiktoken:<encoding> | provider/model@<64hex>. tiktoken: is bundled BPE (certified for that vocab), not ExactTokenizerIdentity. Kernel measure gpt-4o emits tiktoken:o200k_base and Pulse accepts it. Goldens encode unverified=null. Bare Q99/exact/MCP registry ids still fail."
 
 [[features]]
 id = "F-TZ-002"
@@ -214,16 +214,24 @@ retry_condition_predicate = "Reconsider only if TokenZero grows a separately nam
 id = "F-TZ-016"
 title = "MCP/CLI honesty (CLI .golden, skip≠green, no insta self-compare)"
 category = "mcp-cli-honesty"
-weight = 0.35
+weight = 0.25
 status = "partial"
-partial_rationale = "8 CLI .golden files remain as Self-oracle corpus; the golden_outputs [[test]] was deleted in d8c0844 so they are not live-compared. Ship tests skip without env (honest skip≠green). Gauntlet Subject/Oracle discriminator exists in tokenzero-test-support (do not claim it is missing). Partial MUST NOT round up."
-evidence = "tests/cli/golden/cli/ (8 files); tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs; no cargo-insta in Cargo.lock"
+partial_rationale = "8 CLI .golden files remain as Self-oracle corpus; the golden_outputs [[test]] was deleted in d8c0844 so they are not live-compared. Ship tests skip without env (honest skip≠green). Gauntlet Subject/Oracle discriminator exists in tokenzero-test-support (do not claim it is missing). capabilities.json now names TokenEngine z.* separately (F-TZ-021). Partial MUST NOT round up."
+evidence = "tests/cli/golden/cli/ (8 files); tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs; tests/cli/cli_help_contract.rs kernel_orifices + clap-vs-capabilities; no cargo-insta in Cargo.lock"
+
+[[features]]
+id = "F-TZ-021"
+title = "TokenEngine kernel orifices (z.measure / z.project / z.compress / z.expand)"
+category = "mcp-cli-honesty"
+weight = 0.15
+status = "supported"
+evidence = "zero_abi::TokenEngine on ZeroTokenEngine: measure, certify, project, compress, expand. capabilities.kernel_orifices declares those methods and explicitly lists z.read/z.find/z.run/zero.read as not TokenEngine. Dotted zero.* CodeMode bindings stay noncanonical_v6_compat."
 
 [[features]]
 id = "F-TZ-011"
 title = "Strict mode never lowers model/effort/tools/output"
 category = "mcp-cli-honesty"
-weight = 0.30
+weight = 0.25
 status = "missing"
 authority_axis = 11
 missing_rationale = "rg found no strict-mode type or flag. Closest hit is strictly-cheaper ref rewrite (tokens, not model/effort/tools/output). Do not invent a flag in this gauntlet. Axis 11 is MISSING."
@@ -276,17 +284,18 @@ exclusion_rationale = "Forbidden by AGENTS.md. Composition is the hub's job. fz:
 retry_condition_predicate = "Do not retry. If a Cargo dependency on FSZero or GraphZero appears, that is a law violation, not a gauntlet feature to add."
 
 [coverage_debt]
-supported_count = 5
+supported_count = 6
 partial_count = 12
 missing_count = 1
 excluded_count = 4
 na_count = 0
-feature_count = 22
+feature_count = 23
 authority_axis_count = 14
 # local = sum(per-category feature weights); 12 categories * 1.0 = 12.0
-local_missing_plus_excluded_weight = "1.05"
+# missing+excluded local: F-TZ-017 0.20 + F-TZ-011 0.25 + F-TZ-018 0.20 + F-TZ-019 0.15 + F-TZ-020 0.20 = 1.00
+local_missing_plus_excluded_weight = "1.00"
 local_all_weight = "12.00"
-local_debt_fraction = "0.087500"
-global_weighted_missing_plus_excluded = "0.0880"
-notes = "Excluded still counts as coverage debt for a strict-100% claim. Partial never rounds up."
+local_debt_fraction = "0.083333"
+global_weighted_missing_plus_excluded = "0.0840"
+notes = "Excluded still counts as coverage debt for a strict-100% claim. Partial never rounds up. Pass 10: Pulse tiktoken: grammar + TokenEngine z.* kernel_orifices (F-TZ-021). mcp-cli-honesty rebalanced 0.25+0.15+0.25+0.20+0.15."
 

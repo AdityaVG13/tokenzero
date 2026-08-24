@@ -47,12 +47,8 @@ fn assert_no_undispatched_authority_ads(haystack: &str, surface: &str) {
 }
 
 /// F-TZ-011 is Missing. Ads must not invent a present strict-mode product flag.
-const MISSING_STRICT_MODE_ADS: &[&str] = &[
-    "strict mode",
-    "strict-mode",
-    "strict_mode",
-    "strictmode",
-];
+const MISSING_STRICT_MODE_ADS: &[&str] =
+    &["strict mode", "strict-mode", "strict_mode", "strictmode"];
 
 fn assert_no_missing_strict_mode_ads(haystack: &str, surface: &str) {
     let lower = haystack.to_lowercase();
@@ -124,10 +120,7 @@ fn cli_help_does_not_advertise_missing_strict_mode() {
         "{}",
         String::from_utf8_lossy(&help.stderr)
     );
-    assert_no_missing_strict_mode_ads(
-        &String::from_utf8_lossy(&help.stdout),
-        "tokenzero --help",
-    );
+    assert_no_missing_strict_mode_ads(&String::from_utf8_lossy(&help.stdout), "tokenzero --help");
 
     let mcp_help = Command::cargo_bin("tokenzero")
         .unwrap()
@@ -161,7 +154,9 @@ fn cli_help_does_not_advertise_missing_strict_mode() {
         .as_object()
         .expect("capabilities feature_flags");
     assert!(
-        flags.keys().all(|key| !key.to_lowercase().contains("strict")),
+        flags
+            .keys()
+            .all(|key| !key.to_lowercase().contains("strict")),
         "capabilities.feature_flags invented a strict-mode product flag: {flags:?}"
     );
     let features = json["features"].as_array().expect("capabilities features");
@@ -366,6 +361,10 @@ fn cli_capabilities_json_exposes_agent_contract() {
         .expect("capabilities required keys");
     assert!(required_keys.iter().any(|key| key == "mcp_tools"));
     assert!(required_keys.iter().any(|key| key == "surface_parity"));
+    assert!(
+        required_keys.iter().any(|key| key == "kernel_orifices"),
+        "capabilities required_keys must include kernel_orifices"
+    );
 
     let mcp_tools = json["mcp_tools"].as_array().expect("MCP tool map");
     let expected_names = all_operations()
@@ -539,6 +538,139 @@ fn cli_capabilities_json_exposes_agent_contract() {
         json["commands"].as_array().unwrap().len() >= 10,
         "should list many commands"
     );
+}
+
+#[test]
+fn capabilities_declares_token_engine_kernel_orifices() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let kernel = &json["kernel_orifices"];
+    assert_eq!(kernel["owner"], "tokenzero");
+    assert_eq!(kernel["api"], "zero_abi::TokenEngine");
+    assert_eq!(kernel["codemode_binding_status"], "noncanonical_v6_compat");
+    let methods = kernel["methods"]
+        .as_array()
+        .expect("kernel methods")
+        .iter()
+        .map(|v| v.as_str().expect("method name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        ["measure", "certify", "project", "compress", "expand"]
+    );
+    let facing = kernel["model_facing"]
+        .as_array()
+        .expect("model_facing")
+        .iter()
+        .map(|v| v.as_str().expect("z.*"))
+        .collect::<Vec<_>>();
+    for name in ["z.measure", "z.project", "z.compress", "z.expand"] {
+        assert!(facing.contains(&name), "missing {name}");
+    }
+    assert!(
+        !facing
+            .iter()
+            .any(|name| *name == "z.read" || *name == "z.find" || *name == "z.run"),
+        "z.read/z.find/z.run are ZeroStack host ops, not TokenEngine"
+    );
+    let not_engine = kernel["not_token_engine"]
+        .as_array()
+        .expect("not_token_engine")
+        .iter()
+        .map(|v| v.as_str().expect("name"))
+        .collect::<Vec<_>>();
+    for name in [
+        "z.read",
+        "z.find",
+        "z.run",
+        "zero.read",
+        "zero.token.expand",
+    ] {
+        assert!(not_engine.contains(&name), "must disclaim {name}");
+    }
+    assert_eq!(
+        json["surface_parity"]["name_contract"]["kernel"],
+        "TokenEngine measure/certify/project/compress/expand via z.measure/z.project/z.compress/z.expand"
+    );
+    assert_eq!(
+        json["aggregate_codemode"]["status"],
+        "noncanonical_v6_compat"
+    );
+}
+
+#[test]
+fn clap_visible_subcommands_are_in_capabilities() {
+    let help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    let mut names = Vec::new();
+    let mut in_commands = false;
+    for line in stdout.lines() {
+        if line.starts_with("Commands:") {
+            in_commands = true;
+            continue;
+        }
+        if in_commands {
+            if line.is_empty() {
+                break;
+            }
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.split_whitespace().next() {
+                if name.starts_with('-') || name == "help" {
+                    continue;
+                }
+                names.push(name.trim_end_matches(',').to_string());
+            }
+        }
+    }
+    assert!(
+        names.contains(&"read".to_string()) && names.contains(&"expand".to_string()),
+        "clap --help must list live verbs; got {names:?}"
+    );
+
+    let caps = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(caps.status.success());
+    let json: Value = serde_json::from_slice(&caps.stdout).unwrap();
+    let commands = json["commands"].as_array().expect("commands");
+    let experimental = json["experimental_commands"]
+        .as_array()
+        .expect("experimental_commands");
+    for name in &names {
+        let in_commands = commands.iter().any(|row| {
+            let listed = row["name"].as_str().unwrap_or("");
+            listed == name
+                || listed.starts_with(&format!("{name} "))
+                || row["aliases"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias.as_str() == Some(name)))
+        });
+        let in_experimental = experimental.iter().any(|row| row.as_str() == Some(name));
+        assert!(
+            in_commands || in_experimental,
+            "clap visible {name:?} is missing from capabilities.commands and experimental_commands"
+        );
+    }
 }
 
 #[test]

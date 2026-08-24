@@ -492,6 +492,7 @@ pub fn capabilities_json() -> serde_json::Value {
                 "commands_by_name",
                 "mcp_tools",
                 "surface_parity",
+                "kernel_orifices",
                 "exit_codes",
                 "env_vars"
             ]
@@ -608,7 +609,8 @@ pub fn capabilities_json() -> serde_json::Value {
             "name_contract": {
                 "mcp": "tz_* tool names",
                 "cli": "bare verbs selected by cli_verb",
-                "codemode": "dotted bindings selected by codemode_binding"
+                "codemode": "dotted V6-compat aggregate bindings (zero.read, zero.token.*); not the TokenEngine z.* kernel API",
+                "kernel": "TokenEngine measure/certify/project/compress/expand via z.measure/z.project/z.compress/z.expand"
             },
             "route_relationships": {
                 "shared_operation_surface_specific_contract": "the operation ABI owns classic MCP and aggregate binding argument schemas; CLI spelling, envelopes, and availability remain surface-specific",
@@ -662,7 +664,24 @@ pub fn capabilities_json() -> serde_json::Value {
             "owner": "zerostack",
             "local_execution": false,
             "binding_source": "mcp_tools[].codemode_binding",
-            "worker_transport": "raw-worker-v2"
+            "worker_transport": "raw-worker-v2",
+            "status": "noncanonical_v6_compat"
+        },
+        "kernel_orifices": {
+            "owner": "tokenzero",
+            "api": "zero_abi::TokenEngine",
+            "methods": ["measure", "certify", "project", "compress", "expand"],
+            "model_facing": ["z.measure", "z.project", "z.compress", "z.expand"],
+            "certify": "TokenEngine::certify is the kernel honesty gate, not a model-facing z.* verb",
+            "not_token_engine": [
+                "z.read",
+                "z.find",
+                "z.run",
+                "zero.read",
+                "zero.token.expand"
+            ],
+            "codemode_binding_status": "noncanonical_v6_compat",
+            "note": "TokenZero owns measurement, projection, compression, and expand. z.read/z.find/z.run are ZeroStack host operations that may invoke TokenEngine at response boundaries. Dotted zero.* CodeMode bindings are aggregate V6-compat, not the canonical kernel API."
         },
         "dangerous_operations": [
             {
@@ -775,11 +794,11 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
 
-## MCP, CLI, and Aggregate Bindings
+## Kernel, MCP, CLI, and Aggregate Bindings
 
-Classic MCP uses `tz_*` names and the local CLI uses bare verbs. `codemode_binding` rows are aggregate ZeroStack routes such as `zero.read`; TokenZero does not execute plans locally. The aggregate host composes these bindings and dispatches through the canonical planner-free raw-worker v2 artifact.
+TokenZero's canonical TokenEngine orifices are `z.measure`, `z.project`, `z.compress`, and `z.expand` (plus `certify` as the honesty gate). Classic MCP uses `tz_*` names and the local CLI uses bare verbs. `codemode_binding` rows such as `zero.read` / `zero.token.*` are aggregate ZeroStack V6-compat routes, not the model-facing kernel API. TokenZero does not execute plans locally.
 
-Run `tokenzero capabilities --json` to inspect exact classic MCP availability, CLI routes, aggregate bindings, schemas, refs, effects, and output contracts.
+Run `tokenzero capabilities --json` to inspect `kernel_orifices`, classic MCP availability, CLI routes, aggregate bindings, schemas, refs, effects, and output contracts.
 "#
 }
 

@@ -24,6 +24,7 @@ pub const GAUNTLET_WORKSPACE_ENV: &str = "TOKENZERO_GAUNTLET_WORKSPACE";
 
 pub const FORBIDDEN_MCP_FEATURE_ID: &str = "F-TZ-018";
 pub const STRICT_MODE_FEATURE_ID: &str = "F-TZ-011";
+pub const KERNEL_ORIFICES_FEATURE_ID: &str = "F-TZ-021";
 
 /// Truncate to 6 decimal places (toward zero). x86 vs ARM vs WASM LSB noise.
 pub fn truncate_score(x: f64) -> f64 {
