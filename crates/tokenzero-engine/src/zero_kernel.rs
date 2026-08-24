@@ -232,6 +232,20 @@ impl TokenEngine for ZeroTokenEngine {
         let visible = bounded_utf8(&source, &marker, limit);
         let visible_source_bytes = visible.strip_suffix(&marker).map_or(0, str::len) as u64;
         let visible_count = self.count(visible.as_bytes());
+        // Never-worse vs the raw payload: a handle capsule that costs more
+        // tokens than sending the source is not a projection. Pass through
+        // even when the byte budget is tight — TokenZero's authority is
+        // tokens, not framing bytes.
+        if visible_count.visible > raw_accounting.billed
+            && let Ok(text) = std::str::from_utf8(&request.bytes)
+        {
+            return Ok(ProjectionResult {
+                visible: text.to_owned(),
+                visible_source_bytes: request.bytes.len() as u64,
+                exact: None,
+                accounting: raw_accounting,
+            });
+        }
         Ok(ProjectionResult {
             visible,
             visible_source_bytes,
@@ -318,30 +332,41 @@ impl TokenEngine for ZeroTokenEngine {
                     // honest digest; otherwise keep any strictly bounded view.
                     let honest = (alt.visible_tokens as u64) < raw_accounting.billed;
                     let smaller = alt.text.len() < capsule.text.len();
+                    // Honesty first: never adopt a smaller-byte view that
+                    // costs more tokens than the raw payload.
                     if honest && smaller {
                         best = Some(alt);
                         break;
                     }
-                    if smaller && best.is_none() {
-                        best = Some(alt);
-                    }
                 }
             }
-            if let Some(alt) = best {
-                // Ensure the chosen digest is still honest; if the token-
-                // budget-enforced view somehow still costs >= billed (tiny
-                // budgets / pathological markers), force a final budget clamp
-                // that guarantees visible < billed for the reported size.
-                if (alt.visible_tokens as u64) < raw_accounting.billed
-                    || alt.text.len() < capsule.text.len()
-                {
-                    capsule = alt;
-                }
+            if let Some(alt) = best
+                && (alt.visible_tokens as u64) < raw_accounting.billed
+            {
+                capsule = alt;
             }
         }
         let (visible, visible_accounting, truncated) =
             self.clamp_visible_to_budget(&capsule.text, u64::from(request.max_tokens));
         let visible_tokens = visible_accounting.billed.min(u64::from(request.max_tokens));
+        // Never-worse vs raw payload. A wrapper/handle that costs more than
+        // the source is not a compression; omit nothing and do not report a
+        // save via saturating_sub(visible) looking like break-even.
+        if visible_tokens > raw_accounting.billed {
+            return Ok(CompressionResult {
+                visible: text.to_owned(),
+                exact: handle,
+                truncated: false,
+                omitted_tokens: 0,
+                accounting: TokenAccounting {
+                    tokenizer: raw_accounting.tokenizer.clone(),
+                    billed: raw_accounting.billed,
+                    visible: raw_accounting.billed,
+                    cached: raw_accounting.cached,
+                    certified: raw_accounting.certified,
+                },
+            });
+        }
         Ok(CompressionResult {
             visible: visible.to_owned(),
             exact: handle,

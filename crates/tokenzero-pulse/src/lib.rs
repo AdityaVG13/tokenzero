@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fs4::{FileExt, TryLockError};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::{savings_ratio, PULSE_SCHEMA_VERSION};
+use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio, savings_ratio_u64};
 
 mod eprocess;
 pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
@@ -266,7 +266,7 @@ pub enum PulseFileOpenMode {
 
 #[cfg(unix)]
 pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
-    use rustix::fs::{openat, Mode, OFlags, CWD};
+    use rustix::fs::{CWD, Mode, OFlags, openat};
 
     let access = match mode {
         PulseFileOpenMode::Append => OFlags::WRONLY | OFlags::APPEND,
@@ -1051,6 +1051,7 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
     if report.skipped_lines > 0 {
         report.status = "degraded".to_string();
     }
+    // Signed: spent>raw is a negative ratio, never a clamped 0% save.
     report.visible_savings = savings_ratio(report.raw_tokens, report.visible_tokens);
     report.recovery_adjusted_savings = savings_ratio(
         report.raw_tokens,
@@ -1113,7 +1114,10 @@ simple_fns! {
 pub fn hash_hint(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
+    hasher.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 // Session Ledger (bfu): rocket-equation token-turn pricing (mass × turns remaining).
@@ -1201,11 +1205,7 @@ struct SessionAcc {
 }
 
 fn signed_savings_ratio(raw: u64, charged: u64) -> f64 {
-    if raw == 0 {
-        0.0
-    } else {
-        (raw as f64 - charged as f64) / raw as f64
-    }
+    savings_ratio_u64(raw, charged)
 }
 
 impl SessionLedgerReport {
@@ -1441,4 +1441,3 @@ impl SessionLedgerReport {
         out
     }
 }
-

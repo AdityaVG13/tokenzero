@@ -11,7 +11,7 @@
       "fixture_id": "project-capsule",
       "tier": "Tier2Canonical",
       "source": "curated-corpus",
-      "sha256": "3eaec389f39a44b5a063efaca4d23b3756c07f0e2187ed86a38fe6a9afb65baf",
+      "sha256": "69e3c25c61bff67f70460fb7740efcf8962127d83b47613d0cf692e6909d04f5",
       "source_artifact_path": "tests/fixtures/tier2/curated-corpus/project-capsule.golden",
       "canonicalization_fn": "json_project_capsule_vs_passthrough",
       "equivalence_predicate": "canonical_json_eq",

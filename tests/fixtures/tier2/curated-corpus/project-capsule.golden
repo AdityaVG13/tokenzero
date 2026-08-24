@@ -1,15 +1,14 @@
 {
   "accounting": {
-    "billed": 1,
+    "billed": 80,
     "cached": 0,
     "certified": false,
     "tokenizer": "estimator:tokenzero-lexical",
-    "visible": 10
+    "visible": 16
   },
-  "exact": "z://blob/22dee5ebfe8248a5fe4fb663016d8524c9a61eb36b7f7be8bb57057613230447",
+  "exact": "z://blob/a58f45f32974906aba5aa7b0214d4d272a1e0eb4e637c9d5c719a0e87775bd42",
   "passthrough": false,
   "tier": "Tier2Canonical",
-  "visible": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nexact: z://blob/22dee5ebfe8248a5fe4fb663016d8524c9a61eb36b7f7be8bb57057613230447",
+  "visible": "tok00 tok01 tok02 tok03 tok04 tok05 tok\nexact: z://blob/a58f45f32974906aba5aa7b0214d4d272a1e0eb4e637c9d5c719a0e87775bd42",
   "visible_source_bytes": 39
 }
-

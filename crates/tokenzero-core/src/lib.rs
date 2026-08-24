@@ -191,7 +191,8 @@ impl Accounting {
     /// Exact-expand payloads that also appear in `visible_tokens` are counted
     /// in both on purpose: the hub zero-ledger receipt treats that overlap as
     /// conservative (understates savings). `used` is "shown or recovered",
-    /// not a partition of disjoint masses (tokenzero-73yc).
+    /// not a partition of disjoint masses (tokenzero-73yc). Signed: spent>raw
+    /// is a negative ratio, not a clamped 0% save.
     pub fn recovery_adjusted_savings_ratio(&self) -> f64 {
         savings_ratio(
             self.raw_tokens,
@@ -541,15 +542,11 @@ fn finalize_capsule_omission(
             }
             let declared_tokens = count_tokens(&declared);
             let raw_full_tokens = count_tokens(original_trimmed);
-            if declared_tokens >= raw_full_tokens && capsule.mode != Mode::Exact {
-                // Inflation guard: with no exact ref to point at, the lossy
-                // declaration plus summary can cost more tokens than the raw
-                // bytes it replaces (tiny inputs / budgets). Emit the raw text
-                // instead: nothing is omitted, no declaration is required, the
-                // visible cost never exceeds the raw cost, and the decision is
-                // budget-independent so visible cost stays monotone in budget.
-                // Exact mode is exempt: its whole point is hiding the payload,
-                // so falling back to raw text would break that contract.
+            if declared_tokens >= raw_full_tokens {
+                // Inflation guard: a lossy declaration plus summary that costs
+                // more than the raw payload is not a compression. Exact mode is
+                // not exempt — hiding one token behind a 10-token stub is still
+                // worse than the raw payload.
                 capsule.text = original_trimmed.to_string();
                 capsule.visible_tokens = raw_full_tokens;
                 capsule.omitted_lines = 0;
@@ -566,7 +563,24 @@ fn finalize_capsule_omission(
             }
         }
     }
-    validated_capsule(capsule, original)
+    validated_capsule(apply_never_worse_passthrough(capsule, original), original)
+}
+
+/// A capsule whose visible cost exceeds the raw payload is not a save.
+/// Emit the payload itself so callers cannot report spent>raw as compression.
+fn apply_never_worse_passthrough(mut capsule: Capsule, original: &str) -> Capsule {
+    let raw_text = original.trim_end();
+    let raw_count = count_tokens(raw_text);
+    if raw_count < capsule.visible_tokens {
+        capsule.text = raw_text.to_string();
+        capsule.visible_tokens = raw_count;
+        capsule.omitted_lines = 0;
+        capsule.exact_refs.clear();
+        capsule.lossy_spans.clear();
+        capsule.lossy_policy_id = None;
+        capsule.mode = Mode::Passthrough;
+    }
+    capsule
 }
 
 pub fn make_capsule(
@@ -621,15 +635,14 @@ pub fn make_capsule_with_recovery_ref(
         visible = enforce_token_budget_with_ref(&visible, max_tokens, exact_ref.as_deref());
     }
     let mut visible_tokens = count_tokens(&visible);
-    if policy != Mode::Exact
-        && (max_tokens == 0 || raw_tokens <= max_tokens)
-        && visible_tokens > raw_tokens
-    {
+    let mut mode = mode;
+    if visible_tokens > raw_tokens {
         let fallback = text.trim_end().to_string();
         let fallback_tokens = count_tokens(&fallback);
         if fallback_tokens < visible_tokens {
             visible_tokens = fallback_tokens;
             visible = fallback;
+            mode = Mode::Passthrough;
         }
     }
     finalize_capsule_omission(
@@ -1861,6 +1874,44 @@ pub use tokens::{
     active_tokenizer_metadata, count_tokens, count_tokens_for_model, enforce_token_budget,
     enforce_token_budget_with_ref, pack_to_token_boundary, pack_to_token_boundary_for_model,
     pack_to_token_boundary_for_model_with_char_limit, pack_to_token_boundary_with_char_limit,
-    prefix_end_for_kept_lines, savings_ratio, sha256_hex, tokenizer_metadata,
+    prefix_end_for_kept_lines, savings_ratio, savings_ratio_u64, sha256_hex, tokenizer_metadata,
 };
 
+#[cfg(test)]
+mod never_worse_capsule_tests {
+    use super::{Mode, count_tokens, make_capsule, make_capsule_with_recovery_ref, savings_ratio};
+
+    #[test]
+    fn exact_stub_that_costs_more_than_raw_passthroughs() {
+        let text = "hi";
+        let capsule = make_capsule(text, Mode::Exact, 64, None).expect("capsule");
+        assert_eq!(capsule.text, text);
+        assert_eq!(capsule.visible_tokens, count_tokens(text));
+        assert_eq!(capsule.mode, Mode::Passthrough);
+        assert_eq!(
+            savings_ratio(capsule.raw_tokens, capsule.visible_tokens),
+            0.0
+        );
+    }
+
+    #[test]
+    fn recovery_handle_wrapper_does_not_inflate_tiny_payload() {
+        let text = "hi";
+        let capsule = make_capsule_with_recovery_ref(
+            text,
+            count_tokens(text),
+            Mode::Exact,
+            64,
+            None,
+            Some("z://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#B0-2"),
+        )
+        .expect("capsule");
+        assert_eq!(capsule.text.trim_end(), text);
+        assert!(
+            capsule.visible_tokens <= count_tokens(text),
+            "visible={} raw={}",
+            capsule.visible_tokens,
+            count_tokens(text)
+        );
+    }
+}

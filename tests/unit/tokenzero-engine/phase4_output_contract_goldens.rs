@@ -7,16 +7,18 @@
 //! - **Tier 3 logical** (`Tier3Logical`): measure/account 4-tuple; estimator
 //!   counts are logical (same disclosed heuristic), never claimed byte-exact BPE.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokenzero_engine::{
-    account_mass, estimator_tokenizer_id, tiktoken_tokenizer_id, AccountMass, ZeroTokenEngine,
-    BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID,
+    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, ZeroTokenEngine, account_mass,
+    estimator_tokenizer_id, tiktoken_tokenizer_id,
 };
 use tokenzero_pulse::PulseEvent;
-use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
-use zero_abi::{ExpandOptions, ProjectionRequest, TokenAccounting, TokenEngine};
-use zerostack_test_support::{test_invocation, TempWorkspace};
+use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle, ScenarioAgreement, scenario};
+use zero_abi::{
+    CompressionRequest, ExpandOptions, ProjectionRequest, TokenAccounting, TokenEngine,
+};
+use zerostack_test_support::{TempWorkspace, test_invocation};
 
 const TIER1_EXPAND: &str =
     include_str!("../../fixtures/tier1/curated-corpus/expand-hello-world.golden");
@@ -41,6 +43,13 @@ const REPRO: &str =
 const PAYLOAD: &[u8] = b"hello world";
 
 fn capsule_source() -> String {
+    (0..80)
+        .map(|i| format!("tok{i:02}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn framing_overhead_source() -> String {
     "a".repeat(200)
 }
 
@@ -219,6 +228,12 @@ fn tier2_project_capsule_matches_canonical_golden() {
         capsule_source(),
         "capsule is not passthrough"
     );
+    assert!(
+        result.accounting.visible < result.accounting.billed,
+        "honest capsule must save vs raw payload (visible={} billed={})",
+        result.accounting.visible,
+        result.accounting.billed
+    );
     let expanded = engine
         .expand(&invocation, handle, ExpandOptions::default())
         .expect("expand capsule handle");
@@ -372,30 +387,92 @@ fn checked_in_goldens_match_checksums_and_tier_labels() {
 }
 
 #[test]
-fn account_mass_records_capsule_framing_overhead_without_clamping() {
+fn account_mass_framing_overhead_passthroughs_never_worse() {
     stamp();
+    let pair = GauntletIdentityPair::new(GauntletOracle::Spec);
     let (_ws, engine, invocation) = engine();
+    let source = framing_overhead_source();
     let result = engine
         .project(
             &invocation,
             ProjectionRequest {
-                bytes: capsule_source().as_bytes().to_vec(),
+                bytes: source.as_bytes().to_vec(),
                 visible_byte_limit: 120,
                 media_type: "text/plain; charset=utf-8".into(),
             },
         )
-        .expect("capsule");
+        .expect("project");
     let mass = account_mass(&result.accounting);
-    // 200 'a' bytes are one lexical token. The byte budget forces a handle
-    // capsule whose marker costs more visible tokens than the source.
-    // Tier 3 records spent > raw; it does not clamp spent down to fake a save.
+    match scenario(
+        "project-framing-overhead-never-worse",
+        pair,
+        || Ok(mass),
+        || {
+            if mass.spent > mass.raw {
+                Err("never-worse: capsule spent exceeds raw payload")
+            } else {
+                Ok(())
+            }
+        },
+    ) {
+        ScenarioAgreement::BothOk(_) => {}
+        ScenarioAgreement::BothErr { .. } => {
+            panic!("subject Ok / spec Err is the hard-fail shape; both-error is not this case")
+        }
+    }
     assert_eq!(mass.raw, 1);
-    assert_eq!(mass.spent, 10);
+    assert_eq!(mass.spent, 1);
     assert!(
-        mass.spent > mass.raw,
-        "framing-overhead case must stay visible in the account golden"
+        result.exact.is_none(),
+        "worse-than-raw capsule must passthrough"
+    );
+    assert_eq!(result.visible, source);
+    assert_eq!(result.accounting.tokenizer, LEXICAL_ESTIMATOR_ID);
+    assert!(
+        result.accounting.tokenizer.starts_with("estimator:"),
+        "unlabeled estimate is not a tokenizer id"
     );
     assert_eq!(mass.recovered, 0);
-    assert_eq!(result.accounting.visible, mass.spent);
-    assert_eq!(result.accounting.billed, mass.raw);
+}
+
+#[test]
+fn compress_tiny_exact_is_never_worse_than_raw() {
+    stamp();
+    let pair = GauntletIdentityPair::new(GauntletOracle::Spec);
+    let (_ws, engine, invocation) = engine();
+    let source = "hi";
+    let result = engine
+        .compress(
+            &invocation,
+            CompressionRequest {
+                bytes: source.as_bytes().to_vec(),
+                max_tokens: 64,
+                mode: "exact".into(),
+                label: None,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("compress");
+    let mass = account_mass(&result.accounting);
+    match scenario(
+        "compress-tiny-exact-never-worse",
+        pair,
+        || Ok(mass),
+        || {
+            if mass.spent > mass.raw {
+                Err("never-worse: compress spent exceeds raw payload")
+            } else {
+                Ok(())
+            }
+        },
+    ) {
+        ScenarioAgreement::BothOk(_) => {}
+        ScenarioAgreement::BothErr { .. } => {
+            panic!("subject Ok / spec Err is the hard-fail shape; both-error is not this case")
+        }
+    }
+    assert!(mass.spent <= mass.raw);
+    assert_eq!(result.omitted_tokens, 0);
+    assert_eq!(result.visible.trim_end(), source);
+    assert!(result.accounting.tokenizer.starts_with("estimator:"));
 }

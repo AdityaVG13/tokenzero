@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 
-
 /// Lookup table for hex nibble encoding.
 pub(crate) const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
 
@@ -433,21 +432,39 @@ pub(crate) fn count_tokens_tail(text: &str, start_byte_offset: usize) -> usize {
     tokens
 }
 
-/// Fraction of raw tokens avoided, bounded to the meaningful savings range.
+/// Fraction of raw tokens avoided. Negative when `used_tokens` exceeds raw.
 ///
-/// When an envelope is larger than its input, the raw counts still expose that
-/// overhead; a "savings" ratio must not report a negative percentage.
+/// Clamping overhead to `0.0` used to report a 0% *save* for spent>raw
+/// envelopes. Pulse and capsule accounting must show the signed cost instead.
 pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
     // `usize` → `u64` is lossless on every supported target.
     savings_ratio_u64(raw_tokens as u64, used_tokens as u64)
 }
 
-/// Width-preserving savings ratio for class-typed `u64` token counts.
-pub(crate) fn savings_ratio_u64(raw_tokens: u64, used_tokens: u64) -> f64 {
+/// Width-preserving signed savings ratio for class-typed `u64` token counts.
+pub fn savings_ratio_u64(raw_tokens: u64, used_tokens: u64) -> f64 {
     if raw_tokens == 0 {
         return 0.0;
     }
-    (1.0 - (used_tokens as f64 / raw_tokens as f64)).max(0.0)
+    1.0 - (used_tokens as f64 / raw_tokens as f64)
+}
+
+#[cfg(test)]
+mod savings_ratio_tests {
+    use super::{savings_ratio, savings_ratio_u64};
+
+    #[test]
+    fn spent_above_raw_is_negative_not_a_clamped_save() {
+        let ratio = savings_ratio(10, 15);
+        assert!(
+            ratio < 0.0,
+            "spent>raw must not report a non-negative save, got {ratio}"
+        );
+        assert!((ratio - (-0.5)).abs() < 1e-12);
+        assert_eq!(savings_ratio(10, 10), 0.0);
+        assert!((savings_ratio(10, 5) - 0.5).abs() < 1e-12);
+        assert!(savings_ratio_u64(4, 10) < 0.0);
+    }
 }
 
 pub fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
@@ -459,4 +476,3 @@ pub fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
         .nth(kept_lines - 1)
         .map_or(text.len(), |(index, _)| index)
 }
-
