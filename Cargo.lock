@@ -1440,7 +1440,6 @@ dependencies = [
  "tokenzero-engine",
  "tokenzero-install",
  "tokenzero-pulse",
- "tokenzero-recovery",
  "tokenzero-runtime",
  "tokenzero-test-support",
 ]
@@ -1480,6 +1479,7 @@ dependencies = [
  "tiktoken-rs",
  "tokenzero-core",
  "tokenzero-filters",
+ "tokenzero-kernel",
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",

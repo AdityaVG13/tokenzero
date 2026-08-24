@@ -1,7 +1,7 @@
 //! Certify primitive: re-measurement must be deterministic, catch tampered
 //! bytes, and distinguish the BPE path from the lexical estimate path.
 
-use tokenzero_engine::ZeroTokenEngine;
+use tokenzero_kernel::ZeroTokenEngine;
 use zero_abi::{CompressionRequest, EngineInvocation, ExpandOptions, TokenAccounting, TokenEngine};
 use zerostack_conformance::token_engine;
 use zerostack_test_support::{TempWorkspace, test_invocation};

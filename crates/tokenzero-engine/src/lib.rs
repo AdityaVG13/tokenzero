@@ -9,6 +9,10 @@
 //! This crate must not depend on FastMCP, MCP JSON-RPC framing, or the CodeMode
 //! sandbox. Transport adapters (`tokenzero-mcp`, CLI) depend inward and call
 //! [`dispatch_operation`] exactly once per domain op.
+//!
+//! `zero_abi::TokenEngine` (`ZeroTokenEngine`) is owned by `tokenzero-kernel`.
+//! This crate does not re-export it. CLI talks to recovery through the
+//! operator facades in [`cache_maintenance`], not `tokenzero-recovery` internals.
 
 pub mod action_cache_key;
 pub mod admission;
@@ -64,7 +68,6 @@ pub mod wall;
 pub mod warmkeeper;
 pub mod workspace;
 pub mod write_ladder;
-pub mod zero_kernel;
 
 pub use action_cache_key::{
     ACTIONCACHE_KEY_SCHEMA, ActionCacheKeyInput, ConsistencyClass, action_cache_envelope,
@@ -85,7 +88,10 @@ pub use cache_crossover::{
     TOKEN_COST_PPM_SCALE, decide_cache_crossover,
 };
 pub use cache_maintenance::{
-    cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
+    OperatorMigrationOutcome, cache_maintenance, cache_maintenance_coalesced,
+    cache_migrate_cleanup, cache_migrate_refs, cache_migrate_rollback, cache_migrate_verify,
+    cachezero_stats_json, prune_stale_cache, recovery_blob_status_json, recovery_migration_state,
+    session_pack, shell_spill_dir,
 };
 pub use collect::{find_rg_in_path, parse_rg_line};
 pub use dispatcher::{
@@ -315,9 +321,3 @@ pub enum InitializeState {
     /// Client completed initialize + initialized; tools/list and peers allowed.
     Ready,
 }
-
-pub use zero_kernel::{
-    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, TokenizerIdPreflightError,
-    UNLABELED_ESTIMATE_TOKENIZER_PREFIX, ZeroTokenEngine, account_mass, estimator_tokenizer_id,
-    preflight_tokenizer_id, tiktoken_tokenizer_id,
-};

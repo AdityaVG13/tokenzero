@@ -29,19 +29,15 @@ const REPORTABLE_EXACT: &[&str] = &[
     "grep",
     "tree",
     "glob",
+    "z.measure",
+    "z.project",
+    "z.compress",
+    "z.expand",
 ];
 
-/// Namespaced engine / product prefixes (tightened vs open `zero_` / `tz_` alone).
-const REPORTABLE_PREFIXES: &[&str] = &[
-    "zero.token.",
-    "zero.fs.",
-    "zero.graph.",
-    "zero.",
-    "tz_",
-    "tokenzero",
-    "fszero",
-    "graphzero",
-];
+/// TokenZero-owned prefixes. Sibling engines (FSZero/GraphZero) and V6
+/// `zero.fs.*` / `zero.graph.*` are not this crate's report surface.
+const REPORTABLE_PREFIXES: &[&str] = &["zero.token.", "tz_", "tokenzero"];
 
 /// Returns true if `name` is a reportable tool/surface for field issue reports.
 pub fn is_reportable_tool_name(name: &str) -> bool {
@@ -77,9 +73,9 @@ pub fn build_tool_issue_report(
     let tool = normalize_report_tool_name(tool);
     if !is_reportable_tool_name(&tool) {
         return Err(format!(
-            "tool name not reportable: {tool}. Accepted: zero_execute, zerostack, tz_execute_code, \
-             zero.token.*/zero.fs.*/zero.graph.*, and TokenZero tz_* tools. \
-             See resource://tokenzero/tools."
+            "tool name not reportable: {tool}. Accepted: zero_execute, zerostack, tz_* / \
+             tokenzero*, zero.token.*, and TokenEngine z.measure|z.project|z.compress|z.expand. \
+             FSZero/GraphZero names are not TokenZero's report surface."
         ));
     }
     let summary = summary.trim();

@@ -426,7 +426,7 @@ fn worker_token_accounting(
     let tokenizer_id = accounting
         .as_ref()
         .map(|accounting| accounting.tokenizer_id.clone())
-        .unwrap_or_else(|| crate::BYTES_ESTIMATOR_ID.to_string());
+        .unwrap_or_else(|| tokenzero_core::BYTES_ESTIMATOR_ID.to_string());
     let count_kind = if tokenizer_id.starts_with("estimator:") {
         raw_worker_protocol::WorkerTokenCountKind::Estimate
     } else {

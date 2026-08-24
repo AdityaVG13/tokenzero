@@ -105,31 +105,6 @@ where
     emit_value(run(output_json, output_md)?, as_json)
 }
 
-fn migration_manifest_path(cache_path: &std::path::Path) -> std::path::PathBuf {
-    cache_path
-        .parent()
-        .unwrap_or(cache_path)
-        .join("migration-manifest.json")
-}
-
-fn with_legacy_migration<R>(
-    root: Option<PathBuf>,
-    cache_path: Option<PathBuf>,
-    f: impl FnOnce(&mut tokenzero_recovery::migration::LegacyMigration<'_>) -> R,
-) -> R {
-    let root = tokenzero_work_root(root);
-    let cache = resolve_recovery_cache_path(&root, cache_path);
-    let manifest = migration_manifest_path(&cache);
-    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-    let cas = tokenzero_recovery::shared_cas::SharedCas::new(
-        tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
-    );
-    let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-    let mut migration =
-        tokenzero_recovery::migration::LegacyMigration::new(&mut adapter, &cas, Some(manifest));
-    f(&mut migration)
-}
-
 fn emit_migration_report(
     json: String,
     mut text: String,
@@ -154,17 +129,18 @@ fn emit_migration_report(
     Ok(())
 }
 
-macro_rules! cache_migrate {
-    ($root:expr, $cache:expr, $json:expr, $safe:expr, $body:expr) => {{
-        let report = with_legacy_migration($root, $cache, $body);
-        emit_migration_report(
-            report.to_json(),
-            report.to_text(),
-            report.is_failure(),
-            $json,
-            $safe,
-        )
-    }};
+fn emit_operator_migration(
+    outcome: tokenzero_engine::OperatorMigrationOutcome,
+    as_json: bool,
+    safe_alternative: &str,
+) -> Result<()> {
+    emit_migration_report(
+        outcome.json,
+        outcome.text,
+        outcome.failed,
+        as_json,
+        safe_alternative,
+    )
 }
 
 macro_rules! dispatch_command {
@@ -1232,11 +1208,9 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     report["effective_store_root"] =
         json!(store.effective_store_root.as_ref().map(|p| path_display(p)));
     report["effective_cache_path"] = json!(path_display(&store.effective_cache_path));
-    report["migration"] =
-        tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()))
-            .migration_state();
+    report["migration"] = tokenzero_engine::recovery_migration_state(&store.effective_cache_path);
     report["recovery_blobs"] =
-        tokenzero_recovery::recovery_blob_status(&store.effective_cache_path);
+        tokenzero_engine::recovery_blob_status_json(&store.effective_cache_path);
     report["engine_binaries"] = tokenzero_engine::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
         let mismatch = store.store_project_mismatch;
@@ -1347,11 +1321,10 @@ fn handle_stats(args: StatsArgs) -> Result<serde_json::Value> {
     let root = tokenzero_work_root(args.root);
     let cache = resolve_recovery_cache_path(&root, args.cache_path);
     if args.cachezero {
-        let store = tokenzero_recovery::store_root_from_cache_path(&cache);
-        return Ok(tokenzero_recovery::cachezero_stats_json(&store));
+        return Ok(tokenzero_engine::cachezero_stats_json(&cache));
     }
     let mut report = serde_json::to_value(report_for_path(&default_ledger_path(&root))?)?;
-    report["recovery_blobs"] = tokenzero_recovery::recovery_blob_status(&cache);
+    report["recovery_blobs"] = tokenzero_engine::recovery_blob_status_json(&cache);
     Ok(report)
 }
 
@@ -1537,40 +1510,37 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let root = tokenzero_work_root(args.root);
             let cache = resolve_recovery_cache_path(&root, args.cache_path);
             let dry_run = !args.apply;
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-            let mut report = store.prune_stale(dry_run).with_context(
-                || "cache prune failed; safe alternative: tokenzero cache prune --json",
-            )?;
-            report["maintenance"] = tokenzero_engine::cache_maintenance(&cache, dry_run);
+            let report = tokenzero_engine::prune_stale_cache(&cache, dry_run).map_err(|err| {
+                anyhow::anyhow!(
+                    "cache prune failed ({err}); safe alternative: tokenzero cache prune --json"
+                )
+            })?;
             emit_value(report, args.json)?;
         }
-        CacheCommand::MigrateRefs(args) => cache_migrate!(
-            args.root,
-            args.cache_path,
+        CacheCommand::MigrateRefs(args) => emit_operator_migration(
+            tokenzero_engine::cache_migrate_refs(args.root, args.cache_path, !args.apply),
             args.json,
             "tokenzero cache migrate-refs --json",
-            |m| m.run(!args.apply)
         )?,
-        CacheCommand::MigrateVerify(args) => cache_migrate!(
-            args.root,
-            args.cache_path,
+        CacheCommand::MigrateVerify(args) => emit_operator_migration(
+            tokenzero_engine::cache_migrate_verify(args.root, args.cache_path),
             args.json,
             "tokenzero cache migrate-refs --json",
-            |m| m.verify()
         )?,
-        CacheCommand::MigrateRollback(args) => cache_migrate!(
-            args.root,
-            args.cache_path,
+        CacheCommand::MigrateRollback(args) => emit_operator_migration(
+            tokenzero_engine::cache_migrate_rollback(args.root, args.cache_path, args.apply),
             args.json,
             "tokenzero cache migrate-rollback --json",
-            |m| m.rollback(args.apply)
         )?,
-        CacheCommand::MigrateCleanup(args) => cache_migrate!(
-            args.root,
-            args.cache_path,
+        CacheCommand::MigrateCleanup(args) => emit_operator_migration(
+            tokenzero_engine::cache_migrate_cleanup(
+                args.root,
+                args.cache_path,
+                args.apply,
+                args.confirm_cleanup,
+            ),
             args.json,
             "tokenzero cache migrate-verify --json",
-            |m| m.cleanup(args.apply, args.confirm_cleanup)
         )?,
     }
     Ok(())

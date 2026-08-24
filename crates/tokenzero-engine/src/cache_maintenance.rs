@@ -325,3 +325,101 @@ pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
 pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
     crate::recall::build_session_pack(cache_path, max_tokens)
 }
+
+/// Operator-facing recovery snapshot. CLI must not import recovery internals.
+pub fn recovery_migration_state(cache_path: &Path) -> Value {
+    tokenzero_recovery::RecoveryStore::new(Some(cache_path.to_path_buf())).migration_state()
+}
+
+pub fn recovery_blob_status_json(cache_path: &Path) -> Value {
+    tokenzero_recovery::recovery_blob_status(cache_path)
+}
+
+pub fn cachezero_stats_json(cache_path: &Path) -> Value {
+    tokenzero_recovery::cachezero_stats_json(&tokenzero_recovery::store_root_from_cache_path(
+        cache_path,
+    ))
+}
+
+pub fn prune_stale_cache(cache_path: &Path, dry_run: bool) -> Result<Value, String> {
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path.to_path_buf()));
+    let mut report = store
+        .prune_stale(dry_run)
+        .map_err(|error| error.to_string())?;
+    report["maintenance"] = cache_maintenance(cache_path, dry_run);
+    Ok(report)
+}
+
+/// Migration outcome owned by the engine so CLI does not name recovery types.
+#[derive(Debug, Clone)]
+pub struct OperatorMigrationOutcome {
+    pub json: String,
+    pub text: String,
+    pub failed: bool,
+}
+
+impl From<tokenzero_recovery::migration::MigrationReport> for OperatorMigrationOutcome {
+    fn from(report: tokenzero_recovery::migration::MigrationReport) -> Self {
+        Self {
+            json: report.to_json(),
+            text: report.to_text(),
+            failed: report.is_failure(),
+        }
+    }
+}
+
+fn with_legacy_migration<R>(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+    f: impl FnOnce(&mut tokenzero_recovery::migration::LegacyMigration<'_>) -> R,
+) -> R {
+    let root = crate::tokenzero_work_root(root);
+    let cache = crate::resolve_recovery_cache_path(&root, cache_path);
+    let manifest = cache
+        .parent()
+        .unwrap_or(&cache)
+        .join("migration-manifest.json");
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+    let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+        tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+    );
+    let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+    let mut migration =
+        tokenzero_recovery::migration::LegacyMigration::new(&mut adapter, &cas, Some(manifest));
+    f(&mut migration)
+}
+
+pub fn cache_migrate_refs(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+    dry_run: bool,
+) -> OperatorMigrationOutcome {
+    with_legacy_migration(root, cache_path, |migration| migration.run(dry_run)).into()
+}
+
+pub fn cache_migrate_verify(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+) -> OperatorMigrationOutcome {
+    with_legacy_migration(root, cache_path, |migration| migration.verify()).into()
+}
+
+pub fn cache_migrate_rollback(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+    apply: bool,
+) -> OperatorMigrationOutcome {
+    with_legacy_migration(root, cache_path, |migration| migration.rollback(apply)).into()
+}
+
+pub fn cache_migrate_cleanup(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+    apply: bool,
+    confirm_cleanup: bool,
+) -> OperatorMigrationOutcome {
+    with_legacy_migration(root, cache_path, |migration| {
+        migration.cleanup(apply, confirm_cleanup)
+    })
+    .into()
+}

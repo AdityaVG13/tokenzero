@@ -33,7 +33,6 @@ tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
 tokenzero-install = { path = "../tokenzero-install", version = "1.0.2", default-features = false }
 tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
-tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
 tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }
 
 [dev-dependencies]

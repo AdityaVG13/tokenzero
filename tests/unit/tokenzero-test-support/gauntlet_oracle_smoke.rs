@@ -295,6 +295,68 @@ fn hub_002_no_fszero_graphzero_crate_deps() {
             );
         }
     }
+
+    // Product src: rust imports / path-includes, not URI/comment/field names.
+    fn walk_rs(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path, &str, usize)) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let entry = entry.expect("src entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk_rs(&path, visit);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            for (idx, line) in std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+                .lines()
+                .enumerate()
+            {
+                visit(&path, line, idx);
+            }
+        }
+    }
+    for entry in std::fs::read_dir(&crates).expect("crates/") {
+        let src = entry.expect("crate dir").path().join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        walk_rs(&src, &mut |path, line, idx| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!")
+            {
+                return;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            let smuggled = lower.contains("use fszero")
+                || lower.contains("use graphzero")
+                || lower.contains("extern crate fszero")
+                || lower.contains("extern crate graphzero")
+                || lower.contains("fszero::")
+                || lower.contains("graphzero::");
+            assert!(
+                !smuggled,
+                "{}:{} smuggles sibling engine import: {trimmed}",
+                path.display(),
+                idx + 1
+            );
+            if path
+                .components()
+                .any(|c| c.as_os_str() == "tokenzero-kernel")
+            {
+                assert!(
+                    !lower.contains("tokenzero-engine/src"),
+                    "{}:{} kernel must not #[path]-include engine: {trimmed}",
+                    path.display(),
+                    idx + 1
+                );
+            }
+        });
+    }
 }
 
 #[test]
