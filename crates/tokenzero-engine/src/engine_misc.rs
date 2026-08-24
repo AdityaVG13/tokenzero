@@ -40,7 +40,17 @@ impl TokenZeroEngine {
             }
         }
         let mut repo_rows = Vec::new();
-        collect_tree(&root, &root, 3, false, 500, 0, &mut repo_rows);
+        let mut unreadable = 0usize;
+        collect_tree(
+            &root,
+            &root,
+            3,
+            false,
+            500,
+            0,
+            &mut repo_rows,
+            &mut unreadable,
+        );
         repo_rows.retain(|row| {
             !row.rel.contains("recovery-cache")
                 && !row.rel.contains("cache.json")
@@ -51,14 +61,17 @@ impl TokenZeroEngine {
                 && !row.rel.starts_with("gc.")
                 && !row.rel.starts_with(".tokenzero")
         });
-        stable_sections.push(format!(
-            "## repo-map\n{}",
-            repo_rows
-                .iter()
-                .map(|row| row.rel.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+        let mut repo_map = repo_rows
+            .iter()
+            .map(|row| row.rel.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if unreadable > 0 {
+            repo_map.push_str(&format!(
+                "\n# scan incomplete: {unreadable} unreadable paths"
+            ));
+        }
+        stable_sections.push(format!("## repo-map\n{repo_map}"));
         let operation_contract =
             serde_json::to_string_pretty(&tokenzero_core::operation_abi::contract_manifest())
                 .unwrap_or_default();
@@ -255,4 +268,3 @@ fn write_cache_pack_manifest(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
-

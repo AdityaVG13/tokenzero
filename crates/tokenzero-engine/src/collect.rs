@@ -15,6 +15,10 @@ pub(crate) struct SearchStats {
     /// rg `--threads` cap actually used. `1` is serial; omit from claims as
     /// concurrent search. Internal walker is also serial (`0` until set).
     pub(crate) search_threads: u32,
+    /// Directories or files the walker could not list/read, or rg exit 2
+    /// with empty stderr (`--no-messages` IO). A zero-hit with this > 0 is
+    /// not a proven miss.
+    pub(crate) unreadable_entries: usize,
 }
 
 /// Hard recursion bound for the internal directory walkers. Deep enough for
@@ -30,12 +34,21 @@ pub(crate) fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
-fn sorted_entries(path: &Path) -> Option<Vec<PathBuf>> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(path)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
+fn sorted_entries(path: &Path, unreadable: &mut usize) -> Option<Vec<PathBuf>> {
+    let reader = match fs::read_dir(path) {
+        Ok(reader) => reader,
+        Err(_) => {
+            *unreadable = unreadable.saturating_add(1);
+            return None;
+        }
+    };
+    let mut entries = Vec::new();
+    for entry in reader {
+        match entry {
+            Ok(entry) => entries.push(entry.path()),
+            Err(_) => *unreadable = unreadable.saturating_add(1),
+        }
+    }
     entries.sort();
     Some(entries)
 }
@@ -365,7 +378,15 @@ fn has_regex_repeat(pattern: &str) -> bool {
 }
 
 /// One extra agent-facing line after a zero-hit or truncated note.
-pub(crate) fn guidance_hint(tool: &str, query: &str, truncated: bool) -> Option<&'static str> {
+pub(crate) fn guidance_hint(
+    tool: &str,
+    query: &str,
+    truncated: bool,
+    unreadable: bool,
+) -> Option<&'static str> {
+    if unreadable {
+        return Some("scan skipped unreadable paths; a complete miss was not proven");
+    }
     if truncated {
         return Some("results truncated; narrow the path or raise max_files");
     }
@@ -378,8 +399,14 @@ pub(crate) fn guidance_hint(tool: &str, query: &str, truncated: bool) -> Option<
     }
 }
 
-pub(crate) fn with_guidance(note: String, tool: &str, query: &str, truncated: bool) -> String {
-    match guidance_hint(tool, query, truncated) {
+pub(crate) fn with_guidance(
+    note: String,
+    tool: &str,
+    query: &str,
+    truncated: bool,
+    unreadable: bool,
+) -> String {
+    match guidance_hint(tool, query, truncated, unreadable) {
         Some(hint) => format!("{note}\n# {hint}"),
         None => note,
     }
@@ -435,6 +462,19 @@ pub(crate) fn mark_budget_exhausted_miss(response: &mut ToolResponse) {
         code: "budget_exhausted".into(),
         message: "scan stopped on a budget before a complete miss could be proven".into(),
         repair: Some("raise max_files, narrow the path, or retry with a larger budget".into()),
+    });
+}
+
+/// Zero-hit after permission/IO skips is not "not found". Distinct from
+/// `budget_exhausted` so a harness cannot treat the miss as a complete scan.
+pub(crate) fn mark_unreadable_miss(response: &mut ToolResponse) {
+    if response.diagnostic.is_some() {
+        return;
+    }
+    response.diagnostic = Some(tokenzero_core::Diagnostic {
+        code: "scan_unreadable".into(),
+        message: "scan skipped unreadable paths before a complete miss could be proven".into(),
+        repair: Some("fix directory permissions or narrow the path to readable trees".into()),
     });
 }
 
@@ -509,39 +549,42 @@ pub(crate) fn collect_search(
             stats.truncated_by_wall = true;
             return;
         }
-        if let Ok(bytes) = fs::read(current) {
-            let text = String::from_utf8_lossy(&bytes);
-            let before = matches.len();
-            let path_display = current.display().to_string();
-            let rel_display = current
-                .strip_prefix(base)
-                .ok()
-                .filter(|rel| !rel.as_os_str().is_empty())
-                .map(|rel| rel.display().to_string())
-                .unwrap_or_else(|| path_display.clone());
-            for (idx, line) in text.lines().enumerate() {
-                if literal_substring_hit(line, query) {
-                    if matches.len() >= max_results {
-                        stats.truncated_by_results = true;
-                        break;
+        match fs::read(current) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let before = matches.len();
+                let path_display = current.display().to_string();
+                let rel_display = current
+                    .strip_prefix(base)
+                    .ok()
+                    .filter(|rel| !rel.as_os_str().is_empty())
+                    .map(|rel| rel.display().to_string())
+                    .unwrap_or_else(|| path_display.clone());
+                for (idx, line) in text.lines().enumerate() {
+                    if literal_substring_hit(line, query) {
+                        if matches.len() >= max_results {
+                            stats.truncated_by_results = true;
+                            break;
+                        }
+                        matches.push(SearchMatch {
+                            base: base.display().to_string(),
+                            path: path_display.clone(),
+                            rel: rel_display.clone(),
+                            line: idx + 1,
+                            text: line.to_string(),
+                        });
+                        stats.matched_lines += 1;
                     }
-                    matches.push(SearchMatch {
-                        base: base.display().to_string(),
-                        path: path_display.clone(),
-                        rel: rel_display.clone(),
-                        line: idx + 1,
-                        text: line.to_string(),
-                    });
-                    stats.matched_lines += 1;
+                }
+                if matches.len() > before {
+                    stats.matched_files += 1;
                 }
             }
-            if matches.len() > before {
-                stats.matched_files += 1;
-            }
+            Err(_) => stats.unreadable_entries = stats.unreadable_entries.saturating_add(1),
         }
         return;
     }
-    let Some(entries) = sorted_entries(current) else {
+    let Some(entries) = sorted_entries(current, &mut stats.unreadable_entries) else {
         return;
     };
     for path in entries {
@@ -579,25 +622,30 @@ pub(crate) enum RgFailure {
 /// that omits `search_threads` is running serial (A27 concurrent-off).
 pub(crate) const RG_SEARCH_THREADS: u32 = 1;
 
-/// Classify rg's process status without matching English stderr.
+/// rg finished the tree. `Incomplete` is exit 2 with empty stderr: under
+/// `--no-messages` that is IO/permission, not a regex parse (parse still
+/// writes stderr). Keep matches; do not call it a complete miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RgExit {
+    Complete,
+    Incomplete,
+}
+
+/// Classify rg's process status without matching English stderr needles.
 ///
-/// grep (regex) exit 2 is `InvalidPattern` so we never fall back to
-/// substring search. find (fixed-strings) exit 2 stays `Unavailable`.
+/// grep exit 2 with non-empty stderr is `InvalidPattern` (regex parse still
+/// prints under `--no-messages`). Empty-stderr exit 2 is `Incomplete` IO.
 pub(crate) fn classify_rg_exit(
     tool: &str,
     code: Option<i32>,
     stderr: &str,
-) -> Result<(), RgFailure> {
+) -> Result<RgExit, RgFailure> {
     match code {
-        Some(0) | Some(1) => Ok(()),
-        Some(2) if tool == "grep" => {
-            let detail = if stderr.is_empty() {
-                "rg exited 2 (grep regex backend; stderr empty under --no-messages)".to_string()
-            } else {
-                stderr.to_string()
-            };
-            Err(RgFailure::InvalidPattern(detail))
+        Some(0) | Some(1) => Ok(RgExit::Complete),
+        Some(2) if tool == "grep" && !stderr.is_empty() => {
+            Err(RgFailure::InvalidPattern(stderr.to_string()))
         }
+        Some(2) => Ok(RgExit::Incomplete),
         other => Err(RgFailure::Unavailable(format!(
             "rg exited with {other:?}: {}",
             preview(stderr)
@@ -657,6 +705,8 @@ pub(crate) fn rg_search(
             "--line-number",
             "--no-heading",
             "--color=never",
+            // Empties IO/permission stderr so exit 2 + empty stderr is scan
+            // IO, not an invalid regex. Regex parse still writes stderr.
             "--no-messages",
             "--hidden",
             "--no-ignore",
@@ -756,8 +806,11 @@ pub(crate) fn rg_search(
         };
         let stderr = String::from_utf8_lossy(&output.stderr);
         match classify_rg_exit(tool, output.status.code(), stderr.trim()) {
-            Ok(()) if output.status.code() == Some(1) => continue,
-            Ok(()) => {}
+            Ok(RgExit::Complete) if output.status.code() == Some(1) => continue,
+            Ok(RgExit::Complete) => {}
+            Ok(RgExit::Incomplete) => {
+                stats.unreadable_entries = stats.unreadable_entries.saturating_add(1);
+            }
             Err(err) => return Err(err),
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -868,6 +921,7 @@ pub(crate) struct TreeEntry {
     pub(crate) dir: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_tree(
     root: &Path,
     current: &Path,
@@ -876,11 +930,12 @@ pub(crate) fn collect_tree(
     max_files: usize,
     level: usize,
     rows: &mut Vec<TreeEntry>,
+    unreadable: &mut usize,
 ) {
     if rows.len() >= max_files || depth == 0 {
         return;
     }
-    let Some(entries) = sorted_entries(current) else {
+    let Some(entries) = sorted_entries(current, unreadable) else {
         return;
     };
     for path in entries {
@@ -909,6 +964,7 @@ pub(crate) fn collect_tree(
                 max_files,
                 level + 1,
                 rows,
+                unreadable,
             );
         }
     }
@@ -924,6 +980,7 @@ pub(crate) fn collect_glob(
     max_files: usize,
     depth: usize,
     rows: &mut Vec<PathBuf>,
+    unreadable: &mut usize,
 ) {
     if rows.len() >= max_files || depth == 0 {
         return;
@@ -934,7 +991,7 @@ pub(crate) fn collect_glob(
         }
         return;
     }
-    let Some(entries) = sorted_entries(current) else {
+    let Some(entries) = sorted_entries(current, unreadable) else {
         return;
     };
     for path in entries {
@@ -951,6 +1008,7 @@ pub(crate) fn collect_glob(
                 max_files,
                 depth - 1,
                 rows,
+                unreadable,
             );
         } else if glob_matches(root, &path, matcher, pattern_has_separator) {
             rows.push(path);
@@ -988,15 +1046,26 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
 
 #[cfg(test)]
 mod classify_rg_exit_tests {
-    use super::{classify_rg_exit, RgFailure};
+    use super::{
+        classify_rg_exit, collect_search, sorted_entries, RgExit, RgFailure, SearchStats,
+        MAX_WALK_DEPTH,
+    };
 
     #[test]
-    fn grep_exit_2_is_invalid_pattern_without_english_stderr() {
+    fn grep_exit_2_empty_stderr_is_incomplete_io_not_invalid_pattern() {
         match classify_rg_exit("grep", Some(2), "") {
+            Ok(RgExit::Incomplete) => {}
+            other => panic!("empty-stderr exit 2 is --no-messages IO, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grep_exit_2_with_stderr_is_invalid_pattern() {
+        match classify_rg_exit("grep", Some(2), "rg: regex parse error") {
             Err(RgFailure::InvalidPattern(message)) => {
                 assert!(
-                    !message.contains("regex parse error"),
-                    "must not require an English rg diagnostic: {message}"
+                    message.contains("regex parse error"),
+                    "non-empty stderr is the parse diagnostic: {message}"
                 );
             }
             other => panic!("expected InvalidPattern, got {other:?}"),
@@ -1004,16 +1073,66 @@ mod classify_rg_exit_tests {
     }
 
     #[test]
-    fn find_exit_2_is_unavailable_not_substring_agreement() {
+    fn find_exit_2_is_incomplete_not_substring_fallback() {
+        match classify_rg_exit("find", Some(2), "") {
+            Ok(RgExit::Incomplete) => {}
+            other => panic!("find --no-messages exit 2 is Incomplete, got {other:?}"),
+        }
         match classify_rg_exit("find", Some(2), "regex parse error") {
-            Err(RgFailure::Unavailable(_)) => {}
-            other => panic!("find --fixed-strings exit 2 is Unavailable, got {other:?}"),
+            Ok(RgExit::Incomplete) => {}
+            other => panic!("find must not treat stderr as InvalidPattern, got {other:?}"),
         }
     }
 
     #[test]
-    fn grep_no_match_is_ok() {
-        assert!(classify_rg_exit("grep", Some(1), "").is_ok());
-        assert!(classify_rg_exit("grep", Some(0), "").is_ok());
+    fn grep_no_match_is_complete() {
+        assert_eq!(
+            classify_rg_exit("grep", Some(1), "").unwrap(),
+            RgExit::Complete
+        );
+        assert_eq!(
+            classify_rg_exit("grep", Some(0), "").unwrap(),
+            RgExit::Complete
+        );
+    }
+
+    #[test]
+    fn sorted_entries_on_a_file_counts_unreadable_instead_of_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").expect("write");
+        let mut unreadable = 0;
+        assert!(
+            sorted_entries(&file, &mut unreadable).is_none(),
+            "read_dir on a file must not look like an empty directory"
+        );
+        assert!(
+            unreadable >= 1,
+            "unreadable counter must move; got {unreadable}"
+        );
+    }
+
+    #[test]
+    fn collect_search_missing_root_is_unreadable_not_complete_miss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nope");
+        let mut stats = SearchStats::default();
+        let mut matches = Vec::new();
+        collect_search(
+            &missing,
+            &missing,
+            "needle",
+            10,
+            100,
+            MAX_WALK_DEPTH,
+            &mut stats,
+            &mut matches,
+        );
+        assert!(matches.is_empty());
+        assert!(
+            stats.unreadable_entries >= 1,
+            "missing root must not render as a complete 0-match scan; unreadable={}",
+            stats.unreadable_entries
+        );
     }
 }

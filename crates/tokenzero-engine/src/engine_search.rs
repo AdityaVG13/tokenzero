@@ -24,14 +24,29 @@ fn apply_empty_discovery_notes(
     query: &str,
     headline: String,
     truncated: bool,
+    unreadable: bool,
 ) {
-    let suffix = if truncated { " (scan truncated)" } else { "" };
+    let suffix = match (truncated, unreadable) {
+        (true, true) => " (scan truncated, incomplete)",
+        (true, false) => " (scan truncated)",
+        (false, true) => " (scan incomplete)",
+        (false, false) => "",
+    };
     apply_zero_hit_note(
         response,
         mode,
-        with_guidance(format!("{headline}{suffix}"), tool, query, truncated),
+        with_guidance(
+            format!("{headline}{suffix}"),
+            tool,
+            query,
+            truncated,
+            unreadable,
+        ),
     );
     attach_budget_signal(response, max_visible_tokens, truncated);
+    if unreadable {
+        mark_unreadable_miss(response);
+    }
     if truncated {
         mark_budget_exhausted_miss(response);
     }
@@ -329,8 +344,13 @@ impl TokenZeroEngine {
             "search_threads": stats.search_threads,
             "concurrent_search": stats.search_threads > 1,
             "output_strategy": if grouped { "grouped_by_file" } else { "hit_target" },
-            "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
-            "degraded": storage_error.is_some(),
+            "unreadable_entries": stats.unreadable_entries,
+            "transport_status": if storage_error.is_some() || stats.unreadable_entries > 0 {
+                "degraded"
+            } else {
+                "ok"
+            },
+            "degraded": storage_error.is_some() || stats.unreadable_entries > 0,
             "storage_error": storage_error,
             "exact_refs_available": exact_refs_available
         });
@@ -367,12 +387,19 @@ impl TokenZeroEngine {
                 query,
                 format!("# {tool} {} — 0 matches", zero_hit_label(query)),
                 stats.truncated_by_results || stats.truncated_by_visit,
+                stats.unreadable_entries > 0,
             );
         } else if stats.truncated_by_results || stats.truncated_by_visit {
             apply_truncated_hint(&mut response, mode);
             attach_budget_signal(&mut response, max_visible_tokens, true);
+            if stats.unreadable_entries > 0 {
+                mark_unreadable_miss(&mut response);
+            }
         } else {
             attach_budget_signal(&mut response, max_visible_tokens, false);
+            if stats.unreadable_entries > 0 {
+                mark_unreadable_miss(&mut response);
+            }
         }
         response
     }
@@ -398,6 +425,7 @@ impl TokenZeroEngine {
             }
         };
         let mut paths: Vec<PathBuf> = Vec::new();
+        let mut unreadable = 0usize;
         for root in roots {
             if !self.path_allowed(root) {
                 return path_not_allowed("glob", root, &self.config.allowed_roots);
@@ -411,6 +439,7 @@ impl TokenZeroEngine {
                 max_files,
                 MAX_WALK_DEPTH,
                 &mut paths,
+                &mut unreadable,
             );
         }
         paths.sort();
@@ -439,12 +468,13 @@ impl TokenZeroEngine {
         // search_result_response records degraded cache-persist markers in
         // telemetry; fold them into glob's object instead of clobbering them.
         let prior = response.telemetry.take().unwrap_or_default();
-        let degraded = prior["degraded"].as_bool().unwrap_or(false);
+        let degraded = prior["degraded"].as_bool().unwrap_or(false) || unreadable > 0;
         response.telemetry = Some(json!({
             "pattern": pattern,
             "roots": roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "matches": rows.len(),
             "include_hidden": include_hidden,
+            "unreadable_entries": unreadable,
             "output_strategy": if grouped { "grouped_by_root" } else { "exact_first_glob" },
             "crossover_action": json!(crossover.action),
             "crossover_reason": json!(crossover.reason),
@@ -465,10 +495,14 @@ impl TokenZeroEngine {
                 pattern,
                 format!("# glob {} — 0 matches", zero_hit_label(pattern)),
                 max_files == 0,
+                unreadable > 0,
             );
         } else {
             let exhausted = max_files > 0 && rows.len() >= max_files;
             attach_budget_signal(&mut response, max_visible_tokens, exhausted);
+            if unreadable > 0 {
+                mark_unreadable_miss(&mut response);
+            }
         }
         response
     }
@@ -484,6 +518,7 @@ impl TokenZeroEngine {
     ) -> ToolResponse {
         let mut entries: Vec<TreeEntry> = Vec::new();
         let mut spans: Vec<(String, usize)> = Vec::new();
+        let mut unreadable = 0usize;
         for root in roots {
             if !self.path_allowed(root) {
                 return path_not_allowed("tree", root, &self.config.allowed_roots);
@@ -497,6 +532,7 @@ impl TokenZeroEngine {
                 max_files,
                 0,
                 &mut entries,
+                &mut unreadable,
             );
         }
         let output = entries
@@ -533,10 +569,14 @@ impl TokenZeroEngine {
                 "",
                 "# tree — 0 entries".to_string(),
                 max_files == 0 || depth == 0,
+                unreadable > 0,
             );
         } else {
             let exhausted = max_files > 0 && entries.len() >= max_files;
             attach_budget_signal(&mut response, max_visible_tokens, exhausted);
+            if unreadable > 0 {
+                mark_unreadable_miss(&mut response);
+            }
         }
         response
     }
