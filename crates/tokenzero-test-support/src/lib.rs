@@ -3,15 +3,12 @@
 pub mod gauntlet;
 pub mod parity_taxonomy;
 pub use gauntlet::{
-    assert_distinct, fragment_reason_class_matches, scenario, CanonicalizationRules, CrashBoundary,
-    CrashWindowDriver, CrashWindowKind, EngineVersions, ExecutionEnvelope, GauntletEngineIdentity,
-    GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass, SpecTagWire,
-    SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+    CanonicalizationRules, CrashBoundary, CrashWindowDriver, CrashWindowKind, EngineVersions,
+    ExecutionEnvelope, FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE,
+    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+    ScenarioAgreement, SpecTagClass, SpecTagWire, assert_distinct, fragment_reason_class_matches,
+    is_forbidden_gauntlet_identity, scenario,
 };
 pub use parity_taxonomy::{
-    truncate_score, Feature, FeatureId, FeatureUniverse, LoaderError, ParityStatus, Stats,
+    Feature, FeatureId, FeatureUniverse, LoaderError, ParityStatus, Stats, truncate_score,
 };
-
-#[cfg(test)]
-#[path = "../../../tests/test-support/inline/lib__tests.rs"]
-mod tests;

@@ -11,6 +11,9 @@ serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [[test]]
 name = "gauntlet_oracle_smoke"
-path = "../../tests/test-support/gauntlet_oracle_smoke.rs"
+path = "../../tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs"

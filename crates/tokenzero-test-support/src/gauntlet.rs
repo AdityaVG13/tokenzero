@@ -36,6 +36,16 @@ pub enum GauntletOracle {
 }
 
 impl GauntletOracle {
+    /// Every mixed-oracle mode. Subject is never in this list.
+    pub const ALL: &[Self] = &[
+        Self::Spec,
+        Self::Property,
+        Self::SelfOracle,
+        Self::RoundTrip,
+        Self::ExternalTool,
+        Self::ProviderTokenizer,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Spec => "GauntletOracle::Spec::tokenzero-spec@HEAD-862e3e6",
@@ -413,76 +423,78 @@ impl SpecTagWire {
 }
 
 /// Coverage table for Phase 3. Ambiguous tags stay uncovered.
+/// `existing_driver` is a live path only. `d8c0844` deleted most drivers;
+/// Verifiable + None is Uncovered, never a silent pass.
 pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-TOK-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/provider_tokenizer_goldens.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-TOK-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/pulse/unit.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-CAP-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/model_artifacts__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-CAP-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/greenfield_proptest.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-DV-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/decision_view__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-PFX-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/recovery/inline/prefix_stability__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-ELIG-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/prefix_probe.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-ELIG-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/prefix_probe.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-RS-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/reasoning_state__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-HR-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/reasoning_state__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-SH-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/inline/engine_shell__exact_stream_witness_tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-NOV-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/output_novelty__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-NOV-002",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/recovery/inline/entity_novelty__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-CONT-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/reasoning_state__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-NW-001",
@@ -507,7 +519,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-HUB-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/test-support/gauntlet_oracle_smoke.rs"),
+        existing_driver: Some("tests/unit/tokenzero-test-support/gauntlet_oracle_smoke.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-HUB-002",
@@ -517,12 +529,12 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-FAIL-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/recovery/inline/migration__cleanup_guards.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-GOLD-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/cli/golden_outputs.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-ID-001",
@@ -542,7 +554,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-RT-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/recovery/dual_store_fragment_proptest.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-RT-002",
@@ -557,22 +569,22 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-TELE-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/inline/config__telemetry_tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-REC-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/pulse/unit.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-HOT-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/engine/inline/perf_profile__tests.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-OMIT-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: Some("tests/core/inline/lib__capsule_omission_exact_ref.rs"),
+        existing_driver: None,
     },
     SpecTagWire {
         tag: "SPEC-TZ-RB-001",

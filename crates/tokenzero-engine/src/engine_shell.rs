@@ -1208,8 +1208,3 @@ impl TokenZeroEngine {
         response
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "../../../tests/engine/inline/engine_shell__background_tests.rs"]
-mod background_tests;
-
