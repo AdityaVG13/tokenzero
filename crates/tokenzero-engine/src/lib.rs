@@ -316,4 +316,7 @@ pub enum InitializeState {
     Ready,
 }
 
-pub use zero_kernel::ZeroTokenEngine;
+pub use zero_kernel::{
+    AccountMass, BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID, ZeroTokenEngine, account_mass,
+    estimator_tokenizer_id, tiktoken_tokenizer_id,
+};

@@ -6,11 +6,64 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
 use zero_abi::{
     CompressionRequest, CompressionResult, EngineError, EngineErrorKind, EngineInvocation,
     ExpandOptions, ProjectionRequest, ProjectionResult, TokenAccounting, TokenEngine, ZeroHandle,
 };
 use zero_store::{SelectionIndex, ZeroCas, ZeroObjectMetadata};
+
+/// Pulse-grammar estimator id for the lexical gauge. Never an exact identity.
+pub const LEXICAL_ESTIMATOR_ID: &str = "estimator:tokenzero-lexical";
+/// Pulse-grammar estimator id for non-UTF-8 byte mass (1 token per byte).
+pub const BYTES_ESTIMATOR_ID: &str = "estimator:tokenzero-bytes";
+
+/// Output-contract 4-tuple for [`TokenAccounting`].
+///
+/// `raw` is billed source mass, `visible`/`spent` are presented mass,
+/// `recovered` is cache/recovery mass (`cached`, 0 until a cache hit is
+/// charged). This mapping is the account golden, not a second counter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccountMass {
+    pub raw: u64,
+    pub visible: u64,
+    pub recovered: u64,
+    pub spent: u64,
+}
+
+/// Map ZeroKernel accounting onto Pulse/ledger raw/visible/recovered/spent.
+pub fn account_mass(accounting: &TokenAccounting) -> AccountMass {
+    AccountMass {
+        raw: accounting.billed,
+        visible: accounting.visible,
+        recovered: accounting.cached,
+        spent: accounting.visible,
+    }
+}
+
+/// Pulse `estimator:<slug>` id for an approximate family, or the lexical gauge.
+pub fn estimator_tokenizer_id(model_id: Option<&str>) -> String {
+    match model_id.and_then(tokenzero_core::tokenizer_metadata) {
+        Some(meta) => format!("estimator:tokenzero-{}", meta.family.name()),
+        None => LEXICAL_ESTIMATOR_ID.to_string(),
+    }
+}
+
+/// Bundled tiktoken encoding name. Certified BPE, not Pulse `provider/model@hex`
+/// (no revision digest is bound to the crate vocab).
+pub fn tiktoken_tokenizer_id(model: &str) -> String {
+    let encoding = match get_tokenizer(model) {
+        Some(Tokenizer::Cl100kBase) => "cl100k_base",
+        Some(Tokenizer::O200kBase) => "o200k_base",
+        Some(Tokenizer::O200kHarmony) => "o200k_harmony",
+        Some(Tokenizer::P50kBase) => "p50k_base",
+        Some(Tokenizer::R50kBase) => "r50k_base",
+        Some(Tokenizer::P50kEdit) => "p50k_edit",
+        Some(Tokenizer::Gpt2) => "gpt2",
+        None => "unknown",
+    };
+    format!("tiktoken:{encoding}")
+}
 
 #[derive(Clone, Debug)]
 pub struct ZeroTokenEngine {
@@ -23,6 +76,15 @@ impl ZeroTokenEngine {
         Self {
             cas: ZeroCas::open(store_root),
             model_id: model_id.or_else(active_model),
+        }
+    }
+
+    /// Open without reading `TOKENZERO_MODEL` / `OMP_MODEL` / `OPENAI_MODEL`.
+    /// `None` is the lexical estimator; goldens and hermetic tests use this.
+    pub fn open_unbound(store_root: impl Into<PathBuf>, model_id: Option<String>) -> Self {
+        Self {
+            cas: ZeroCas::open(store_root),
+            model_id,
         }
     }
 
@@ -44,18 +106,22 @@ impl ZeroTokenEngine {
         {
             let count = bpe.encode_with_special_tokens(text).len() as u64;
             return TokenAccounting {
-                tokenizer: model.to_owned(),
+                tokenizer: tiktoken_tokenizer_id(model),
                 billed: count,
                 visible: count,
                 cached: 0,
                 certified: true,
             };
         }
-        let count = text
-            .map(tokenzero_core::count_tokens)
-            .unwrap_or(bytes.len()) as u64;
+        let (count, tokenizer) = match text {
+            Some(text) => (
+                tokenzero_core::count_tokens_for_model(text, self.model_id.as_deref()) as u64,
+                estimator_tokenizer_id(self.model_id.as_deref()),
+            ),
+            None => (bytes.len() as u64, BYTES_ESTIMATOR_ID.to_string()),
+        };
         TokenAccounting {
-            tokenizer: "estimate:tokenzero-lexical".into(),
+            tokenizer,
             billed: count,
             visible: count,
             cached: 0,

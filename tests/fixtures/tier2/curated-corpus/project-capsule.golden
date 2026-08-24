@@ -1,0 +1,15 @@
+{
+  "accounting": {
+    "billed": 1,
+    "cached": 0,
+    "certified": false,
+    "tokenizer": "estimator:tokenzero-lexical",
+    "visible": 10
+  },
+  "exact": "z://blob/22dee5ebfe8248a5fe4fb663016d8524c9a61eb36b7f7be8bb57057613230447",
+  "passthrough": false,
+  "tier": "Tier2Canonical",
+  "visible": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nexact: z://blob/22dee5ebfe8248a5fe4fb663016d8524c9a61eb36b7f7be8bb57057613230447",
+  "visible_source_bytes": 39
+}
+

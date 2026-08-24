@@ -191,7 +191,7 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
     assert_eq!(verifiable, 33, "Phase 2 Verifiable count");
     assert_eq!(ambiguous, 7, "Phase 2 Ambiguous count");
     let wired = SPEC_TAG_WIRES.iter().filter(|row| row.is_wired()).count();
-    assert_eq!(wired, 20, "Phase 3 live-wired Verifiable count (FAIL-001)");
+    assert_eq!(wired, 21, "Phase 4 live-wired Verifiable count (METRIC-001)");
     let root = repo_root();
     for row in SPEC_TAG_WIRES {
         if row.class == SpecTagClass::Ambiguous {

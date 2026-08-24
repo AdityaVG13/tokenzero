@@ -1,0 +1,401 @@
+//! Phase 4 golden capture: measure / project / expand / account.
+//!
+//! Tiers are labeled and never papered over:
+//! - **Tier 1 byte** (`Tier1Raw`): expand returns the stored payload SHA-256-equal.
+//! - **Tier 2 canonical** (`Tier2Canonical`): project capsule vs passthrough after
+//!   handle-stable canonical JSON (ZeroHandle is content-addressed).
+//! - **Tier 3 logical** (`Tier3Logical`): measure/account 4-tuple; estimator
+//!   counts are logical (same disclosed heuristic), never claimed byte-exact BPE.
+
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokenzero_engine::{
+    account_mass, estimator_tokenizer_id, tiktoken_tokenizer_id, AccountMass, ZeroTokenEngine,
+    BYTES_ESTIMATOR_ID, LEXICAL_ESTIMATOR_ID,
+};
+use tokenzero_pulse::PulseEvent;
+use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
+use zero_abi::{ExpandOptions, ProjectionRequest, TokenAccounting, TokenEngine};
+use zerostack_test_support::{test_invocation, TempWorkspace};
+
+const TIER1_EXPAND: &str =
+    include_str!("../../fixtures/tier1/curated-corpus/expand-hello-world.golden");
+const TIER2_PASSTHROUGH: &str =
+    include_str!("../../fixtures/tier2/curated-corpus/project-passthrough.golden");
+const TIER2_CAPSULE: &str =
+    include_str!("../../fixtures/tier2/curated-corpus/project-capsule.golden");
+const TIER3_MEASURE: &str =
+    include_str!("../../fixtures/tier3/curated-corpus/measure-account-lexical.golden");
+const TIER3_LLAMA: &str =
+    include_str!("../../fixtures/tier3/curated-corpus/measure-account-sentencepiece-approx.golden");
+const TIER1_SUMS: &str = include_str!("../../fixtures/tier1/curated-corpus/checksums.sha256");
+const TIER2_SUMS: &str = include_str!("../../fixtures/tier2/curated-corpus/checksums.sha256");
+const TIER3_SUMS: &str = include_str!("../../fixtures/tier3/curated-corpus/checksums.sha256");
+const TIER1_MANIFEST: &str = include_str!("../../fixtures/tier1/curated-corpus/manifest.v1.json");
+const TIER2_MANIFEST: &str = include_str!("../../fixtures/tier2/curated-corpus/manifest.v1.json");
+const TIER3_MANIFEST: &str = include_str!("../../fixtures/tier3/curated-corpus/manifest.v1.json");
+
+const REPRO: &str =
+    "cargo test -p tokenzero-engine --test phase4_output_contract_goldens -- --test-threads=1";
+
+const PAYLOAD: &[u8] = b"hello world";
+
+fn capsule_source() -> String {
+    "a".repeat(200)
+}
+
+fn stamp() {
+    GauntletIdentityPair::new(GauntletOracle::Spec).assert_distinct();
+}
+
+fn engine() -> (TempWorkspace, ZeroTokenEngine, zero_abi::EngineInvocation) {
+    let ws = TempWorkspace::new("tz-phase4-golden").expect("workspace");
+    let invocation = test_invocation(ws.root(), "phase4-golden", "cell-1");
+    let engine = ZeroTokenEngine::open_unbound(ws.store(), None);
+    (ws, engine, invocation)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn parse_json(s: &str) -> Value {
+    serde_json::from_str(s.trim()).expect("golden JSON")
+}
+
+fn canonical_project(
+    visible: &str,
+    source: &[u8],
+    visible_source_bytes: u64,
+    exact: Option<&str>,
+    accounting: &TokenAccounting,
+) -> Value {
+    json!({
+        "accounting": {
+            "billed": accounting.billed,
+            "cached": accounting.cached,
+            "certified": accounting.certified,
+            "tokenizer": accounting.tokenizer,
+            "visible": accounting.visible,
+        },
+        "exact": exact,
+        "passthrough": exact.is_none() && visible.as_bytes() == source,
+        "tier": "Tier2Canonical",
+        "visible": visible,
+        "visible_source_bytes": visible_source_bytes,
+    })
+}
+
+fn canonical_account(accounting: &TokenAccounting, mass: AccountMass) -> Value {
+    json!({
+        "account": {
+            "raw": mass.raw,
+            "recovered": mass.recovered,
+            "spent": mass.spent,
+            "visible": mass.visible,
+        },
+        "certified": accounting.certified,
+        "equivalence_predicate": "logical_token_mass",
+        "tier": "Tier3Logical",
+        "tokenizer": accounting.tokenizer,
+        "token_accounting": {
+            "billed": accounting.billed,
+            "cached": accounting.cached,
+            "certified": accounting.certified,
+            "tokenizer": accounting.tokenizer,
+            "visible": accounting.visible,
+        },
+    })
+}
+
+fn pulse_accepts_estimator(id: &str) {
+    PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
+        .with_tokenizer_id(id)
+        .unwrap_or_else(|_| panic!("{id} must satisfy Pulse estimator:<slug> grammar"));
+}
+
+#[test]
+fn tier1_expand_is_byte_exact_against_checked_in_golden() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    assert_eq!(TIER1_EXPAND.as_bytes(), PAYLOAD, "golden payload drift");
+    let projected = engine
+        .project(
+            &invocation,
+            ProjectionRequest {
+                bytes: PAYLOAD.to_vec(),
+                visible_byte_limit: 32,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("project under limit is passthrough; store still used by compress");
+    // Passthrough has no handle. Compress always stores an exact handle.
+    let compressed = engine
+        .compress(
+            &invocation,
+            zero_abi::CompressionRequest {
+                bytes: PAYLOAD.to_vec(),
+                max_tokens: 64,
+                mode: "passthrough".into(),
+                label: None,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("compress");
+    let expanded = engine
+        .expand(&invocation, &compressed.exact, ExpandOptions::default())
+        .expect("expand");
+    assert_eq!(
+        expanded.as_slice(),
+        TIER1_EXPAND.as_bytes(),
+        "Tier1Raw: expand must be SHA-256-equal to the checked-in payload"
+    );
+    assert_eq!(sha256_hex(&expanded), sha256_hex(TIER1_EXPAND.as_bytes()));
+    assert!(projected.exact.is_none(), "tiny payload is passthrough");
+    let _ = REPRO;
+}
+
+#[test]
+fn tier2_project_passthrough_matches_canonical_golden() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    let result = engine
+        .project(
+            &invocation,
+            ProjectionRequest {
+                bytes: PAYLOAD.to_vec(),
+                visible_byte_limit: 1024,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("passthrough project");
+    assert!(result.exact.is_none());
+    assert_eq!(result.visible.as_bytes(), PAYLOAD);
+    let got = canonical_project(
+        &result.visible,
+        PAYLOAD,
+        result.visible_source_bytes,
+        None,
+        &result.accounting,
+    );
+    assert_eq!(got, parse_json(TIER2_PASSTHROUGH));
+    assert!(!result.accounting.certified);
+    assert_eq!(result.accounting.tokenizer, LEXICAL_ESTIMATOR_ID);
+}
+
+#[test]
+fn tier2_project_capsule_matches_canonical_golden() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    assert!(capsule_source().len() > 80);
+    let result = engine
+        .project(
+            &invocation,
+            ProjectionRequest {
+                bytes: capsule_source().as_bytes().to_vec(),
+                visible_byte_limit: 120,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("capsule project");
+    let handle = result
+        .exact
+        .as_ref()
+        .expect("over-limit project stores exact");
+    let got = canonical_project(
+        &result.visible,
+        capsule_source().as_bytes(),
+        result.visible_source_bytes,
+        Some(handle.as_str()),
+        &result.accounting,
+    );
+    assert_eq!(got, parse_json(TIER2_CAPSULE));
+    assert!(result.visible.contains("exact: "));
+    assert_ne!(
+        result.visible.as_str(),
+        capsule_source(),
+        "capsule is not passthrough"
+    );
+    let expanded = engine
+        .expand(&invocation, handle, ExpandOptions::default())
+        .expect("expand capsule handle");
+    assert_eq!(
+        expanded,
+        capsule_source().as_bytes(),
+        "Tier1 recoverability of capsule"
+    );
+}
+
+#[test]
+fn tier3_measure_account_lexical_is_logical_not_byte_exact_bpe() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    let measured = engine.measure(&invocation, PAYLOAD).expect("measure");
+    let mass = account_mass(&measured);
+    assert_eq!(mass.raw, measured.billed);
+    assert_eq!(mass.visible, measured.visible);
+    assert_eq!(mass.spent, measured.visible);
+    assert_eq!(mass.recovered, measured.cached);
+    assert_eq!(mass.recovered, 0, "measure does not invent recovered mass");
+    assert!(
+        !measured.certified,
+        "lexical gauge is an estimator, not exact"
+    );
+    assert_eq!(measured.tokenizer, LEXICAL_ESTIMATOR_ID);
+    pulse_accepts_estimator(&measured.tokenizer);
+    let got = canonical_account(&measured, mass);
+    assert_eq!(got, parse_json(TIER3_MEASURE));
+}
+
+#[test]
+fn tier3_sentencepiece_estimate_is_labelled_estimator_never_certified() {
+    stamp();
+    let ws = TempWorkspace::new("tz-phase4-llama").expect("workspace");
+    let invocation = test_invocation(ws.root(), "phase4-llama", "cell-1");
+    let engine = ZeroTokenEngine::open_unbound(ws.store(), Some("llama-3.1-8b-instruct".into()));
+    let measured = engine.measure(&invocation, PAYLOAD).expect("measure");
+    assert!(!measured.certified);
+    assert_eq!(
+        measured.tokenizer,
+        estimator_tokenizer_id(Some("llama-3.1-8b-instruct"))
+    );
+    assert!(measured.tokenizer.starts_with("estimator:"));
+    assert_ne!(measured.tokenizer, "llama-3.1-8b-instruct");
+    pulse_accepts_estimator(&measured.tokenizer);
+    let got = canonical_account(&measured, account_mass(&measured));
+    assert_eq!(got, parse_json(TIER3_LLAMA));
+}
+
+#[test]
+fn tiktoken_bpe_is_certified_but_not_pulse_exact_identity() {
+    stamp();
+    let ws = TempWorkspace::new("tz-phase4-tiktoken").expect("workspace");
+    let invocation = test_invocation(ws.root(), "phase4-tiktoken", "cell-1");
+    let engine = ZeroTokenEngine::open_unbound(ws.store(), Some("gpt-4o".into()));
+    let measured = engine.measure(&invocation, PAYLOAD).expect("measure");
+    assert!(
+        measured.certified,
+        "bundled tiktoken BPE is exact for the encoding"
+    );
+    assert_eq!(measured.tokenizer, tiktoken_tokenizer_id("gpt-4o"));
+    assert_eq!(measured.tokenizer, "tiktoken:o200k_base");
+    assert_ne!(
+        measured.tokenizer, "gpt-4o",
+        "bare model ids are unlabeled exact identities"
+    );
+    assert!(
+        PulseEvent::tool_call("measure", "auto", 1, 1, 0, 0, 0, None)
+            .with_tokenizer_id(&measured.tokenizer)
+            .is_err(),
+        "tiktoken:encoding is not Pulse provider/model@hex; do not smuggle it as ExactTokenizerIdentity"
+    );
+}
+
+#[test]
+fn non_utf8_measure_uses_byte_estimator() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    let measured = engine.measure(&invocation, &[0xff, 0xfe]).expect("measure");
+    assert!(!measured.certified);
+    assert_eq!(measured.tokenizer, BYTES_ESTIMATOR_ID);
+    assert_eq!(measured.billed, 2);
+    pulse_accepts_estimator(&measured.tokenizer);
+}
+
+#[test]
+fn checked_in_goldens_match_checksums_and_tier_labels() {
+    stamp();
+    let files = [
+        (
+            "expand-hello-world.golden",
+            TIER1_EXPAND.as_bytes(),
+            TIER1_SUMS,
+        ),
+        (
+            "project-passthrough.golden",
+            TIER2_PASSTHROUGH.as_bytes(),
+            TIER2_SUMS,
+        ),
+        (
+            "project-capsule.golden",
+            TIER2_CAPSULE.as_bytes(),
+            TIER2_SUMS,
+        ),
+        (
+            "measure-account-lexical.golden",
+            TIER3_MEASURE.as_bytes(),
+            TIER3_SUMS,
+        ),
+        (
+            "measure-account-sentencepiece-approx.golden",
+            TIER3_LLAMA.as_bytes(),
+            TIER3_SUMS,
+        ),
+    ];
+    for (name, bytes, sums) in files {
+        let expected = sums
+            .lines()
+            .find_map(|line| {
+                let (hash, file) = line.split_once("  ")?;
+                (file == name).then_some(hash)
+            })
+            .unwrap_or_else(|| panic!("checksums missing {name}"));
+        assert_eq!(sha256_hex(bytes), expected, "{name}");
+    }
+    for (tier, manifest) in [
+        ("Tier1Raw", TIER1_MANIFEST),
+        ("Tier2Canonical", TIER2_MANIFEST),
+        ("Tier3Logical", TIER3_MANIFEST),
+    ] {
+        let v = parse_json(manifest);
+        assert_eq!(v["tier"], tier);
+        assert_eq!(v["schema"], "gauntlet.golden.manifest.v1");
+        let ids: Vec<&str> = v["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["fixture_id"].as_str().expect("id"))
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            ids, sorted,
+            "{tier} manifest entries must be sorted by fixture_id"
+        );
+        for entry in v["entries"].as_array().expect("entries") {
+            assert_eq!(entry["tier"], tier, "never paper over the tier");
+        }
+    }
+}
+
+#[test]
+fn account_mass_records_capsule_framing_overhead_without_clamping() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    let result = engine
+        .project(
+            &invocation,
+            ProjectionRequest {
+                bytes: capsule_source().as_bytes().to_vec(),
+                visible_byte_limit: 120,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("capsule");
+    let mass = account_mass(&result.accounting);
+    // 200 'a' bytes are one lexical token. The byte budget forces a handle
+    // capsule whose marker costs more visible tokens than the source.
+    // Tier 3 records spent > raw; it does not clamp spent down to fake a save.
+    assert_eq!(mass.raw, 1);
+    assert_eq!(mass.spent, 10);
+    assert!(
+        mass.spent > mass.raw,
+        "framing-overhead case must stay visible in the account golden"
+    );
+    assert_eq!(mass.recovered, 0);
+    assert_eq!(result.accounting.visible, mass.spent);
+    assert_eq!(result.accounting.billed, mass.raw);
+}

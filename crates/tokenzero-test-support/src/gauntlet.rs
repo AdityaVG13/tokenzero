@@ -742,7 +742,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-METRIC-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-engine/phase4_output_contract_goldens.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-RT-001",
