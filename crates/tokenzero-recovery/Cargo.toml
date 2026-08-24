@@ -55,3 +55,7 @@ path = "../../tests/recovery/zeroref_lifecycle_smokes.rs"
 [[test]]
 name = "prefix_stability_floor"
 path = "../../tests/unit/tokenzero-recovery/prefix_stability_floor.rs"
+
+[[test]]
+name = "expand_fragment_oracle"
+path = "../../tests/unit/tokenzero-recovery/expand_fragment_oracle.rs"

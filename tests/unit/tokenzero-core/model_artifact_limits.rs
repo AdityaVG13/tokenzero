@@ -4,12 +4,14 @@
 //! TokenPage/ModelCapsule round-trip.
 
 use tokenzero_core::model_artifacts::{
-    ExactTokenMap, ExactTokenizerAdapter, ExactTokenizerIdentity, ModelArtifactError, TokenPage,
-    MAX_CAPSULE_EVIDENCE_REFS, MAX_CAPSULE_RENDER_BYTES, MAX_CAPSULE_TOKEN_PAGES,
-    MAX_TOKEN_PAGE_BYTES, MAX_TOKEN_PAGE_TOKENS,
+    ExactTokenMap, ExactTokenizerAdapter, ExactTokenizerIdentity, MAX_CAPSULE_EVIDENCE_REFS,
+    MAX_CAPSULE_RENDER_BYTES, MAX_CAPSULE_TOKEN_PAGES, MAX_TOKEN_PAGE_BYTES, MAX_TOKEN_PAGE_TOKENS,
+    ModelArtifactError, TokenPage,
 };
 use tokenzero_core::sha256_hex;
-use tokenzero_test_support::{GauntletIdentityPair, GauntletOracle};
+use tokenzero_test_support::{
+    ExecutionEnvelope, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, scenario,
+};
 use zero_gauge::ProviderLock;
 
 fn stamp_subject_ne_oracle() {
@@ -89,22 +91,56 @@ fn token_page_and_capsule_max_contracts() {
     assert_eq!(MAX_CAPSULE_RENDER_BYTES, 16 * 1_048_576);
 }
 
-#[test]
-fn empty_token_page_fails_loud() {
-    stamp_subject_ne_oracle();
-    let adapter = adapter();
-    let map = ExactTokenMap::tokenize(&adapter, b"abc").expect("map");
-    let anchor = blob_anchor(&map);
-    let err = TokenPage::new(&map, &anchor, 0..0).expect_err("empty range");
-    assert_eq!(err, ModelArtifactError::EmptyTokenPage);
+fn spec_empty_range_is_illegal(start: usize, end: usize) -> Result<(), ModelArtifactError> {
+    if start >= end {
+        Err(ModelArtifactError::EmptyTokenPage)
+    } else {
+        Ok(())
+    }
 }
 
 #[test]
-fn token_page_expand_round_trips_source_bytes() {
+fn empty_token_page_both_error_is_spec_agreement() {
     stamp_subject_ne_oracle();
+    let pair = GauntletIdentityPair::new(GauntletOracle::Spec);
+    let envelope = ExecutionEnvelope::from_pair("empty-token-page", 1, pair, vec!["0..0".into()]);
+    envelope.assert_engine_identities(pair);
+    let adapter = adapter();
+    let map = ExactTokenMap::tokenize(&adapter, b"abc").expect("map");
+    let anchor = blob_anchor(&map);
+    match scenario(
+        "empty-token-page",
+        pair,
+        || TokenPage::new(&map, &anchor, 0..0).map(|page| page.expand()),
+        || spec_empty_range_is_illegal(0, 0),
+    ) {
+        ScenarioAgreement::BothErr { subject, oracle } => {
+            assert_eq!(subject, ModelArtifactError::EmptyTokenPage);
+            assert_eq!(oracle, ModelArtifactError::EmptyTokenPage);
+        }
+        ScenarioAgreement::BothOk(_) => panic!("empty page must be both-error agreement, not Ok"),
+    }
+}
+
+#[test]
+fn token_page_expand_through_spec_scenario() {
+    stamp_subject_ne_oracle();
+    let pair = GauntletIdentityPair::new(GauntletOracle::Spec);
+    let envelope = ExecutionEnvelope::from_pair("token-page-expand", 2, pair, vec!["0..3".into()]);
+    envelope.assert_engine_identities(pair);
     let adapter = adapter();
     let source = b"abc";
     let map = ExactTokenMap::tokenize(&adapter, source).expect("map");
-    let page = TokenPage::new(&map, &blob_anchor(&map), 0..3).expect("page");
-    assert_eq!(page.expand(), source);
+    let anchor = blob_anchor(&map);
+    match scenario(
+        "token-page-expand",
+        pair,
+        || TokenPage::new(&map, &anchor, 0..3).map(|page| page.expand()),
+        || spec_empty_range_is_illegal(0, 3),
+    ) {
+        ScenarioAgreement::BothOk(bytes) => assert_eq!(bytes, source),
+        ScenarioAgreement::BothErr { subject, oracle } => {
+            panic!("in-range page must be BothOk, got subject={subject:?} oracle={oracle:?}")
+        }
+    }
 }

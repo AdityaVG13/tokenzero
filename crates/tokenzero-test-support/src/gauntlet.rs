@@ -1,5 +1,5 @@
-//! Gauntlet Subject ≠ Oracle discriminator, greenfield `scenario()`, and
-//! content-addressed `ExecutionEnvelope`.
+//! Gauntlet Subject ≠ Oracle discriminator, greenfield `scenario()`,
+//! content-addressed `ExecutionEnvelope`, and FailureBundle provenance.
 //!
 //! MCP `EngineIdentity::TokenZero` / `RegistryEngine::TokenZero` are registry
 //! labels from `zero_abi`. They are forbidden as gauntlet identities (K-9).
@@ -399,6 +399,191 @@ impl ExecutionEnvelope {
         let json = serde_json::to_string(&canonical).expect("envelope serialization must not fail");
         sha256_hex(json.as_bytes())
     }
+
+    /// Pattern 15: envelope identities must match the pair and stay distinct.
+    pub fn assert_engine_identities(&self, pair: GauntletIdentityPair) {
+        pair.assert_distinct();
+        assert_eq!(
+            self.engines.subject_identity,
+            pair.subject.as_str(),
+            "envelope subject identity drifted from pair"
+        );
+        assert_eq!(
+            self.engines.oracle_identity,
+            pair.oracle.as_str(),
+            "envelope oracle identity drifted from pair"
+        );
+        assert_distinct(
+            &self.engines.subject_identity,
+            &self.engines.oracle_identity,
+        );
+    }
+}
+
+/// Polish-bar FailureBundle schema. Partial provenance beats no bundle.
+pub const FAILURE_BUNDLE_SCHEMA: &str = "failure_bundle.v1.0.0";
+
+/// RFC 6901 pointer to the first byte/class disagreement, never "test failed".
+pub const FAILURE_FIRST_DIVERGENCE_JSONPTR: &str = "/failure/first_divergence";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FailureType {
+    Assertion,
+    Panic,
+    Divergence,
+    Timeout,
+    Other,
+}
+
+/// Exact disagreement the jsonptr `/failure/first_divergence` resolves to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FirstDivergence {
+    pub byte_offset: Option<u64>,
+    pub subject_byte: Option<String>,
+    pub oracle_byte: Option<String>,
+    pub path: String,
+    pub subject: String,
+    pub oracle: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FailureBody {
+    pub failure_type: FailureType,
+    pub first_divergence: FirstDivergence,
+    pub expected_vs_actual: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FailureProvenance {
+    pub seed: u64,
+    pub fixture_id: String,
+    pub schedule_fingerprint: String,
+    pub repro_command: String,
+    pub git_sha: String,
+    pub toolchain_version: String,
+    pub platform: String,
+    pub feature_flags: Vec<String>,
+    pub artifact_sha256: Vec<String>,
+}
+
+/// Pattern 90 FailureBundle v1.0.0. Seed + fixture + repro command are required.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailureBundle {
+    pub schema: String,
+    pub failure: FailureBody,
+    pub provenance: FailureProvenance,
+    pub engines: EngineVersions,
+    pub envelope_artifact_id: String,
+}
+
+impl FirstDivergence {
+    /// First index where `subject` and `oracle` differ, including EOF.
+    pub fn of_bytes(subject: &[u8], oracle: &[u8]) -> Self {
+        let mut i = 0usize;
+        loop {
+            match (subject.get(i), oracle.get(i)) {
+                (Some(a), Some(b)) if a == b => {
+                    i += 1;
+                    continue;
+                }
+                (a, b) => {
+                    return Self {
+                        byte_offset: Some(i as u64),
+                        subject_byte: a.map(|x| format!("0x{x:02x}")),
+                        oracle_byte: b.map(|x| format!("0x{x:02x}")),
+                        path: format!("/bytes/{i}"),
+                        subject: format!("{subject:?}"),
+                        oracle: format!("{oracle:?}"),
+                    };
+                }
+            }
+        }
+    }
+}
+
+impl FailureBundle {
+    pub fn first_divergence_jsonptr(&self) -> &'static str {
+        FAILURE_FIRST_DIVERGENCE_JSONPTR
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("FailureBundle serialization must not fail")
+    }
+
+    /// RFC 6901 dereference. The polish-bar pointer must hit `first_divergence`.
+    pub fn dereference(&self, jsonptr: &str) -> Option<serde_json::Value> {
+        self.to_json().pointer(jsonptr).cloned()
+    }
+
+    /// `None` when bytes agree (no bundle on success).
+    pub fn from_byte_divergence(
+        envelope: &ExecutionEnvelope,
+        fixture_id: impl Into<String>,
+        repro_command: impl Into<String>,
+        subject: &[u8],
+        oracle: &[u8],
+    ) -> Option<Self> {
+        assert_distinct(
+            &envelope.engines.subject_identity,
+            &envelope.engines.oracle_identity,
+        );
+        if subject == oracle {
+            return None;
+        }
+        let first = FirstDivergence::of_bytes(subject, oracle);
+        let fixture_id = fixture_id.into();
+        let repro_command = repro_command.into();
+        let schedule = sha256_hex(
+            format!(
+                "{}:{}:{}",
+                envelope.scenario_id,
+                envelope.seed,
+                envelope.workload.join("\n")
+            )
+            .as_bytes(),
+        );
+        Some(Self {
+            schema: FAILURE_BUNDLE_SCHEMA.to_string(),
+            failure: FailureBody {
+                failure_type: FailureType::Divergence,
+                expected_vs_actual: format!("subject={} oracle={}", first.subject, first.oracle),
+                first_divergence: first,
+            },
+            provenance: FailureProvenance {
+                seed: envelope.seed,
+                fixture_id,
+                schedule_fingerprint: schedule,
+                repro_command,
+                git_sha: SUBJECT_IDENTITY
+                    .rsplit('@')
+                    .next()
+                    .unwrap_or(SUBJECT_IDENTITY)
+                    .to_string(),
+                toolchain_version: "nightly-2026-05-31".to_string(),
+                platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                feature_flags: vec!["gauntlet-greenfield".into(), "spec-oracle".into()],
+                artifact_sha256: vec![envelope.artifact_id()],
+            },
+            engines: envelope.engines.clone(),
+            envelope_artifact_id: envelope.artifact_id(),
+        })
+    }
+}
+
+/// Byte comparator with EngineIdentity on the envelope. Equal → Ok.
+/// Divergence → FailureBundle with `/failure/first_divergence` populated.
+pub fn compare_bytes(
+    envelope: &ExecutionEnvelope,
+    fixture_id: impl Into<String>,
+    repro_command: impl Into<String>,
+    subject: &[u8],
+    oracle: &[u8],
+) -> Result<(), FailureBundle> {
+    match FailureBundle::from_byte_divergence(envelope, fixture_id, repro_command, subject, oracle)
+    {
+        None => Ok(()),
+        Some(bundle) => Err(bundle),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -537,7 +722,7 @@ pub const SPEC_TAG_WIRES: &[SpecTagWire] = &[
     SpecTagWire {
         tag: "SPEC-TZ-FAIL-001",
         class: SpecTagClass::Verifiable,
-        existing_driver: None,
+        existing_driver: Some("tests/unit/tokenzero-recovery/expand_fragment_oracle.rs"),
     },
     SpecTagWire {
         tag: "SPEC-TZ-GOLD-001",

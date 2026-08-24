@@ -2,14 +2,15 @@
 //! labels are forbidden. Missing drivers must be `None`, not a deleted path.
 
 use std::collections::HashSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokenzero_test_support::{
-    assert_distinct, is_forbidden_gauntlet_identity, scenario, CrashBoundary, ExecutionEnvelope,
-    GauntletEngineIdentity, GauntletIdentityPair, GauntletOracle, ScenarioAgreement, SpecTagClass,
-    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, SPEC_TAG_WIRES, SUBJECT_IDENTITY,
+    CrashBoundary, ExecutionEnvelope, FAILURE_BUNDLE_SCHEMA, FAILURE_FIRST_DIVERGENCE_JSONPTR,
+    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, GauntletEngineIdentity,
+    GauntletIdentityPair, GauntletOracle, SPEC_TAG_WIRES, SUBJECT_IDENTITY, ScenarioAgreement,
+    SpecTagClass, assert_distinct, compare_bytes, is_forbidden_gauntlet_identity, scenario,
 };
 
 fn repo_root() -> PathBuf {
@@ -82,6 +83,58 @@ fn artifact_id_ignores_run_id() {
     let mut other = right.clone();
     other.scenario_id = "other-scenario".into();
     assert_ne!(left.artifact_id(), other.artifact_id());
+    left.assert_engine_identities(pair);
+}
+
+#[test]
+fn failure_bundle_first_divergence_jsonptr_and_provenance() {
+    let pair = GauntletIdentityPair::new(GauntletOracle::Spec);
+    let envelope = ExecutionEnvelope::from_pair("byte-div", 9, pair, vec!["abc".into()]);
+    envelope.assert_engine_identities(pair);
+    compare_bytes(
+        &envelope,
+        "equal",
+        "cargo test -p tokenzero-test-support --test gauntlet_oracle_smoke",
+        b"abc",
+        b"abc",
+    )
+    .expect("equal bytes must not emit a bundle");
+    let bundle = compare_bytes(
+        &envelope,
+        "abc-vs-abX",
+        "cargo test -p tokenzero-test-support --test gauntlet_oracle_smoke -- failure_bundle_first_divergence_jsonptr_and_provenance",
+        b"abc",
+        b"abX",
+    )
+    .expect_err("abc vs abX must diverge");
+    assert_eq!(bundle.schema, FAILURE_BUNDLE_SCHEMA);
+    assert_eq!(
+        bundle.first_divergence_jsonptr(),
+        FAILURE_FIRST_DIVERGENCE_JSONPTR
+    );
+    let first = bundle
+        .dereference(FAILURE_FIRST_DIVERGENCE_JSONPTR)
+        .expect("jsonptr must resolve");
+    assert_eq!(first["byte_offset"], 2);
+    assert_eq!(first["subject_byte"], "0x63");
+    assert_eq!(first["oracle_byte"], "0x58");
+    assert_eq!(bundle.provenance.seed, 9);
+    assert_eq!(bundle.provenance.fixture_id, "abc-vs-abX");
+    assert!(
+        bundle
+            .provenance
+            .repro_command
+            .contains("gauntlet_oracle_smoke")
+    );
+    assert!(!bundle.provenance.schedule_fingerprint.is_empty());
+    assert_eq!(
+        bundle.provenance.git_sha,
+        "862e3e682cb8aee0e150c1cb0b116cb2e23a44e2"
+    );
+    assert_ne!(
+        bundle.engines.subject_identity,
+        bundle.engines.oracle_identity
+    );
 }
 
 #[test]
@@ -138,7 +191,7 @@ fn spec_tag_catalog_does_not_mark_ambiguous_as_wired() {
     assert_eq!(verifiable, 33, "Phase 2 Verifiable count");
     assert_eq!(ambiguous, 7, "Phase 2 Ambiguous count");
     let wired = SPEC_TAG_WIRES.iter().filter(|row| row.is_wired()).count();
-    assert_eq!(wired, 19, "Phase 2 live-wired Verifiable count");
+    assert_eq!(wired, 20, "Phase 3 live-wired Verifiable count (FAIL-001)");
     let root = repo_root();
     for row in SPEC_TAG_WIRES {
         if row.class == SpecTagClass::Ambiguous {

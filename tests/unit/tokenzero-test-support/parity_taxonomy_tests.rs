@@ -1,7 +1,7 @@
 use super::*;
 use crate::gauntlet::{
-    assert_distinct, is_forbidden_gauntlet_identity, GauntletOracle, FORBIDDEN_MCP_ENGINE_IDENTITY,
-    FORBIDDEN_MCP_REGISTRY_ENGINE, SUBJECT_IDENTITY,
+    FORBIDDEN_MCP_ENGINE_IDENTITY, FORBIDDEN_MCP_REGISTRY_ENGINE, GauntletOracle, SUBJECT_IDENTITY,
+    assert_distinct, is_forbidden_gauntlet_identity,
 };
 use std::panic::catch_unwind;
 
