@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,11 +14,15 @@ from benchmarks.bench_common import portable_path
 from benchmarks.harness import (
     REPO,
     VisiblePayloadError,
+    _times,
+    bin_path,
     capture_environment,
     expand_recovered_text,
     first_blob_ref,
     glob_root_and_first,
     measure_median,
+    measure_with_teardown,
+    refuse_noisy_keep,
     visible_payload_bytes,
 )
 
@@ -212,6 +218,90 @@ class VisiblePayloadAccountingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(VisiblePayloadError, "missing visible"):
             expand_recovered_text({"status": "ok"})
+
+
+class KeepGateMeasurementHonestyTests(unittest.TestCase):
+    def test_noisy_latency_is_not_keep_eligible(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "not eligible for keep"):
+            refuse_noisy_keep("noisy", [0.1, 1.0, 0.05])
+        with self.assertRaisesRegex(RuntimeError, "keep-gate needs"):
+            refuse_noisy_keep("short", [0.1, 0.1])
+        cv = refuse_noisy_keep("stable", [0.100, 0.101, 0.099])
+        self.assertLessEqual(cv, 5.0)
+
+    def test_bin_path_refuses_size_optimized_release(self) -> None:
+        env = os.environ.copy()
+        env.pop("TOKENZERO_BIN", None)
+        harness = Path(__file__).with_name("harness.py")
+        result = subprocess.run(
+            [sys.executable, str(harness), "resolve_bin", "--profile", "release"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        combined = (result.stderr + result.stdout).lower()
+        self.assertIn("release-perf", combined)
+        self.assertIn("never --release", combined)
+        isolated = os.environ.copy()
+        isolated.pop("TOKENZERO_BIN", None)
+        with mock.patch.dict(os.environ, isolated, clear=True):
+            with self.assertRaises(SystemExit) as raised:
+                bin_path(profile="debug")
+        self.assertIn("release-perf", str(raised.exception))
+
+    def test_teardown_is_outside_timed_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "teardown_ran"
+            py = (
+                "import time; time.sleep(0.15); "
+                f"open({json.dumps(str(marker))}, 'w').write('1')"
+            )
+            teardown = "python3 -c " + json.dumps(py)
+            with mock.patch("benchmarks.harness.shutil.which", return_value=None):
+                times = _times("true", 3, 0, "true", "teardown-out", False, teardown)
+            self.assertTrue(marker.exists(), "teardown must still run")
+            self.assertEqual(len(times), 3)
+            self.assertTrue(
+                all(sample < 0.10 for sample in times),
+                f"teardown sleep leaked into timed window: {times}",
+            )
+
+    def test_measure_with_teardown_refuses_noisy_keep(self) -> None:
+        with mock.patch(
+            "benchmarks.harness._times",
+            return_value=[0.10, 1.00, 0.05],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not eligible for keep"):
+                measure_with_teardown("noisy", "true", "true", runs=3, warmup=0)
+
+    def test_hyperfine_passes_cleanup_outside_window(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess:
+            calls.append(argv)
+            if argv[0] == "bash":
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+            artifact = Path(argv[argv.index("--export-json") + 1])
+            artifact.write_text('{"results":[{"times":[0.01, 0.01, 0.01]}]}')
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with (
+            mock.patch(
+                "benchmarks.harness.shutil.which", return_value="/fake/hyperfine"
+            ),
+            mock.patch("benchmarks.harness.subprocess.run", side_effect=fake_run),
+        ):
+            times = _times(
+                "printf ok", 3, 0, "true", "hf-cleanup", False, "rm -f leftover"
+            )
+        self.assertEqual(times, [0.01, 0.01, 0.01])
+        hyperfine = next(argv for argv in calls if argv and argv[0] == "/fake/hyperfine")
+        self.assertIn("--prepare", hyperfine)
+        self.assertIn("--cleanup", hyperfine)
+        cleanup = hyperfine[hyperfine.index("--cleanup") + 1]
+        self.assertIn("rm -f leftover", cleanup)
 
 
 class MeasurementFailureTests(unittest.TestCase):

@@ -101,7 +101,7 @@ class KeepGateUnitTests(unittest.TestCase):
         self.assertTrue(any("FAIL geomean" in line for line in compare_msgs))
         self.assertTrue(any("FAIL geomean" in line for line in persist_msgs))
 
-    def test_quarantined_group_excluded_from_compare(self) -> None:
+    def test_quarantined_group_is_ineligible_for_keep(self) -> None:
         history = _doc(
             [
                 {"name": "stable", "samples": [100.0, 100.0, 100.0]},
@@ -112,15 +112,20 @@ class KeepGateUnitTests(unittest.TestCase):
             [
                 # within pass band vs history stable
                 {"name": "stable", "samples": [101.0, 101.0, 101.0]},
-                # would be a huge regression if averaged in, but cv quarantines it
+                # would be a huge regression if averaged in. cv>5 is noise:
+                # ineligible for keep, not dropped-then-PASS.
                 {"name": "noisy", "samples": [100.0, 400.0, 50.0]},
             ]
         )
         passed, messages = keep_gate.compare_to_history(current, history)
-        self.assertTrue(passed, messages)
-        self.assertTrue(any("quarantined" in line for line in messages))
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("FAIL keep ineligible" in line for line in messages))
+        self.assertTrue(any("noisy" in line for line in messages))
         self.assertTrue(any("PASS pass stable" in line for line in messages))
-        self.assertFalse(any("pass noisy" in line for line in messages))
+        self.assertFalse(any("PASS pass noisy" in line for line in messages))
+        persist_ok, persist_msgs = keep_gate.persist_gate(current, history)
+        self.assertFalse(persist_ok, persist_msgs)
+        self.assertTrue(any("FAIL keep ineligible" in line for line in persist_msgs))
 
     def test_omitted_history_group_fails_closed(self) -> None:
         history = _doc(

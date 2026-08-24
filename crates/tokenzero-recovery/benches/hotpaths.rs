@@ -1,6 +1,8 @@
 //! Microbenchmarks for TokenZero recovery hot-path functions.
 //!
-//! Run with: cargo bench -p tokenzero-recovery
+//! Keep-gate invocation (never size-optimized `--release`):
+//! `cargo bench -p tokenzero-recovery --bench hotpaths --profile release-perf`
+//! Default `cargo bench` uses `[profile.bench]` which inherits `release-perf`.
 
 mod segment_hotpaths;
 

@@ -1,6 +1,8 @@
 //! Microbenchmarks for TokenZero core hot-path functions.
 //!
-//! Run with: cargo bench -p tokenzero-core
+//! Keep-gate invocation (never size-optimized `--release`):
+//! `cargo bench -p tokenzero-core --bench hotpaths --profile release-perf`
+//! Default `cargo bench` uses `[profile.bench]` which inherits `release-perf`.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tokenzero_core::*;

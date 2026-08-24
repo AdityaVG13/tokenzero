@@ -67,3 +67,8 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 strip = false
+
+# Keep-gate: `cargo bench` must not use size-optimized `--release`.
+# LTO / codegen-units differences swamp the signal (never `--release` for claims).
+[profile.bench]
+inherits = "release-perf"

@@ -13,9 +13,12 @@ That is the only command. It runs every benchmark below, records the date,
 commit, machine, and tool versions, and regenerates `docs/benchmarks.md`.
 `RUNS` and `WARMUP` env vars control repetitions (default 5/1).
 
-A `tokenzero` binary is resolved from `$TOKENZERO_BIN`, then PATH, then
-`target/release/tokenzero`. Build one first with
-`cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features`.
+A `tokenzero` binary is resolved from `$TOKENZERO_BIN`, then
+`target/release-perf/tokenzero`. Build one first with
+`cargo build --profile release-perf -p tokenzero-cli --bin tokenzero --no-default-features`.
+Never `--release` for published latency claims (`release` is size-optimized;
+LTO / codegen-units differences swamp the signal). Criterion benches use
+`[profile.bench]` which inherits `release-perf`.
 
 ## What each file is
 
@@ -38,4 +41,5 @@ A `tokenzero` binary is resolved from `$TOKENZERO_BIN`, then PATH, then
 - Report where TokenZero loses or ties; a sweep where it wins everything is not credible.
 - Same corpus, same task, same measurement point on both sides of a comparison.
 - Report spread (p50/p90/p99 or median/best), never a single best-of run.
+- Latency keep claims use `release-perf` and fail closed when `cv_pct > 5`; teardown/setup stay outside the timed window.
 - Results in `docs/benchmarks.md` are regenerated, dated, and machine-stamped; recorded outputs of past runs are not tracked in git.

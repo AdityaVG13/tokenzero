@@ -5,15 +5,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; H=(python3 "$ROOT/benchmar
 BIN="$("${H[@]}" resolve_bin)" || { echo "ERROR: tokenzero binary not found. Set TOKENZERO_BIN=/path/to/tokenzero" >&2; exit 1; }; RUNS="${RUNS:-5}"; WARMUP="${WARMUP:-1}"; README="$ROOT/README.md"; CRATES="$ROOT/crates"; PATTERN="pub fn"
 WORK_DIR="$(mktemp -d /tmp/tz-bakeoff.XXXXXX)"; SAMPLE="$WORK_DIR/sample_500.txt"; EDIT_FILE="$WORK_DIR/edit_sample.txt"; GREP_CACHE="$WORK_DIR/grep-cache.json"; TREE_CACHE_POINTER="$WORK_DIR/tree-cache-current"; NEVER_WORSE_RECEIPT="$WORK_DIR/never-worse.tsv"
 trap 'rm -rf "$WORK_DIR"' EXIT
-log() { printf '[bakeoff] %s\n' "$*" >&2; }; measure() { "${H[@]}" measure_median "$1" "$2" --runs "$RUNS" --warmup "$WARMUP" --prepare "$3"; }
+log() { printf '[bakeoff] %s\n' "$*" >&2; }; measure() { "${H[@]}" measure_median "$1" "$2" --runs "$RUNS" --warmup "$WARMUP" --prepare "$3" --teardown "$4"; }
 emit() { printf '| `%s` | `%s` | %s | %s | %s | %s |\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
 declare -A TOKENZERO_BYTES TOKENZERO_UNITS RAW_BYTES RAW_UNITS
 row() {
-  local task="$1" tool="$2" cmd="$3" prepare="$4" metrics m b e
+  local task="$1" tool="$2" cmd="$3" prepare="$4" teardown="$5" metrics m b e
   if [[ "$tool" != tokenzero && "$tool" != raw-cli ]] && ! command -v "$tool" >/dev/null 2>&1; then
     emit "$task" "$tool" - - - "not installed"; return
   fi
-  if ! metrics=$(measure "$tool:$task" "$cmd" "$prepare"); then
+  if ! metrics=$(measure "$tool:$task" "$cmd" "$prepare" "$teardown"); then
     log "FAILED: $tool:$task"
     if [[ "$tool" != tokenzero && "$tool" != raw-cli ]]; then
       emit "$task" "$tool" - - - "execution failed; excluded from gate"
@@ -48,6 +48,13 @@ prepare_for() {
     *) printf 'true' ;;
   esac
 }
+teardown_for() {
+  # sed -i.bak leftover is teardown, not work. Must stay outside start.elapsed().
+  case "$1:$2" in
+    edit_verify:raw-cli) printf 'rm -f %q.bak' "$EDIT_FILE" ;;
+    *) printf 'true' ;;
+  esac
+}
 command_for() {
   local task="$1" tool="$2" exe="$tool"; [[ "$tool" == tokenzero ]] && exe="$BIN"
   case "$task:$tool" in
@@ -61,7 +68,7 @@ command_for() {
     tree_glob_read:tokenzero) echo "export TOKENZERO_CACHE_PATH=\$(cat \"$TREE_CACHE_POINTER\"); $exe tree \"$CRATES\" --depth 2; $exe glob '*.rs' \"$CRATES\"; $exe read \"$first_rs\"";;
     tree_glob_read:*) echo "$exe tree \"$CRATES\"; $exe glob '*.rs' \"$CRATES\"; $exe read \"$first_rs\"";;
     edit_verify:tokenzero) echo "cd \"$WORK_DIR\"; $exe edit --edits-json '[{\"find\":\"beta\",\"replace\":\"BETA\"}]' \"$EDIT_FILE\" && $exe read \"$EDIT_FILE\"";;
-    edit_verify:raw-cli) echo "sed -i.bak 's/beta/BETA/g' \"$EDIT_FILE\"; rm -f \"$EDIT_FILE.bak\"; cat \"$EDIT_FILE\"";;
+    edit_verify:raw-cli) echo "sed -i.bak 's/beta/BETA/g' \"$EDIT_FILE\"; cat \"$EDIT_FILE\"";;
     edit_verify:*) echo "$exe edit --find beta --replace BETA \"$EDIT_FILE\"; $exe read \"$EDIT_FILE\"";;
     multi_step:raw-cli) echo "grep -n '$PATTERN' $files_str; for f in $files_str; do cat \"\$f\"; done";;
     multi_step:*) echo "$exe grep '$PATTERN' $files_str; for f in $files_str; do $exe read \"\$f\"; done";;
@@ -78,7 +85,7 @@ printf 'schema_version\tnever-worse/v1\nsuite\tcompetitor-bakeoff\nsurface_id\tc
 printf '| task | tool | wall_ms | output_bytes | est_tokens | note |\n|---|---|---:|---:|---:|---|\n'
 tools=(tokenzero raw-cli rtk lean-ctx headroom ztk context-mode)
 for task in read_500 grep_read tree_glob_read edit_verify multi_step; do
-  for tool in "${tools[@]}"; do row "$task" "$tool" "$(command_for "$task" "$tool")" "$(prepare_for "$task")"; done
+  for tool in "${tools[@]}"; do row "$task" "$tool" "$(command_for "$task" "$tool")" "$(prepare_for "$task")" "$(teardown_for "$task" "$tool")"; done
 done
 for task in read_500 grep_read tree_glob_read edit_verify multi_step; do
   if [[ -z "${TOKENZERO_UNITS[$task]:-}" || -z "${RAW_UNITS[$task]:-}" ]]; then

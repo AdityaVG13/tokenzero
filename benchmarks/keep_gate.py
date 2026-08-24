@@ -246,10 +246,14 @@ def compare_to_history(
         )
 
     kept_current, quarantined = quarantine_groups(current_groups)
+    # cv>5 is noise and not eligible for keep. Do not drop the group and PASS.
+    passed = True
     if quarantined:
         names = [str(g["name"]) for g in quarantined]
+        passed = False
         messages.append(
-            f"quarantined cv_pct>{CV_PCT_QUARANTINE}: {', '.join(names)}"
+            f"FAIL keep ineligible: cv_pct>{CV_PCT_QUARANTINE} is noise, "
+            f"not a keep: {', '.join(names)}"
         )
 
     # History noisy groups are also excluded from the compare denominator.
@@ -265,7 +269,6 @@ def compare_to_history(
 
     cur_means = [group_mean(cur_kept[name]) for name in shared]
     hist_means = [group_mean(hist_kept[name]) for name in shared]
-    passed = True
 
     for name, cur_m, hist_m in zip(shared, cur_means, hist_means, strict=True):
         reg = _regression_pct(cur_m, hist_m)
@@ -305,7 +308,11 @@ def persist_gate(
     *,
     geomean_band_pct: float = KEEP_GATE_GEOMEAN_PCT,
 ) -> tuple[bool, list[str]]:
-    """Persist uses the same 3% geomean constant as keep-gate (not 25%)."""
+    """Persist uses the same 3% geomean constant as keep-gate (not 25%).
+
+    cv_pct > 5 is ineligible for persist (fail closed). A noisy group is not
+    dropped so the remaining geomean can green a keep.
+    """
     return compare_to_history(
         current,
         history,

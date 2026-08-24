@@ -10,20 +10,72 @@ try:
     from benchmarks.bench_common import portable_argv, portable_command, portable_path, portable_text, portable_tree
 except ModuleNotFoundError:
     from bench_common import portable_argv, portable_command, portable_path, portable_text, portable_tree
+try:
+    from benchmarks.keep_gate import CV_PCT_QUARANTINE, cv_pct as keep_cv_pct
+except ModuleNotFoundError:
+    from keep_gate import CV_PCT_QUARANTINE, cv_pct as keep_cv_pct
 
-def bin_path(profile='release', env_var='TOKENZERO_BIN', required=True):
-    candidates = []
-    if os.environ.get(env_var):
-        candidates.append(Path(os.environ[env_var]))
-    candidates += [REPO / 'target' / p / 'tokenzero' for p in (profile, 'release', 'debug')]; candidates.append(Path.home() / '.tokenzero/bin/tokenzero')
-    if shutil.which('tokenzero'):
-        candidates.append(Path(shutil.which('tokenzero')))
+KEEP_GATE_PROFILE = 'release-perf'
+FORBIDDEN_CLAIM_PROFILES = frozenset({'release', 'debug', 'dev', 'test'})
+MIN_KEEP_SAMPLES = 3
+
+
+def _target_root() -> Path:
+    env = os.environ.get('CARGO_TARGET_DIR')
+    return Path(env) if env else REPO / 'target'
+
+
+def bin_path(profile=KEEP_GATE_PROFILE, env_var='TOKENZERO_BIN', required=True):
+    """Resolve tokenzero for published measurement.
+
+    Keep-gate claims use `release-perf`, never size-optimized `--release` or
+    `debug`. TOKENZERO_BIN is an explicit operator override.
+    """
+    env = os.environ.get(env_var)
+    if env:
+        path = Path(env).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+        if required:
+            raise SystemExit(f'{env_var}={path} is not an executable tokenzero binary')
+    if required and profile in FORBIDDEN_CLAIM_PROFILES:
+        raise SystemExit(
+            f'profile {profile!r} is not a keep-gate measurement profile; '
+            'use release-perf (never --release for published latency claims)'
+        )
+    candidates = [
+        _target_root() / profile / 'tokenzero',
+        Path.home() / '.tokenzero/bin/tokenzero',
+    ]
+    which = shutil.which('tokenzero')
+    if which:
+        candidates.append(Path(which))
     for path in candidates:
         if path.is_file() and os.access(path, os.X_OK):
             return path
     if required:
-        raise SystemExit(f'tokenzero binary not found. Build or set {env_var}=/path/to/tokenzero')
-    return REPO / 'target' / profile / 'tokenzero'
+        raise SystemExit(
+            f'tokenzero binary not found for keep-gate profile {profile!r}. '
+            'Build with: cargo build --profile release-perf -p tokenzero-cli '
+            f'--bin tokenzero --no-default-features or set {env_var}=/path/to/tokenzero'
+        )
+    return _target_root() / profile / 'tokenzero'
+
+
+def refuse_noisy_keep(label: str, times: list[float]) -> float:
+    """Return cv_pct. cv>5 or fewer than 3 samples is not a latency keep."""
+    if len(times) < MIN_KEEP_SAMPLES:
+        raise RuntimeError(
+            f"benchmark {label} has {len(times)} sample(s); "
+            f"keep-gate needs >= {MIN_KEEP_SAMPLES}"
+        )
+    cv = keep_cv_pct([float(value) for value in times])
+    if cv > CV_PCT_QUARANTINE:
+        raise RuntimeError(
+            f"benchmark {label} cv_pct={cv:.4f} > {CV_PCT_QUARANTINE}; "
+            "noise, not eligible for keep"
+        )
+    return cv
 
 def now_ms():
     return int(time.time() * 1000)
@@ -182,11 +234,12 @@ def _times(
     prepare: str,
     name: str,
     cold_warmup: bool = False,
+    teardown: str = 'true',
 ) -> list[float]:
     if runs < 1 or warmup < 0:
         raise ValueError('benchmark requires runs >= 1 and warmup >= 0')
     # Preflight exposes the preparation command's real stderr. Hyperfine then
-    # repeats the same command outside every warmup and measured sample.
+    # repeats prepare outside every warmup/sample and cleanup after (untimed).
     _run_prepare(prepare)
     hyperfine = shutil.which('hyperfine')
     if hyperfine:
@@ -195,6 +248,7 @@ def _times(
             stderr_log = Path(tmp) / 'command.stderr'
             stderr_path = json.dumps(str(stderr_log))
             timed_prepare = f"{{ {prepare}; }} 2>>{stderr_path}"
+            timed_teardown = f"{{ {teardown}; }} 2>>{stderr_path}"
             timed_command = f"{{ {command}; }} 2>>{stderr_path}"
             try:
                 probe = subprocess.run(
@@ -210,6 +264,8 @@ def _times(
                         str(artifact),
                         '--prepare',
                         timed_prepare,
+                        '--cleanup',
+                        timed_teardown,
                         '--command-name',
                         name,
                         timed_command,
@@ -250,22 +306,29 @@ def _times(
                     raise RuntimeError('hyperfine timing artifact has invalid samples')
                 return [float(value) for value in times]
     # Fallback is allowed only when hyperfine was absent or disappeared.
+    # Teardown (and prepare) stay outside start.elapsed() — never inside the
+    # timed window (keep-gate measure_with_teardown).
     fallback_warmups = 1 if cold_warmup else warmup
     for index in range(fallback_warmups):
         _run_prepare(prepare)
         _run_benchmark_command(command, f'fallback warmup {index + 1}')
+        _run_benchmark_command(teardown, f'fallback warmup teardown {index + 1}')
     times = []
     for index in range(runs):
         _run_prepare(prepare)
         started = time.perf_counter()
         _run_benchmark_command(command, f'fallback sample {index + 1}')
-        times.append(time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        times.append(elapsed)
+        _run_benchmark_command(teardown, f'fallback teardown {index + 1}')
     return times
 
 
-def measure_cell(label, command, cold=False, runs=50, warmup=3):
+def measure_cell(label, command, cold=False, runs=50, warmup=3, teardown='true'):
     prepare = f'rm -f {RECOVERY_CACHE}' if cold else 'true'
-    return tuple(percentiles_ms(_times(command, runs, warmup, prepare, label, cold)))
+    times = _times(command, runs, warmup, prepare, label, cold, teardown)
+    refuse_noisy_keep(label, times)
+    return tuple(percentiles_ms(times))
 
 def measure_median(
     label: str,
@@ -273,11 +336,31 @@ def measure_median(
     runs: int = 5,
     warmup: int = 1,
     prepare: str = 'true',
+    teardown: str = 'true',
 ) -> tuple[int, int, int]:
-    wall = median_ms(_times(command, runs, warmup, prepare, label))
+    # Byte/token never-worse uses the untimed captured-byte probe. Wall cv is
+    # not the never-worse denominator; latency keeps use measure_cell /
+    # measure_with_teardown which fail closed on cv_pct > 5.
+    times = _times(command, runs, warmup, prepare, label, False, teardown)
+    wall = median_ms(times)
     _run_prepare(prepare)
     output = _run_benchmark_command(command, 'captured-byte probe', capture_stdout=True)
+    _run_benchmark_command(teardown, 'captured-byte teardown')
     return (wall, len(output), token_estimate(output))
+
+
+def measure_with_teardown(
+    label: str,
+    command: str,
+    teardown: str,
+    runs: int = 5,
+    warmup: int = 1,
+    prepare: str = 'true',
+) -> tuple[int, float]:
+    """Latency keep sample: teardown runs after start.elapsed() is captured."""
+    times = _times(command, runs, warmup, prepare, label, False, teardown)
+    cv = refuse_noisy_keep(label, times)
+    return median_ms(times), cv
 
 def _json(data):
     if not isinstance(data, str):
@@ -484,9 +567,9 @@ def main(argv=None):
         command = sub.add_parser(name)
         for flags, options in args:
             command.add_argument(*flags, **options)
-    add('resolve_bin', (('--profile',), {'default': 'release'})); add('now_ms'); add('tok', (('--bytes',), {'type': int})); percentile = sub.add_parser('percentiles')
-    group = percentile.add_mutually_exclusive_group(required=True); group.add_argument('--json'); group.add_argument('--times'); add('measure_cell', (('label',), {}), (('cmd',), {}), (('--cold',), {'action': 'store_true'}), (('--runs',), {'type': int, 'default': 50}), (('--warmup',), {'type': int, 'default': 3}))
-    add('measure_median', (('label',), {}), (('cmd',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1}), (('--prepare',), {'default': 'true'})); add('mcp_schema_tokens', (('cap_file',), {}), (('tools',), {})); add('quality', (('task',), {})); add('clear_cache')
+    add('resolve_bin', (('--profile',), {'default': KEEP_GATE_PROFILE})); add('now_ms'); add('tok', (('--bytes',), {'type': int})); percentile = sub.add_parser('percentiles')
+    group = percentile.add_mutually_exclusive_group(required=True); group.add_argument('--json'); group.add_argument('--times'); add('measure_cell', (('label',), {}), (('cmd',), {}), (('--cold',), {'action': 'store_true'}), (('--runs',), {'type': int, 'default': 50}), (('--warmup',), {'type': int, 'default': 3}), (('--teardown',), {'default': 'true'}))
+    add('measure_median', (('label',), {}), (('cmd',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1}), (('--prepare',), {'default': 'true'}), (('--teardown',), {'default': 'true'})); add('measure_with_teardown', (('label',), {}), (('cmd',), {}), (('teardown',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1}), (('--prepare',), {'default': 'true'})); add('mcp_schema_tokens', (('cap_file',), {}), (('tools',), {})); add('quality', (('task',), {})); add('clear_cache')
     add('git_commit', (('--short',), {'action': 'store_true'})); add('accounting', (('--file',), {}), (('--key',), {'default': 'raw_tokens'})); add('first_blob_ref', (('file',), {})); add('visible_payload_bytes', (('file',), {})); add('expand_recovered_text', (('file',), {})); add('glob_pick', (('file',), {}))
     add('generate_million', (('root',), {}), (('--dirs',), {'type': int, 'default': 100}), (('--files',), {'type': int, 'default': 10}), (('--lines',), {'type': int, 'default': 1000}), (('--needle',), {'default': 'BENCH_NEEDLE_FN'})); add('tz_metrics', (('file',), {}), (('wall',), {})); args = parser.parse_args(argv); action = args.action
     if action == 'resolve_bin':
@@ -498,9 +581,12 @@ def main(argv=None):
     elif action == 'percentiles':
         values = json.loads(Path(args.json).read_text()).get('results', [{}])[0].get('times', []) if args.json else [float(x) for x in Path(args.times).read_text().splitlines() if x.strip()]; result = '\t'.join(map(str, percentiles_ms(values)))
     elif action == 'measure_cell':
-        result = '\t'.join(map(str, measure_cell(args.label, args.cmd, args.cold, args.runs, args.warmup)))
+        result = '\t'.join(map(str, measure_cell(args.label, args.cmd, args.cold, args.runs, args.warmup, args.teardown)))
     elif action == 'measure_median':
-        result = '\t'.join(map(str, measure_median(args.label, args.cmd, args.runs, args.warmup, args.prepare)))
+        result = '\t'.join(map(str, measure_median(args.label, args.cmd, args.runs, args.warmup, args.prepare, args.teardown)))
+    elif action == 'measure_with_teardown':
+        wall, cv = measure_with_teardown(args.label, args.cmd, args.teardown, args.runs, args.warmup, args.prepare)
+        result = f'{wall}\t{cv}'
     elif action == 'mcp_schema_tokens':
         result = mcp_schema_tokens(args.cap_file, args.tools)
     elif action == 'quality':

@@ -115,6 +115,27 @@ class NeverWorseGateTests(unittest.TestCase):
         self.assertEqual(missing.returncode, 2)
         self.assertIn("task rows", missing.stderr)
 
+    def test_bakeoff_edit_verify_teardown_is_outside_timed_command(self) -> None:
+        text = BAKEOFF.read_text(encoding="utf-8")
+        self.assertIn("--teardown", text)
+        self.assertIn("teardown_for", text)
+        self.assertIn("rm -f %q.bak", text)
+        in_command_for = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("command_for()"):
+                in_command_for = True
+            elif stripped.startswith("teardown_for()") or stripped.startswith("log "):
+                in_command_for = False
+            if not in_command_for or stripped.startswith("#"):
+                continue
+            if "edit_verify:raw-cli" in stripped:
+                self.assertNotIn(
+                    "rm -f",
+                    stripped,
+                    "bak cleanup must not live inside the timed edit_verify command",
+                )
+
     def test_live_drivers_invoke_benchmarks_gate_not_scripts_copy(self) -> None:
         for path in LIVE_DRIVER_SH:
             text = path.read_text(encoding="utf-8")

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-target_dir="${CARGO_TARGET_DIR:-target/linux-docker}"; bin="${target_dir}/release/tokenzero"
+target_dir="${CARGO_TARGET_DIR:-target/linux-docker}"; bin="${target_dir}/release-perf/tokenzero"
 mkdir -p results/current
 
-cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features
+# Keep-gate: never size-optimized `--release` for latency claims.
+cargo build --profile release-perf -p tokenzero-cli --bin tokenzero --no-default-features
 
 measure() {
   local label="$1"; local threshold="$2"
