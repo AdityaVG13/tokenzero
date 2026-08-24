@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use tokenzero_core::ContentType;
 use tokenzero_recovery::{
     RecoveryStore, STALE_TMP_MAX_AGE, prune_blob_sidecars, prune_recovery_blobs,
-    sweep_stale_tmp_files,
+    set_ref_index_root_override, sweep_stale_tmp_files,
 };
 
 fn wal_path(cache: &Path) -> PathBuf {
@@ -379,4 +379,100 @@ fn large_blob_persist_replaces_inline_with_cas_marker() {
         again.reason
     );
     assert_eq!(again.content, payload);
+}
+
+/// Persist used to `panic!` after a durable WAL append when ref-index compact
+/// hit EACCES/ENOSPC. Compact is a secondary-index rewrite; dest stays intact.
+#[cfg(unix)]
+#[test]
+fn persist_pending_does_not_panic_when_ref_index_compact_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let index = dir.path().join("ref-index");
+    fs::create_dir_all(&index).unwrap();
+    set_ref_index_root_override(Some(index.clone()));
+    struct RestoreOverride;
+    impl Drop for RestoreOverride {
+        fn drop(&mut self) {
+            set_ref_index_root_override(None);
+        }
+    }
+    let _restore_override = RestoreOverride;
+
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_blob("seed-ref-index\n", ContentType::Unknown)
+            .unwrap()
+    };
+    let hash = first
+        .strip_prefix("tz://blob/")
+        .expect("canonical blob ref");
+    let prefix = &hash[..3];
+    let shard = index.join(format!("{prefix}.ndjson"));
+    assert!(shard.is_file(), "persist must create the ref-index shard");
+
+    let pad_line = format!(r#"{{"ref_id":"{first}","store_path":"/stale","ts":1}}"#);
+    let mut pad = fs::read(&shard).unwrap();
+    while pad.len() <= 1_048_576 {
+        pad.extend_from_slice(pad_line.as_bytes());
+        pad.push(b'\n');
+    }
+    fs::write(&shard, &pad).unwrap();
+
+    let prev_mode = fs::metadata(&index).unwrap().permissions();
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o555)).unwrap();
+    struct RestorePerms {
+        dir: PathBuf,
+        mode: fs::Permissions,
+    }
+    impl Drop for RestorePerms {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.dir, self.mode.clone());
+        }
+    }
+    let _restore_perms = RestorePerms {
+        dir: index.clone(),
+        mode: prev_mode,
+    };
+
+    let collide = {
+        let mut probe = RecoveryStore::new(None);
+        let mut n = 0u32;
+        loop {
+            n += 1;
+            assert!(n < 50_000, "no sha256 prefix collision for {prefix}");
+            let text = format!("collide-{n}\n");
+            let id = probe.store_blob_deferred(&text, ContentType::Unknown);
+            if id["tz://blob/".len()..].starts_with(prefix) {
+                break text;
+            }
+        }
+    };
+
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let second = store
+        .store_blob(&collide, ContentType::Unknown)
+        .expect("persist must survive ref-index compact IO failure");
+    assert!(
+        second["tz://blob/".len()..].starts_with(prefix),
+        "collision blob must share the padded shard"
+    );
+    let shard_after = fs::read_to_string(&shard).unwrap();
+    assert!(
+        shard_after.contains(&second),
+        "append reached the fat shard, so compact ran and must not have panicked"
+    );
+
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let got = expand_raw(&mut restarted, &second);
+    assert!(
+        got.found,
+        "durable persist must keep the blob after compact IO failure: {}",
+        got.reason
+    );
+    assert_eq!(got.content, collide);
 }

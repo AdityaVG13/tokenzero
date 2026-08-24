@@ -3533,6 +3533,13 @@ fn compact_ref_index_if_needed(shard: &Path) -> Result<(), RecoveryError> {
     compact_ref_index_shard(shard)
 }
 
+/// Compact rewrites a secondary index. WAL/snapshot is already the crash
+/// authority, and [`write_ref_index_entries`] leaves dest intact on tmp
+/// failure. Persist and expand must not panic on disk-full / EACCES here.
+fn compact_ref_index_best_effort(shard: &Path) {
+    let _ = compact_ref_index_if_needed(shard);
+}
+
 const REF_INDEX_RECLAIM_STALE_RATIO: f64 = 0.75;
 
 fn ref_index_line_commit(entry: &RefIndexEntry) -> u32 {
@@ -3577,9 +3584,7 @@ fn append_blob_refs_to_ref_index(
             .copied()
             .unwrap_or_else(|| classify_ref(ref_id, None));
         if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false, 0, None).is_ok() {
-            if let Err(err) = compact_ref_index_if_needed(&shard) {
-                panic!("ref-index compact failed for {}: {err}", shard.display());
-            }
+            compact_ref_index_best_effort(&shard);
         }
     }
 }
@@ -3845,9 +3850,7 @@ fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentC
         expansion_count,
         Some(now),
     );
-    if let Err(err) = compact_ref_index_if_needed(&shard) {
-        panic!("ref-index compact failed for {}: {err}", shard.display());
-    }
+    compact_ref_index_best_effort(&shard);
 }
 
 /// Export per-content-class expansion rates from the per-user ref index.
