@@ -2481,7 +2481,7 @@ fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Resu
                 .unwrap_or(0) as u128,
             None,
         );
-        let _ = record_event(&default_ledger_path(&root), &event);
+        record_event(&default_ledger_path(&root), &event)?;
     }
     Ok(())
 }

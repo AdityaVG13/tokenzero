@@ -143,6 +143,9 @@ pulse_structs! {
         exact_ref_count usize;
         visible_savings f64;
         recovery_adjusted_savings f64;
+        /// Net spent = visible + recovery. Expand charges belong here, not
+        /// only in visible_savings (which understates task spend).
+        #[serde(default)] spent_tokens usize;
         /// Corrupt/non-empty unparsable ledger lines.
         #[serde(default)] skipped_lines usize;
     }
@@ -208,7 +211,7 @@ impl PulseEvent {
             visible_tokens = visible_tokens;
             recovery_tokens = recovery_tokens;
             tokenizer_id = default_tokenizer_id();
-            task_lossless = true;
+            task_lossless = pulse_task_lossless(raw_tokens, visible_tokens, recovery_tokens);
             cache_hit = false;
             retry_count = 0;
             failure = false;
@@ -240,6 +243,17 @@ impl PulseEvent {
         self.tokenizer_id = tokenizer_id.to_string();
         Ok(self)
     }
+}
+
+/// Lossless means omitted visible mass was charged back as recovery.
+/// `visible < raw` with `recovery == 0` is lossy (or a worse wrapper with
+/// no expand path); it must not inflate `task_lossless_tokens`.
+pub fn pulse_task_lossless(
+    raw_tokens: usize,
+    visible_tokens: usize,
+    recovery_tokens: usize,
+) -> bool {
+    !(visible_tokens < raw_tokens && recovery_tokens == 0)
 }
 
 pub fn default_ledger_path(root: &Path) -> PathBuf {
@@ -1060,11 +1074,9 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
         report.status = "degraded".to_string();
     }
     // Signed: spent>raw is a negative ratio, never a clamped 0% save.
+    report.spent_tokens = report.visible_tokens.saturating_add(report.recovery_tokens);
     report.visible_savings = savings_ratio(report.raw_tokens, report.visible_tokens);
-    report.recovery_adjusted_savings = savings_ratio(
-        report.raw_tokens,
-        report.visible_tokens.saturating_add(report.recovery_tokens),
-    );
+    report.recovery_adjusted_savings = savings_ratio(report.raw_tokens, report.spent_tokens);
     Ok(report)
 }
 

@@ -478,3 +478,37 @@ fn compress_tiny_exact_is_never_worse_than_raw() {
     assert_eq!(result.visible.trim_end(), source);
     assert!(result.accounting.tokenizer.starts_with("estimator:"));
 }
+
+#[test]
+fn compress_tight_budget_does_not_save_by_clamping_a_worse_wrapper() {
+    stamp();
+    let (_ws, engine, invocation) = engine();
+    let source = "hi";
+    let result = engine
+        .compress(
+            &invocation,
+            CompressionRequest {
+                bytes: source.as_bytes().to_vec(),
+                max_tokens: 2,
+                mode: "exact".into(),
+                label: None,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+        )
+        .expect("compress");
+    let mass = account_mass(&result.accounting);
+    assert!(mass.spent <= mass.raw);
+    assert_eq!(
+        result.omitted_tokens, 0,
+        "clamping an exact stub that costs more than raw must not report omitted savings"
+    );
+    assert_eq!(result.visible.trim_end(), source);
+    let expanded = engine
+        .expand(&invocation, &result.exact, ExpandOptions::default())
+        .expect("expand handle after compress persist");
+    assert_eq!(
+        expanded,
+        source.as_bytes(),
+        "expand must return original bytes after compress store"
+    );
+}

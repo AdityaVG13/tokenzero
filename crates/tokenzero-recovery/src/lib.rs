@@ -3896,7 +3896,7 @@ pub(crate) fn load_state(
         None => None,
     };
     match state {
-        Some(state) => Ok(Some(apply_session_wal(state, path, config))),
+        Some(state) => Ok(Some(apply_session_wal(state, path, config)?)),
         None if !session_journal_present(path) => Ok(None),
         None => {
             // Snapshot gone, WAL still present: replay complete records onto
@@ -3906,7 +3906,7 @@ pub(crate) fn load_state(
                 RecoveryState::empty(config),
                 path,
                 config,
-            )))
+            )?))
         }
     }
 }
@@ -4347,21 +4347,21 @@ fn copy_map_entry<T: Clone>(
     }
 }
 
-// Replay complete SessionWal records; a bad payload fails open to recovered state.
+// Replay complete SessionWal records. Torn tails are fail-open inside
+// `SessionWal::replay` (complete prefix kept). IO errors must not look like
+// a clean snapshot-only load: persist would then `publish_snapshot` and
+// `clear_wal`, dropping committed journal bytes.
 fn apply_session_wal(
     mut state: RecoveryState,
     path: &Path,
     config: &RecoveryConfig,
-) -> RecoveryState {
-    let Ok(wal) = recovery_session_wal(path, config) else {
-        return state;
-    };
-    let Ok(replay) = wal.replay() else {
-        return state;
-    };
+) -> Result<RecoveryState, RecoveryError> {
+    let wal = recovery_session_wal(path, config)?;
+    let replay = wal.replay()?;
     for record in replay.records {
         let Ok(entry) = serde_json::from_slice::<JournalEntry>(&record) else {
-            return state;
+            // Complete frame, not a torn tail: stop at the last good record.
+            break;
         };
         let JournalEntry {
             refs,
@@ -4377,7 +4377,7 @@ fn apply_session_wal(
             deleted_aliases.iter().map(String::as_str),
         );
     }
-    state
+    Ok(state)
 }
 
 fn read_limited_utf8<R: Read>(
@@ -4567,56 +4567,6 @@ fn create_private_new(path: &Path) -> std::io::Result<fs::File> {
         .write(true)
         .create_new(true)
         .open(path)
-}
-
-fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryError> {
-    // A same-directory rename publishes either the old or complete new cache.
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let mut last_collision = None;
-    for _ in 0..TMP_RETRIES {
-        let tmp = recovery_tmp_path(path);
-        match write_json_to_tmp(&tmp, state) {
-            Ok(()) => {
-                if let Err(err) = zero_store::replace_file(&tmp, path) {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(err.into());
-                }
-                return Ok(());
-            }
-            Err(RecoveryError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_collision = Some(err);
-            }
-            Err(err) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(err);
-            }
-        }
-    }
-    Err(last_collision
-        .unwrap_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "could not allocate recovery temp file for {} after {TMP_RETRIES} attempts",
-                    path.display()
-                ),
-            )
-        })
-        .into())
-}
-
-fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryError> {
-    // Buffered serialization avoids per-fragment writes; the cache is reconstructible.
-    let file = create_private_new(tmp)?;
-    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
-    serde_json::to_writer(&mut writer, state)?;
-    writer.write_all(b"\n")?;
-    let file = writer
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 fn recovery_file_ref(text: &str, path: Option<&Path>) -> String {

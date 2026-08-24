@@ -2,7 +2,7 @@
 //! or provider/model@hex. Never treat the default or tiktoken: as
 //! ExactTokenizerIdentity / Q99.
 
-use tokenzero_pulse::{PulseEvent, record_event, report_for_path};
+use tokenzero_pulse::{PulseEvent, pulse_task_lossless, record_event, report_for_path};
 
 #[test]
 fn default_tool_call_is_labelled_estimator_not_exact() {
@@ -68,4 +68,33 @@ fn pulse_report_spent_above_raw_is_negative_savings_not_a_clamped_save() {
     );
     assert!((report.visible_savings - (-0.5)).abs() < 1e-12);
     assert!(report.recovery_adjusted_savings < 0.0);
+}
+
+#[test]
+fn omitted_without_recovery_is_not_task_lossless() {
+    let event = PulseEvent::tool_call("compress", "auto", 10, 4, 0, 0, 0, None);
+    assert!(
+        !event.task_lossless,
+        "visible<raw with recovery=0 must not count as lossless"
+    );
+    assert!(!pulse_task_lossless(10, 4, 0));
+    assert!(
+        pulse_task_lossless(10, 4, 6),
+        "recovery charged back is lossless"
+    );
+    assert!(pulse_task_lossless(10, 10, 0));
+}
+
+#[test]
+fn pulse_report_spent_is_visible_plus_recovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.jsonl");
+    let event = PulseEvent::tool_call("expand", "auto", 10, 4, 6, 1, 0, None);
+    record_event(&path, &event).expect("record");
+    let report = report_for_path(&path).expect("report");
+    assert_eq!(report.spent_tokens, 10, "spent = visible + recovery");
+    assert_eq!(report.visible_tokens, 4);
+    assert_eq!(report.recovery_tokens, 6);
+    assert!(event.task_lossless);
+    assert_eq!(report.recovery_adjusted_savings, 0.0);
 }

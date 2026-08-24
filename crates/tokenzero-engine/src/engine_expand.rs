@@ -584,6 +584,7 @@ impl TokenZeroEngine {
             params.start_line,
             params.end_line,
         );
+        // Persist failure must not look like a durable session serve.
         store.persist_pending().ok()?;
         Some((key, served_record(content, &stored)))
     }
@@ -724,4 +725,3 @@ impl TokenZeroEngine {
         response
     }
 }
-

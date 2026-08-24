@@ -236,6 +236,13 @@ impl TokenZeroEngine {
         )
         .with_attribution(Some(self.session_id().to_string()), call_id, ref_ids);
         event.failure = response.error.is_some();
+        event.task_lossless = tokenzero_pulse::pulse_task_lossless(
+            accounting.raw_tokens,
+            accounting.visible_tokens,
+            accounting.recovery_tokens,
+        ) && !event.failure;
+        // Pulse I/O stays fail-open for MCP surfaces; spending fields above
+        // must still be honest when the write succeeds.
         let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
     }
 

@@ -32,12 +32,16 @@ pub struct AccountMass {
 }
 
 /// Map ZeroKernel accounting onto Pulse/ledger raw/visible/recovered/spent.
+///
+/// `spent` is net presented mass: visible plus recovered/cached. Mapping
+/// spent=visible alone hid expand charges and made Pulse look cheaper than
+/// the task actually spent.
 pub fn account_mass(accounting: &TokenAccounting) -> AccountMass {
     AccountMass {
         raw: accounting.billed,
         visible: accounting.visible,
         recovered: accounting.cached,
-        spent: accounting.visible,
+        spent: accounting.visible.saturating_add(accounting.cached),
     }
 }
 
@@ -153,6 +157,26 @@ impl ZeroTokenEngine {
             }
         }
         (text.get(..0).unwrap_or(""), self.count(b""), true)
+    }
+
+    fn passthrough_compression(
+        text: &str,
+        handle: ZeroHandle,
+        raw_accounting: &TokenAccounting,
+    ) -> CompressionResult {
+        CompressionResult {
+            visible: text.to_owned(),
+            exact: handle,
+            truncated: false,
+            omitted_tokens: 0,
+            accounting: TokenAccounting {
+                tokenizer: raw_accounting.tokenizer.clone(),
+                billed: raw_accounting.billed,
+                visible: raw_accounting.billed,
+                cached: raw_accounting.cached,
+                certified: raw_accounting.certified,
+            },
+        }
     }
 
     fn store_exact(&self, bytes: &[u8], media_type: &str) -> Result<ZeroHandle, EngineError> {
@@ -302,6 +326,7 @@ impl TokenEngine for ZeroTokenEngine {
         let oversized = request.bytes.len() > 512 || text.lines().count() > 20;
         if oversized && mode == tokenzero_core::Mode::Auto {
             let mut best = capsule.clone();
+            let mut best_cost = self.count(best.text.as_bytes()).billed;
             for alt_mode in [
                 tokenzero_core::Mode::Dedupe,
                 tokenzero_core::Mode::Structured,
@@ -314,34 +339,28 @@ impl TokenEngine for ZeroTokenEngine {
                     request.label.as_deref(),
                     Some(&handle.to_string()),
                 ) {
-                    let honest = (alt.visible_tokens as u64) < raw_accounting.billed;
-                    if honest && alt.visible_tokens < best.visible_tokens {
+                    // Honesty is the kernel tokenizer, not core's lexical
+                    // `visible_tokens` mixed with tiktoken `billed`.
+                    let alt_cost = self.count(alt.text.as_bytes()).billed;
+                    if alt_cost < raw_accounting.billed && alt_cost < best_cost {
+                        best_cost = alt_cost;
                         best = alt;
                     }
                 }
             }
             capsule = best;
         }
+        let capsule_accounting = self.count(capsule.text.as_bytes());
+        // Never-worse vs raw, before clamp. Clamping a worse wrapper to
+        // max_tokens used to report omitted_tokens as a save.
+        if capsule_accounting.billed > raw_accounting.billed {
+            return Ok(Self::passthrough_compression(text, handle, &raw_accounting));
+        }
         let (visible, visible_accounting, truncated) =
             self.clamp_visible_to_budget(&capsule.text, u64::from(request.max_tokens));
         let visible_tokens = visible_accounting.billed.min(u64::from(request.max_tokens));
-        // Never-worse vs raw payload. A wrapper/handle that costs more than
-        // the source is not a compression; omit nothing and do not report a
-        // save via saturating_sub(visible) looking like break-even.
         if visible_tokens > raw_accounting.billed {
-            return Ok(CompressionResult {
-                visible: text.to_owned(),
-                exact: handle,
-                truncated: false,
-                omitted_tokens: 0,
-                accounting: TokenAccounting {
-                    tokenizer: raw_accounting.tokenizer.clone(),
-                    billed: raw_accounting.billed,
-                    visible: raw_accounting.billed,
-                    cached: raw_accounting.cached,
-                    certified: raw_accounting.certified,
-                },
-            });
+            return Ok(Self::passthrough_compression(text, handle, &raw_accounting));
         }
         Ok(CompressionResult {
             visible: visible.to_owned(),
