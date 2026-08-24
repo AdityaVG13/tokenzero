@@ -68,6 +68,10 @@ impl std::fmt::Display for HotPathEmptyTotal {
 impl std::error::Error for HotPathEmptyTotal {}
 
 /// MT8 floor: a named path that actually ran must be showable at ≥0.1% of total.
+///
+/// This constant is enter-count share (`100 * path / total`), not exclusive
+/// self-time. Keep-gate (`benchmarks/keep_gate.py`, `MT8_MIN_SELF_PCT`) refuses
+/// enter-count as keep evidence; a keep needs a named frame ≥0.1% self-time.
 pub const MT8_MIN_ATTRIBUTION_PCT: f64 = 0.1;
 
 /// MT8 attribution: `100.0 * path / total`. Fail closed when `total == 0`.
@@ -154,7 +158,10 @@ impl HotPathProfileCard {
         }
     }
 
-    /// True when the named path's share meets the MT8 ≥0.1% floor.
+    /// True when the named path's enter-count share meets ≥0.1% of total.
+    ///
+    /// Not a keep. Keep-gate requires exclusive self-time frames; enter-count
+    /// cards are profile-first counters only (`attribution: enter_count`).
     pub fn meets_mt8_floor(&self, path: HotPathName) -> bool {
         self.attribution_pct(path) >= MT8_MIN_ATTRIBUTION_PCT
     }

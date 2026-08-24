@@ -45,6 +45,8 @@ class KeepGateUnitTests(unittest.TestCase):
         self.assertEqual(keep_gate.KEEP_GATE_GEOMEAN_PCT, 3.0)
         self.assertEqual(keep_gate.KEEP_GATE_PASS_PCT, 5.0)
         self.assertEqual(keep_gate.CV_PCT_QUARANTINE, 5.0)
+        self.assertEqual(keep_gate.MT8_MIN_SELF_PCT, 0.1)
+        self.assertEqual(keep_gate.SAME_RUN_WINDOW_SECONDS, 60)
         self.assertEqual(
             keep_gate.ALLOWED_LABELS, frozenset({"fixture-seed", "live"})
         )
@@ -242,6 +244,7 @@ class KeepGateCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("compare", result.stdout)
         self.assertIn("persist", result.stdout)
+        self.assertIn("keep", result.stdout)
         self.assertIn("resolve-bin", result.stdout)
 
     def test_dry_run(self) -> None:
@@ -253,6 +256,8 @@ class KeepGateCliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("KEEP_GATE_GEOMEAN_PCT=3.0", result.stdout)
+        self.assertIn("MT8_MIN_SELF_PCT=0.1", result.stdout)
+        self.assertIn("SAME_RUN_WINDOW_SECONDS=60", result.stdout)
         self.assertIn("CARGO_TARGET_DIR=/tmp/rch_target_tokenzero", result.stdout)
 
     def test_cli_compare_seed_pass_and_worse_fail(self) -> None:
@@ -347,6 +352,278 @@ class KeepGateCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
             self.assertIn("unlabeled", result.stderr.lower())
             self.assertIn("live", result.stderr.lower())
+
+
+def _attribution(
+    name: str = "tokenzero_core::tokens::count_tokens",
+    self_pct: float = 0.44,
+    *,
+    kind: str = "self-time",
+    source: str = "samply",
+    extra_frames: list[dict] | None = None,
+) -> dict:
+    frames = [{"name": name, "self_pct": self_pct}]
+    if extra_frames:
+        frames.extend(extra_frames)
+    return {"kind": kind, "workload": "MT8", "source": source, "frames": frames}
+
+
+def _window(
+    sha: str = "4ad6f579e6d9dab99722f1ca538c8009a14199cc",
+    machine: str = "gauntlet-host",
+    ts: str = "2026-08-24T19:00:00Z",
+) -> dict:
+    return {"git_sha": sha, "machine": machine, "timestamp": ts}
+
+
+def _live_doc(groups: list[dict], **extra: object) -> dict:
+    body = _doc(
+        groups,
+        label="live",
+        note="live Criterion release-perf sibling; not fixture-seed",
+    )
+    if "attribution" not in extra:
+        body["attribution"] = _attribution()
+    if "run_window" not in extra:
+        body["run_window"] = _window()
+    body.update(extra)
+    return body
+
+
+class KeepGateMt8Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.groups = [{"name": "stable", "samples": [100.0, 100.0, 100.0]}]
+
+    def test_missing_attribution_refuses_live_keep(self) -> None:
+        current = _live_doc(self.groups)
+        del current["attribution"]
+        peer = _live_doc(self.groups, benchmark_id="tokenzero-core.hotpaths.broad")
+        history = _live_doc(self.groups)
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.compare_to_history(current, history, peer=peer)
+        message = str(ctx.exception).lower()
+        self.assertIn("attribution missing", message)
+        self.assertIn("do not invent flamegraphs", message)
+        self.assertIn("micro-lever trap", message)
+
+    def test_flamegraph_path_without_frames_refuses(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution={"kind": "self-time", "flamegraph": "artifacts/fake.svg"},
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.require_mt8_keep_attribution(current)
+        self.assertIn("do not invent flamegraphs", str(ctx.exception).lower())
+
+    def test_enter_count_is_not_self_time(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution="enter_count",
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.extract_self_time_frames(current)
+        self.assertIn("not exclusive self-time", str(ctx.exception).lower())
+
+    def test_invented_source_refuses(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution=_attribution(source="invented-flamegraph"),
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.require_mt8_keep_attribution(current)
+        self.assertIn("invented", str(ctx.exception).lower())
+
+    def test_inclusive_only_is_not_self_time(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution={
+                "kind": "self-time",
+                "source": "samply",
+                "frames": [
+                    {"name": "foo", "inclusive_pct": 2.5},
+                ],
+            },
+        )
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.extract_self_time_frames(current)
+        self.assertIn("inclusive-only", str(ctx.exception).lower())
+
+    def test_micro_lever_trap_below_floor_is_not_a_keep(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution=_attribution(self_pct=0.05),
+        )
+        peer = _live_doc(self.groups)
+        history = _live_doc(self.groups)
+        passed, messages = keep_gate.compare_to_history(
+            current, history, peer=peer
+        )
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("micro-lever trap" in line for line in messages))
+        self.assertTrue(any("FAIL keep ineligible" in line for line in messages))
+
+    def test_named_frame_at_floor_qualifies(self) -> None:
+        current = _live_doc(
+            self.groups,
+            attribution=_attribution(self_pct=0.1),
+        )
+        peer = _live_doc(self.groups)
+        history = _live_doc(self.groups)
+        passed, messages = keep_gate.compare_to_history(
+            current, history, peer=peer
+        )
+        self.assertTrue(passed, messages)
+        self.assertTrue(any(line.startswith("PASS mt8 attribution") for line in messages))
+
+    def test_live_without_peer_refuses_same_window(self) -> None:
+        current = _live_doc(self.groups)
+        history = _live_doc(self.groups)
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.compare_to_history(current, history)
+        message = str(ctx.exception).lower()
+        self.assertIn("same run window", message)
+        self.assertIn("focused+broad", message)
+
+    def test_git_sha_mismatch_fails_window(self) -> None:
+        focused = _live_doc(self.groups, run_window=_window(sha="aaa"))
+        broad = _live_doc(self.groups, run_window=_window(sha="bbb"))
+        passed, messages = keep_gate.require_same_run_window(focused, broad)
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("git_sha mismatch" in line for line in messages))
+
+    def test_machine_mismatch_fails_window(self) -> None:
+        focused = _live_doc(self.groups, run_window=_window(machine="host-a"))
+        broad = _live_doc(self.groups, run_window=_window(machine="host-b"))
+        passed, messages = keep_gate.require_same_run_window(focused, broad)
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("machine mismatch" in line for line in messages))
+
+    def test_timestamps_outside_same_minute_fail(self) -> None:
+        focused = _live_doc(
+            self.groups, run_window=_window(ts="2026-08-24T19:00:00Z")
+        )
+        broad = _live_doc(
+            self.groups, run_window=_window(ts="2026-08-24T19:01:01Z")
+        )
+        passed, messages = keep_gate.require_same_run_window(focused, broad)
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("timestamps" in line and "apart" in line for line in messages))
+
+    def test_same_minute_window_passes(self) -> None:
+        focused = _live_doc(
+            self.groups, run_window=_window(ts="2026-08-24T19:00:00Z")
+        )
+        broad = _live_doc(
+            self.groups, run_window=_window(ts="2026-08-24T19:01:00Z")
+        )
+        passed, messages = keep_gate.require_same_run_window(focused, broad)
+        self.assertTrue(passed, messages)
+        self.assertTrue(any(line.startswith("PASS run window") for line in messages))
+
+    def test_missing_run_window_fields_fail_closed(self) -> None:
+        focused = _live_doc(self.groups, run_window={"git_sha": "abc"})
+        broad = _live_doc(self.groups)
+        with self.assertRaises(keep_gate.KeepGateError) as ctx:
+            keep_gate.require_same_run_window(focused, broad)
+        message = str(ctx.exception).lower()
+        self.assertIn("missing", message)
+        self.assertIn("machine", message)
+
+    def test_evaluate_keep_requires_frame_and_window(self) -> None:
+        focused = _live_doc(self.groups)
+        broad = _live_doc(self.groups)
+        passed, messages = keep_gate.evaluate_keep(focused, broad)
+        self.assertTrue(passed, messages)
+        self.assertTrue(any("PASS mt8 attribution" in line for line in messages))
+        self.assertTrue(any("PASS run window" in line for line in messages))
+
+    def test_evaluate_keep_micro_lever_and_sha_split_fails(self) -> None:
+        focused = _live_doc(
+            self.groups,
+            attribution=_attribution(self_pct=0.09),
+            run_window=_window(sha="sha-focused"),
+        )
+        broad = _live_doc(self.groups, run_window=_window(sha="sha-broad"))
+        passed, messages = keep_gate.evaluate_keep(focused, broad)
+        self.assertFalse(passed, messages)
+        self.assertTrue(any("micro-lever trap" in line for line in messages))
+        self.assertTrue(any("git_sha mismatch" in line for line in messages))
+
+    def test_cli_keep_pass_and_missing_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            focused = _live_doc(self.groups)
+            broad = _live_doc(self.groups)
+            focused_path = root / "focused.json"
+            broad_path = root / "broad.json"
+            _write(focused_path, focused)
+            _write(broad_path, broad)
+            ok = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "keep",
+                    "--focused",
+                    str(focused_path),
+                    "--broad",
+                    str(broad_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+            self.assertIn("Result: PASS", ok.stdout)
+            self.assertIn("PASS mt8 attribution", ok.stdout)
+            self.assertIn("PASS run window", ok.stdout)
+
+            missing = json.loads(json.dumps(focused))
+            del missing["attribution"]
+            missing_path = root / "missing.json"
+            _write(missing_path, missing)
+            bad = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "keep",
+                    "--focused",
+                    str(missing_path),
+                    "--broad",
+                    str(broad_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(bad.returncode, 2, bad.stderr + bad.stdout)
+            self.assertIn("attribution missing", bad.stderr.lower())
+            self.assertIn("do not invent flamegraphs", bad.stderr.lower())
+
+    def test_cli_live_compare_without_broad_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = _live_doc(self.groups)
+            history = _live_doc(self.groups)
+            current_path = root / "current.json"
+            history_path = root / "history.json"
+            _write(current_path, current)
+            _write(history_path, history)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "compare",
+                    "--current",
+                    str(current_path),
+                    "--history",
+                    str(history_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+            self.assertIn("same run window", result.stderr.lower())
 
 
 if __name__ == "__main__":
