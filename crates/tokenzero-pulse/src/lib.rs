@@ -4,7 +4,7 @@ use fs4::{FileExt, TryLockError};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Result as IoResult, Write};
@@ -91,6 +91,48 @@ fn pulse_tokenizer_grammar(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Pulse count class for a grammar-valid tokenizer id.
+///
+/// `estimator:` is approximate. `tiktoken:` is bundled BPE (kernel-certified
+/// for that vocab, never Pulse ExactTokenizerIdentity). `exact` is only
+/// `provider/model@hex`.
+pub fn pulse_counts_class(tokenizer_id: &str) -> &'static str {
+    if tokenizer_id.is_empty() {
+        "empty"
+    } else if tokenizer_id.starts_with("estimator:") {
+        "estimator"
+    } else if tokenizer_id.starts_with("tiktoken:") {
+        "tiktoken"
+    } else {
+        "exact"
+    }
+}
+
+/// True only for a single ExactTokenizerIdentity (`provider/model@hex`).
+/// `estimator:` and `tiktoken:` never certify CLI/MCP totals as exact.
+pub fn pulse_counts_certified(tokenizer_id: &str) -> bool {
+    pulse_counts_class(tokenizer_id) == "exact"
+}
+
+/// Seal CLI/MCP aggregate tokenizer labels. Mixed ids are not one unit:
+/// `certified` stays false and `savings_commensurate` is false so a savings
+/// field cannot be read as exact/Q99 across estimators.
+fn seal_report_tokenizers(ids: &BTreeSet<String>) -> (String, String, bool, bool) {
+    match ids.len() {
+        0 => (String::new(), "empty".to_string(), false, true),
+        1 => {
+            let id = ids.iter().next().expect("one tokenizer id");
+            (
+                id.clone(),
+                pulse_counts_class(id).to_string(),
+                pulse_counts_certified(id),
+                true,
+            )
+        }
+        _ => ("mixed".to_string(), "mixed".to_string(), false, false),
+    }
+}
+
 fn tokenizer_id_refusal(id: &str) -> &'static str {
     match tokenzero_core::preflight_tokenizer_id(id) {
         Err(error) => error.as_str(),
@@ -165,6 +207,15 @@ pulse_structs! {
         #[serde(default)] spent_tokens usize;
         /// Corrupt/non-empty unparsable ledger lines.
         #[serde(default)] skipped_lines usize;
+        /// Common tokenizer_id, `mixed` when events disagree, empty when none.
+        #[serde(default)] tokenizer_id String;
+        /// estimator | tiktoken | exact | mixed | empty
+        #[serde(default)] counts_class String;
+        /// True only for one ExactTokenizerIdentity. Estimator aggregates
+        /// never certify CLI stats/pulse JSON as exact.
+        #[serde(default)] certified bool;
+        /// False when tokenizer ids mix; savings then are not one-unit.
+        #[serde(default)] savings_commensurate bool;
     }
     PulseSyncMeta {
         schema_version String;
@@ -461,10 +512,23 @@ pub fn doctor_jsonl_sqlite(path: &Path) -> IoResult<PulseDoctorReport> {
 }
 
 pub fn render_text(report: &PulseReport) -> String {
+    let tokenizer = if report.tokenizer_id.is_empty() {
+        "-"
+    } else {
+        report.tokenizer_id.as_str()
+    };
     let mut out = format!(
-        "pulse {}: events={} visible_savings={:.2}% recovery_adjusted_savings={:.2}% failures={}\n",
+        "pulse {}: events={} tokenizer={} counts_class={} certified={} commensurate={} visible_savings={:.2}% recovery_adjusted_savings={:.2}% failures={}\n",
         report.status,
         report.event_count,
+        tokenizer,
+        if report.counts_class.is_empty() {
+            "empty"
+        } else {
+            report.counts_class.as_str()
+        },
+        report.certified,
+        report.savings_commensurate,
         report.visible_savings * 100.0,
         report.recovery_adjusted_savings * 100.0,
         report.failures
@@ -1074,7 +1138,9 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
         status: "ok".to_string(),
         ..PulseReport::default()
     };
+    let mut tokenizer_ids = BTreeSet::new();
     let scan = scan_jsonl(path, |event| {
+        tokenizer_ids.insert(event.tokenizer_id.clone());
         report.raw_tokens = report.raw_tokens.saturating_add(event.raw_tokens);
         report.visible_tokens = report.visible_tokens.saturating_add(event.visible_tokens);
         report.recovery_tokens = report.recovery_tokens.saturating_add(event.recovery_tokens);
@@ -1090,8 +1156,17 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
     })?;
     report.event_count = scan.event_count;
     report.skipped_lines = scan.skipped_lines;
+    let (tokenizer_id, counts_class, certified, commensurate) =
+        seal_report_tokenizers(&tokenizer_ids);
+    report.tokenizer_id = tokenizer_id;
+    report.counts_class = counts_class;
+    report.certified = certified;
+    report.savings_commensurate = commensurate;
     if report.skipped_lines > 0 {
         report.status = "degraded".to_string();
+    } else if !commensurate {
+        // Mixed tokenizer classes are not one billed unit. Do not look ok.
+        report.status = "mixed_tokenizer".to_string();
     }
     // Signed: spent>raw is a negative ratio, never a clamped 0% save.
     report.spent_tokens = report.visible_tokens.saturating_add(report.recovery_tokens);
@@ -1193,6 +1268,10 @@ pulse_structs! {
     SessionLedgerEntry {
         session_id String;
         tokenizer_id String;
+        /// estimator | tiktoken | exact | empty
+        #[serde(default)] counts_class String;
+        /// True only for ExactTokenizerIdentity rows (provider/model@hex).
+        #[serde(default)] certified bool;
         turns usize;
         raw_tokens usize;
         visible_tokens usize;
@@ -1219,6 +1298,15 @@ pulse_structs! {
     }
     SessionLedgerReport {
         schema_version String;
+        /// Common tokenizer_id, `mixed` when sessions disagree, empty when none.
+        tokenizer_id String;
+        /// estimator | tiktoken | exact | mixed | empty
+        counts_class String;
+        /// True only when every row is the same ExactTokenizerIdentity.
+        /// Estimator and tiktoken totals never certify as exact/Q99.
+        certified bool;
+        /// False when tokenizer ids mix; headline savings/DPMT are not one-unit.
+        savings_commensurate bool;
         total_sessions usize;
         total_turns usize;
         total_raw_tokens usize;
@@ -1269,6 +1357,8 @@ impl SessionLedgerReport {
                 let acc = sessions.entry(key).or_insert_with(|| SessionAcc {
                     entry: SessionLedgerEntry {
                         session_id: session_id.clone(),
+                        counts_class: pulse_counts_class(&tokenizer_id).to_string(),
+                        certified: pulse_counts_certified(&tokenizer_id),
                         tokenizer_id,
                         source_hash: event.source_hash.clone(),
                         ..SessionLedgerEntry::default()
@@ -1325,8 +1415,18 @@ impl SessionLedgerReport {
         let total_recovery_adjusted_token_turn_cost =
             total_visible_token_turns.saturating_add(total_recovery_token_turns);
         let total_raw_token_turns = sum_u64(|entry| entry.raw_token_turns);
+        let tokenizer_ids: BTreeSet<String> = sessions_vec
+            .iter()
+            .map(|entry| entry.tokenizer_id.clone())
+            .collect();
+        let (tokenizer_id, counts_class, certified, commensurate) =
+            seal_report_tokenizers(&tokenizer_ids);
         Ok(Self {
             schema_version: SESSION_LEDGER_SCHEMA_VERSION.to_string(),
+            tokenizer_id,
+            counts_class,
+            certified,
+            savings_commensurate: commensurate,
             total_sessions: sessions_vec.len(),
             total_turns,
             total_raw_tokens: sum(|entry| entry.raw_tokens),
@@ -1345,7 +1445,12 @@ impl SessionLedgerReport {
                 total_raw_token_turns,
                 total_recovery_adjusted_token_turn_cost,
             ),
-            dpmt: dpmt(total_turns, total_recovery_adjusted_token_turn_cost),
+            // Headline DPMT over mixed tokenizer ids is not one billed unit.
+            dpmt: if commensurate {
+                dpmt(total_turns, total_recovery_adjusted_token_turn_cost)
+            } else {
+                None
+            },
             sessions: sessions_vec,
         })
     }
@@ -1370,6 +1475,8 @@ impl SessionLedgerReport {
             "entry": {
                 "session_id": "string — verbatim local Pulse session identifier (MCP session id or 'unknown'); correlatable and not anonymized",
                 "tokenizer_id": "estimator:<slug>, tiktoken:<encoding-slug>, or provider/model@<64 lowercase hex identity digest>. tiktoken: is bundled BPE (certified for that vocab) and is not ExactTokenizerIdentity. Built-in tool_call counts use estimator:tokenzero-core until an exact adapter is linked",
+                "counts_class": "estimator | tiktoken | exact | empty — never Q99",
+                "certified": "bool — true only for ExactTokenizerIdentity (provider/model@hex); estimator and tiktoken rows are false",
                 "turns": "usize — number of tool calls in this session (decision count proxy)",
                 "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
                 "visible_tokens": "usize — total visible (compressed) tokens across all turns",
@@ -1389,6 +1496,10 @@ impl SessionLedgerReport {
             },
             "report": {
                 "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
+                "tokenizer_id": "common id, mixed, or empty — never unlabeled estimate: or Q99",
+                "counts_class": "estimator | tiktoken | exact | mixed | empty",
+                "certified": "bool — true only when every row is the same provider/model@hex identity",
+                "savings_commensurate": "bool — false when tokenizer ids mix; headline savings/DPMT then must not be read as one-unit exact/Q99",
                 "total_sessions": "usize",
                 "total_turns": "usize",
                 "total_raw_tokens": "usize",
@@ -1418,12 +1529,26 @@ impl SessionLedgerReport {
         let mut out = String::from(
             "Session Cost Ledger (session-ledger-v3)\n═══════════════════════════════════════\n\n",
         );
+        let tokenizer = if self.tokenizer_id.is_empty() {
+            "-"
+        } else {
+            self.tokenizer_id.as_str()
+        };
+        writeln!(
+            out,
+            "Tokenizer: {tokenizer}  counts_class={}  certified={}  commensurate={}",
+            self.counts_class, self.certified, self.savings_commensurate
+        )
+        .unwrap();
         match self.dpmt {
             Some(dpmt) => writeln!(
                 out,
                 "DPMT (headline): {dpmt:.4} decisions / million recovery-adjusted token-turns"
             )
             .unwrap(),
+            None if !self.savings_commensurate => {
+                out.push_str("DPMT (headline): n/a (mixed tokenizer ids; not commensurate)\n")
+            }
             None => out.push_str("DPMT (headline): n/a (no recovery-adjusted token-turns)\n"),
         }
         writeln!(

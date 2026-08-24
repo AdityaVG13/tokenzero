@@ -2,7 +2,10 @@
 //! or provider/model@hex. Never treat the default or tiktoken: as
 //! ExactTokenizerIdentity / Q99.
 
-use tokenzero_pulse::{PulseEvent, pulse_task_lossless, record_event, report_for_path};
+use tokenzero_pulse::{
+    PulseEvent, SessionLedgerReport, pulse_counts_certified, pulse_counts_class,
+    pulse_task_lossless, record_event, report_for_path,
+};
 
 #[test]
 fn default_tool_call_is_labelled_estimator_not_exact() {
@@ -120,4 +123,103 @@ fn pulse_report_spent_is_visible_plus_recovery() {
     assert_eq!(report.recovery_tokens, 6);
     assert!(event.task_lossless);
     assert_eq!(report.recovery_adjusted_savings, 0.0);
+}
+
+#[test]
+fn pulse_report_estimator_totals_are_labelled_not_certified() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.jsonl");
+    record_event(
+        &path,
+        &PulseEvent::tool_call("read", "auto", 10, 4, 0, 0, 0, None),
+    )
+    .expect("record");
+    let report = report_for_path(&path).expect("report");
+    assert_eq!(report.tokenizer_id, "estimator:tokenzero-core");
+    assert_eq!(report.counts_class, "estimator");
+    assert!(
+        !report.certified,
+        "estimator CLI totals must not certify as exact"
+    );
+    assert!(report.savings_commensurate);
+    assert_eq!(report.status, "ok");
+    assert!(!pulse_counts_certified(&report.tokenizer_id));
+    assert_eq!(pulse_counts_class(&report.tokenizer_id), "estimator");
+}
+
+#[test]
+fn pulse_report_mixed_tokenizer_ids_are_not_commensurate_or_certified() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.jsonl");
+    record_event(
+        &path,
+        &PulseEvent::tool_call("read", "auto", 10, 4, 0, 0, 0, None),
+    )
+    .expect("estimator event");
+    let tiktoken = PulseEvent::tool_call("measure", "auto", 10, 8, 0, 0, 0, None)
+        .with_tokenizer_id("tiktoken:cl100k_base")
+        .expect("tiktoken");
+    record_event(&path, &tiktoken).expect("tiktoken event");
+    let report = report_for_path(&path).expect("report");
+    assert_eq!(report.tokenizer_id, "mixed");
+    assert_eq!(report.counts_class, "mixed");
+    assert!(!report.certified, "mixed units must not certify as exact");
+    assert!(
+        !report.savings_commensurate,
+        "estimator+tiktoken savings are not one billed unit"
+    );
+    assert_eq!(report.status, "mixed_tokenizer");
+}
+
+#[test]
+fn pulse_report_exact_identity_is_certified_when_unmixed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.jsonl");
+    let digest = "a".repeat(64);
+    let id = format!("openai/gpt-4@{digest}");
+    let event = PulseEvent::tool_call("measure", "auto", 8, 8, 0, 0, 0, None)
+        .with_tokenizer_id(&id)
+        .expect("exact identity");
+    record_event(&path, &event).expect("record");
+    let report = report_for_path(&path).expect("report");
+    assert_eq!(report.tokenizer_id, id);
+    assert_eq!(report.counts_class, "exact");
+    assert!(report.certified);
+    assert!(report.savings_commensurate);
+}
+
+#[test]
+fn session_ledger_mixed_tokenizer_totals_drop_headline_dpmt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.jsonl");
+    let mut estimator = PulseEvent::tool_call("read", "auto", 10, 4, 0, 0, 0, None);
+    estimator.session_id = Some("s1".into());
+    record_event(&path, &estimator).expect("estimator");
+    let mut tiktoken = PulseEvent::tool_call("measure", "auto", 10, 8, 0, 0, 0, None)
+        .with_tokenizer_id("tiktoken:o200k_base")
+        .expect("tiktoken");
+    tiktoken.session_id = Some("s1".into());
+    record_event(&path, &tiktoken).expect("tiktoken");
+    let report = SessionLedgerReport::from_ledger(&path).expect("ledger");
+    assert_eq!(report.tokenizer_id, "mixed");
+    assert_eq!(report.counts_class, "mixed");
+    assert!(!report.certified);
+    assert!(!report.savings_commensurate);
+    assert!(
+        report.dpmt.is_none(),
+        "headline DPMT must not mix estimator and tiktoken units"
+    );
+    assert_eq!(report.sessions.len(), 2);
+    assert!(
+        report
+            .sessions
+            .iter()
+            .any(|row| row.counts_class == "estimator" && !row.certified)
+    );
+    assert!(
+        report
+            .sessions
+            .iter()
+            .any(|row| row.counts_class == "tiktoken" && !row.certified)
+    );
 }

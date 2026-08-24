@@ -533,11 +533,11 @@ pub fn capabilities_json() -> serde_json::Value {
         },
         "pulse": {
             "schema_version": "tokenzero.pulse.v1",
-            "required_keys": ["schema_version", "status", "event_count", "visible_tokens", "recovery_tokens"]
+            "required_keys": ["schema_version", "status", "event_count", "visible_tokens", "recovery_tokens", "tokenizer_id", "counts_class", "certified", "savings_commensurate"]
         },
         "stats": {
             "schema_version": "tokenzero.pulse.v1",
-            "required_keys": ["schema_version", "status", "event_count", "cache_hits", "recovery_blobs"]
+            "required_keys": ["schema_version", "status", "event_count", "cache_hits", "recovery_blobs", "tokenizer_id", "counts_class", "certified", "savings_commensurate"]
         },
         "doctor": {
             "schema_version": "tokenzero.doctor.v1",
@@ -545,7 +545,7 @@ pub fn capabilities_json() -> serde_json::Value {
         },
         "session-ledger": {
             "schema_version": "session-ledger-v3",
-            "required_keys": ["schema_version", "total_sessions", "total_turns", "total_raw_tokens"]
+            "required_keys": ["schema_version", "tokenizer_id", "counts_class", "certified", "savings_commensurate", "total_sessions", "total_turns", "total_raw_tokens"]
         },
         "session-open": {
             "schema_version": "tokenzero.session-boot.v1",
