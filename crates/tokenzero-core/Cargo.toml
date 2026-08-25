@@ -42,3 +42,7 @@ path = "../../tests/unit/tokenzero-core/provider_tokenizer_goldens.rs"
 [[test]]
 name = "model_artifact_limits"
 path = "../../tests/unit/tokenzero-core/model_artifact_limits.rs"
+
+[[test]]
+name = "representation_economics"
+path = "../../tests/unit/tokenzero-core/representation_economics.rs"

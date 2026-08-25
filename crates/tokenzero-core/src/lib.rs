@@ -1935,6 +1935,7 @@ mod protocol_atoms;
 pub mod provider_cache;
 pub mod reasoning_state;
 mod render;
+pub mod representation_economics;
 mod shell_display;
 mod shell_family;
 mod shell_parse;
