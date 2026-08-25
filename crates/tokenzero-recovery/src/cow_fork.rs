@@ -261,4 +261,3 @@ impl CowSession {
         Ok(ledger_ref)
     }
 }
-

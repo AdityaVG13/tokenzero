@@ -120,4 +120,3 @@ pub fn check_linearizable(history: &[HistoryEvent]) -> Result<(), String> {
         Err("history is not linearizable".into())
     }
 }
-

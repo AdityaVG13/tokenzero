@@ -294,4 +294,3 @@ fn persist_fingerprint(path: &Path) -> (Option<FileIdentity>, Option<FileIdentit
         Err(_) => (FileIdentity::capture(path), None),
     }
 }
-

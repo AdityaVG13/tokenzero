@@ -638,4 +638,3 @@ fn validate_key(key: &str) -> Result<(), ActionCacheError> {
         Err(ActionCacheError::InvalidKey(key.to_string()))
     }
 }
-

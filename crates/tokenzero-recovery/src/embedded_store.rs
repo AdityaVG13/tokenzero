@@ -28,7 +28,7 @@ use zero_store::{Engine, ResolvedStore, StoreEnv, StoreMode};
 use tokenzero_core::ContentType;
 
 use crate::shared_cas::{SharedCas, SharedCasError};
-use crate::{RecoveryStore, ZeroRefError, ZeroRefFragment, ZeroRefBlob, parse_zeroref_v1_blob};
+use crate::{RecoveryStore, ZeroRefBlob, ZeroRefError, ZeroRefFragment, parse_zeroref_v1_blob};
 
 const DESCRIPTOR_SCHEMA_VERSION: &str = "tokenzero.recovery.capability.v1";
 const DESCRIPTOR_VERSION: &str = "1.0.0";
@@ -931,4 +931,3 @@ fn temp_cas_dir() -> PathBuf {
         crate::shared_cas::unique_suffix()
     ))
 }
-

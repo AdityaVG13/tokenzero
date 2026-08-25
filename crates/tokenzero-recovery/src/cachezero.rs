@@ -250,4 +250,3 @@ pub fn cachezero_stats_json(store_root: &Path) -> serde_json::Value {
 pub fn live_entry_for_key(store_root: &Path, key: &str) -> Option<ActionCacheEntry> {
     ActionCacheIndex::open(store_root).get(key).ok().flatten()
 }
-

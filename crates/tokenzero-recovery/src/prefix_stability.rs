@@ -147,4 +147,3 @@ impl PrefixStabilityGuard {
         (self.prefix_observations, self.renders.len())
     }
 }
-

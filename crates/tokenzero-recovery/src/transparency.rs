@@ -235,4 +235,3 @@ fn inclusion_path(leaves: &[Hash], index: usize, out: &mut Vec<ProofSibling>) ->
         hash_node(&out.last().expect("pushed").hash, &node)
     }
 }
-

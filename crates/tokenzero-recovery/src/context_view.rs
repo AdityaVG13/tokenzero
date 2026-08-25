@@ -286,4 +286,3 @@ fn select_newest<'a>(
     selected.reverse();
     selected
 }
-

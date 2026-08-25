@@ -284,4 +284,3 @@ pub fn rewrite_full_hash_blob_refs_in_value(value: &mut Value) {
         _ => {}
     }
 }
-

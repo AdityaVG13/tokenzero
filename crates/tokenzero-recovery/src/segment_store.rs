@@ -759,4 +759,3 @@ impl Drop for Lock {
         let _ = FileExt::unlock(&self.0);
     }
 }
-

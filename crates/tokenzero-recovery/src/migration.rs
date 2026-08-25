@@ -1333,4 +1333,3 @@ impl MigrationStore for RecoveryStoreAdapter<'_> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
-
