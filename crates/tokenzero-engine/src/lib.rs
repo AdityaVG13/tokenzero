@@ -202,6 +202,7 @@ pub use cache_meter::{
     CacheObservation, CachePricing, CacheProvider, CacheSessionReport, CacheSloConfig,
     CacheSloDashboard, ProviderCacheEligibility, ProviderCacheEligibilityStatus,
     ProviderCacheTelemetry, ProviderUsage, cache_miss_attribution, parse_provider_usage,
+    parse_provider_usage_observation,
 };
 pub use config::{
     CAPSULE_EXACT_REF_THRESHOLD_ENV, CORRIDOR_ENV, CorridorEstimates,

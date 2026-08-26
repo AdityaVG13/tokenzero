@@ -67,3 +67,7 @@ path = "../../tests/unit/tokenzero-engine/prefix_probe_eligibility.rs"
 [[test]]
 name = "phase4_output_contract_goldens"
 path = "../../tests/unit/tokenzero-engine/phase4_output_contract_goldens.rs"
+
+[[test]]
+name = "provider_usage"
+path = "../../tests/unit/tokenzero-engine/provider_usage.rs"

@@ -8,6 +8,7 @@ pub use tokenzero_core::provider_cache::{
     ProviderCacheEligibility, ProviderCacheEligibilityStatus, ProviderCacheTelemetry,
 };
 use tokenzero_pulse::{AnytimeFailureMonitor, EProcessSnapshot};
+use zero_abi::{PROVIDER_USAGE_SCHEMA, ProviderUsageObservation, UsageAmount};
 
 pub const ANTHROPIC_CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
 
@@ -44,6 +45,8 @@ pub enum CacheMeterError {
     MissingField(&'static str),
     #[error("provider usage field is not an unsigned integer: {0}")]
     InvalidField(&'static str),
+    #[error("invalid provider usage observation: {0}")]
+    InvalidObservation(String),
     #[error("invalid cache uptime SLO configuration")]
     InvalidSloConfig,
     #[error("contradictory provider cache telemetry: {0}")]
@@ -167,10 +170,13 @@ fn read_response_model(
     key: &'static str,
 ) -> Result<Option<String>, CacheMeterError> {
     match value.get(key) {
-        Some(field) => field
-            .as_str()
-            .map(|model| Some(model.to_owned()))
-            .ok_or(CacheMeterError::InvalidField(key)),
+        Some(field) => {
+            let model = field
+                .as_str()
+                .ok_or(CacheMeterError::InvalidField(key))?
+                .trim();
+            Ok((!model.is_empty()).then(|| model.to_owned()))
+        }
         None => Ok(None),
     }
 }
@@ -215,6 +221,357 @@ pub fn parse_provider_usage(
             None => 0,
         },
     })
+}
+
+fn provider_str(provider: CacheProvider) -> &'static str {
+    match provider {
+        CacheProvider::Anthropic => "anthropic",
+        CacheProvider::OpenAi => "openai",
+        CacheProvider::Gemini => "gemini",
+    }
+}
+
+fn measured_amount(amount: u64, provenance: String) -> UsageAmount {
+    UsageAmount::measured(amount, provenance)
+}
+
+fn unmeasured_amount(provenance: String) -> UsageAmount {
+    UsageAmount::unmeasured(provenance)
+}
+fn usage_amount(amount: Option<u64>, provenance: String) -> UsageAmount {
+    match amount {
+        Some(amount) => measured_amount(amount, provenance),
+        None => unmeasured_amount(provenance),
+    }
+}
+
+fn resolve_request_id(
+    value: &Value,
+    transport_request_id: Option<&str>,
+) -> Result<String, CacheMeterError> {
+    if let Some(explicit) = transport_request_id {
+        let trimmed = explicit.trim();
+        if trimmed.is_empty() {
+            return Err(CacheMeterError::MissingField("request_id"));
+        }
+        return Ok(trimmed.to_owned());
+    }
+    for key in ["id", "responseId", "response_id", "request_id", "requestId"] {
+        if let Some(field) = value.get(key).and_then(Value::as_str) {
+            let trimmed = field.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_owned());
+            }
+        }
+    }
+    Err(CacheMeterError::MissingField("request_id"))
+}
+
+fn read_service_tier(value: &Value) -> Result<Option<String>, CacheMeterError> {
+    for key in ["service_tier", "serviceTier"] {
+        if let Some(field) = value.get(key) {
+            if field.is_null() {
+                continue;
+            }
+            let s = field
+                .as_str()
+                .ok_or(CacheMeterError::InvalidField("service_tier"))?;
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed.to_owned()));
+            }
+            return Ok(None);
+        }
+    }
+    // Gemini: usageMetadata.trafficType as service_tier when top-level absent
+    if let Some(usage) = value.get("usageMetadata") {
+        if let Some(field) = usage.get("trafficType") {
+            if !field.is_null() {
+                let s = field
+                    .as_str()
+                    .ok_or(CacheMeterError::InvalidField("trafficType"))?;
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Ok(Some(trimmed.to_owned()));
+                }
+                return Ok(None);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn read_reasoning_amount(
+    provider: CacheProvider,
+    usage: &Value,
+) -> Result<UsageAmount, CacheMeterError> {
+    match provider {
+        CacheProvider::OpenAi => {
+            let prov = "openai:usage.completion_tokens_details.reasoning_tokens".to_owned();
+            if let Some(details) = usage.get("completion_tokens_details") {
+                if let Some(field) = details.get("reasoning_tokens") {
+                    let amount = field.as_u64().ok_or(CacheMeterError::InvalidField(
+                        "completion_tokens_details.reasoning_tokens",
+                    ))?;
+                    return Ok(measured_amount(amount, prov));
+                }
+            }
+            Ok(unmeasured_amount(prov))
+        }
+        CacheProvider::Gemini => {
+            let prov = "gemini:usageMetadata.thoughtsTokenCount".to_owned();
+            if let Some(field) = usage.get("thoughtsTokenCount") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("thoughtsTokenCount"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            Ok(unmeasured_amount(prov))
+        }
+        CacheProvider::Anthropic => {
+            let prov = "anthropic:usage.reasoning_tokens".to_owned();
+            if let Some(field) = usage.get("reasoning_tokens") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("reasoning_tokens"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            Ok(unmeasured_amount(prov))
+        }
+    }
+}
+
+fn read_billed_tokens_amount(
+    provider: CacheProvider,
+    usage: &Value,
+) -> Result<UsageAmount, CacheMeterError> {
+    match provider {
+        CacheProvider::OpenAi => {
+            let prov = "openai:usage.total_tokens".to_owned();
+            if let Some(field) = usage.get("total_tokens") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("total_tokens"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            if let Some(field) = usage.get("totalTokens") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("totalTokens"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            Ok(unmeasured_amount(prov))
+        }
+        CacheProvider::Gemini => {
+            let prov = "gemini:usageMetadata.totalTokenCount".to_owned();
+            if let Some(field) = usage.get("totalTokenCount") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("totalTokenCount"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            Ok(unmeasured_amount(prov))
+        }
+        CacheProvider::Anthropic => {
+            let prov = "anthropic:usage.total_tokens".to_owned();
+            if let Some(field) = usage.get("total_tokens") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("total_tokens"))?;
+                return Ok(measured_amount(amount, prov));
+            }
+            Ok(unmeasured_amount(prov))
+        }
+    }
+}
+
+fn read_microcredit_amount(
+    provider: CacheProvider,
+    usage: &Value,
+    kind: &str,
+) -> Result<UsageAmount, CacheMeterError> {
+    let prov = format!("{}:usage.{}", provider_str(provider), kind);
+    if let Some(field) = usage.get(kind) {
+        let error_name: &'static str = match kind {
+            "billed_microcredits" => "billed_microcredits",
+            "credit_microcredits" => "credit_microcredits",
+            _ => "billed_microcredits",
+        };
+        let amount = field
+            .as_u64()
+            .ok_or(CacheMeterError::InvalidField(error_name))?;
+        return Ok(measured_amount(amount, prov));
+    }
+    Ok(unmeasured_amount(prov))
+}
+
+pub fn parse_provider_usage_observation(
+    provider: CacheProvider,
+    value: &Value,
+    transport_request_id: Option<&str>,
+) -> Result<ProviderUsageObservation, CacheMeterError> {
+    let layout = provider.usage_layout();
+    let request_id = resolve_request_id(value, transport_request_id)?;
+    let route = Some(layout.route.to_owned());
+    let model = match layout.model_key {
+        Some(key) => read_response_model(value, key)?,
+        None => None,
+    };
+    let service_tier = read_service_tier(value)?;
+    let pstr = provider_str(provider);
+
+    // Usage object: absent => all token fields Unmeasured; present but not object => error if expected
+    let usage = match value.get(layout.usage_key) {
+        Some(v) if v.is_object() => v,
+        Some(v) if v.is_null() => v,
+        Some(_) => {
+            // Non-object usage value is malformed; treat as InvalidField for the usage key
+            return Err(CacheMeterError::InvalidField(layout.usage_key));
+        }
+        None => &Value::Null,
+    };
+
+    let raw_input = match usage.get(layout.input_key) {
+        Some(field) => Some(
+            field
+                .as_u64()
+                .ok_or(CacheMeterError::InvalidField(layout.input_key))?,
+        ),
+        None => None,
+    };
+    let cached_read = {
+        let (amount, present) = read_cache_tokens(usage, layout.cache_read)?;
+        present.then_some(amount)
+    };
+
+    // For providers whose input total includes cached tokens, the uncached
+    // coordinate is knowable only when the provider also reports the cached
+    // component. Missing detail remains Unmeasured, never measured zero.
+    let (uncached_input_tokens, cached_read_input_tokens) = match provider {
+        CacheProvider::Anthropic => (
+            usage_amount(raw_input, format!("{pstr}:usage.{}", layout.input_key)),
+            usage_amount(
+                cached_read,
+                "anthropic:usage.cache_read_input_tokens".to_owned(),
+            ),
+        ),
+        CacheProvider::OpenAi => (
+            usage_amount(
+                raw_input
+                    .zip(cached_read)
+                    .map(|(raw, cached)| raw.saturating_sub(cached)),
+                format!("{pstr}:usage.{}", layout.input_key),
+            ),
+            usage_amount(
+                cached_read,
+                "openai:usage.prompt_tokens_details.cached_tokens".to_owned(),
+            ),
+        ),
+        CacheProvider::Gemini => (
+            usage_amount(
+                raw_input
+                    .zip(cached_read)
+                    .map(|(raw, cached)| raw.saturating_sub(cached)),
+                format!("{pstr}:usage.{}", layout.input_key),
+            ),
+            usage_amount(
+                cached_read,
+                "gemini:usageMetadata.cachedContentTokenCount".to_owned(),
+            ),
+        ),
+    };
+
+    let cached_write_input_tokens = match provider {
+        CacheProvider::Anthropic => {
+            let prov = "anthropic:usage.cache_creation_input_tokens".to_owned();
+            if usage.is_null() {
+                unmeasured_amount(prov)
+            } else if let Some(field) = usage.get("cache_creation_input_tokens") {
+                let amount = field
+                    .as_u64()
+                    .ok_or(CacheMeterError::InvalidField("cache_creation_input_tokens"))?;
+                measured_amount(amount, prov)
+            } else {
+                unmeasured_amount(prov)
+            }
+        }
+        _ => {
+            let prov = format!("{pstr}:usage.cache_creation_input_tokens");
+            unmeasured_amount(prov)
+        }
+    };
+
+    let output_tokens = {
+        let prov = format!("{pstr}:usage.{}", layout.output_key);
+        if usage.is_null() {
+            unmeasured_amount(prov)
+        } else {
+            match optional_observed_u64(usage, layout.output_key) {
+                Ok((amount, true)) => measured_amount(amount, prov),
+                Ok((_, false)) => unmeasured_amount(prov),
+                Err(e) => return Err(e),
+            }
+        }
+    };
+
+    let reasoning_tokens = if usage.is_null() {
+        // For absent usage, reasoning is unmeasured with provider-specific provenance
+        let prov = match provider {
+            CacheProvider::OpenAi => {
+                "openai:usage.completion_tokens_details.reasoning_tokens".to_owned()
+            }
+            CacheProvider::Gemini => "gemini:usageMetadata.thoughtsTokenCount".to_owned(),
+            CacheProvider::Anthropic => "anthropic:usage.reasoning_tokens".to_owned(),
+        };
+        unmeasured_amount(prov)
+    } else {
+        read_reasoning_amount(provider, usage)?
+    };
+
+    let billed_tokens = if usage.is_null() {
+        let prov = match provider {
+            CacheProvider::OpenAi => "openai:usage.total_tokens".to_owned(),
+            CacheProvider::Gemini => "gemini:usageMetadata.totalTokenCount".to_owned(),
+            CacheProvider::Anthropic => "anthropic:usage.total_tokens".to_owned(),
+        };
+        unmeasured_amount(prov)
+    } else {
+        read_billed_tokens_amount(provider, usage)?
+    };
+
+    let billed_microcredits = if usage.is_null() {
+        let prov = format!("{pstr}:usage.billed_microcredits");
+        unmeasured_amount(prov)
+    } else {
+        read_microcredit_amount(provider, usage, "billed_microcredits")?
+    };
+    let credit_microcredits = if usage.is_null() {
+        let prov = format!("{pstr}:usage.credit_microcredits");
+        unmeasured_amount(prov)
+    } else {
+        read_microcredit_amount(provider, usage, "credit_microcredits")?
+    };
+
+    let observation = ProviderUsageObservation {
+        schema: PROVIDER_USAGE_SCHEMA.to_owned(),
+        provider: pstr.to_owned(),
+        model,
+        request_id,
+        route,
+        service_tier,
+        uncached_input_tokens,
+        cached_read_input_tokens,
+        cached_write_input_tokens,
+        reasoning_tokens,
+        output_tokens,
+        billed_tokens,
+        billed_microcredits,
+        credit_microcredits,
+    };
+    observation
+        .validate()
+        .map_err(CacheMeterError::InvalidObservation)?;
+    Ok(observation)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
