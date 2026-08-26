@@ -1928,6 +1928,7 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
 }
 
 pub mod decision_view;
+pub mod live_pareto;
 pub mod model_artifacts;
 pub mod operation_abi;
 pub mod output_novelty;
@@ -1935,6 +1936,10 @@ mod protocol_atoms;
 pub mod provider_cache;
 pub mod reasoning_state;
 mod render;
+pub use live_pareto::{
+    EvidenceFreshness, LiveCandidate, LiveEntry, LiveParetoDecision, MetricOrder, ProtectedOutcome,
+    VerifierIdentity, decide_live_pareto,
+};
 pub mod representation_economics;
 mod shell_display;
 mod shell_family;
