@@ -21,7 +21,7 @@ use crate::representation_economics::RepresentationResources;
 pub const LIVE_PARETO_CONTRACT_VERSION: u16 = 1;
 pub const LIVE_PARETO_MAX_CANDIDATES: usize = 1_024;
 pub const LIVE_PARETO_MAX_METRICS: usize = 128;
-pub const LIVE_PARETO_MAX_ID_BYTES: usize = 256;
+pub const LIVE_PARETO_MAX_ID_BYTES: usize = 128;
 pub const LIVE_PARETO_MAX_CANONICAL_BYTES: usize = 1_048_576;
 
 const LIVE_DOMAIN: &[u8] = b"tokenzero.live_pareto.v1\0";
@@ -67,6 +67,12 @@ impl ProtectedOutcome {
             || self.metric_id.chars().any(|c| c.is_control())
         {
             return Err(format!("invalid metric_id {:?}", self.metric_id));
+        }
+        if !self.candidate_no_worse_than_baseline() {
+            return Err(format!(
+                "protected metric {:?} regresses its baseline",
+                self.metric_id
+            ));
         }
         Ok(())
     }
@@ -255,7 +261,10 @@ impl LiveCandidate {
             .iter()
             .zip(other.protected_vector.iter())
         {
-            if a.metric_id != b.metric_id || a.order != b.order {
+            if a.metric_id != b.metric_id
+                || a.order != b.order
+                || a.baseline_value != b.baseline_value
+            {
                 return false;
             }
         }
@@ -297,6 +306,14 @@ pub struct LiveParetoDecision {
     pub canonical_json: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveParetoBody {
+    contract_version: u16,
+    frontier_ids: Vec<String>,
+    entries: Vec<LiveEntry>,
+}
+
 impl LiveParetoDecision {
     pub fn validate(&self) -> Result<(), String> {
         if self.contract_version != LIVE_PARETO_CONTRACT_VERSION {
@@ -305,44 +322,65 @@ impl LiveParetoDecision {
         if self.canonical_json.len() > LIVE_PARETO_MAX_CANONICAL_BYTES {
             return Err("canonical_json exceeds bound".into());
         }
-        let v: serde_json::Value =
-            serde_json::from_str(&self.canonical_json).map_err(|e| e.to_string())?;
-        let canon = zero_abi::canonical_json(&v);
-        if canon != self.canonical_json {
-            return Err("canonical_json is not canonical sorted-key JSON".into());
+        if self.entries.is_empty() || self.entries.len() > LIVE_PARETO_MAX_CANDIDATES {
+            return Err("live pareto entries are empty or exceed the candidate bound".into());
         }
-        let expected = Self::expected_digest(&v)?;
+        let body = LiveParetoBody {
+            contract_version: self.contract_version,
+            frontier_ids: self.frontier_ids.clone(),
+            entries: self.entries.clone(),
+        };
+        let value = serde_json::to_value(&body).map_err(|error| error.to_string())?;
+        let canonical = zero_abi::canonical_json(&value);
+        if canonical != self.canonical_json {
+            return Err("canonical_json does not bind the decision fields".into());
+        }
+        let expected = Self::expected_digest(&value)?;
         if expected != self.decision_digest {
             return Err(format!(
                 "decision_digest mismatch expected {expected} got {}",
                 self.decision_digest
             ));
         }
-        // frontier must be sorted and subset of entries
-        let mut sorted = self.frontier_ids.clone();
-        sorted.sort();
-        if sorted != self.frontier_ids {
-            return Err("frontier_ids must be sorted".into());
+        if self.frontier_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("frontier_ids must be strictly sorted".into());
         }
-        let entry_ids: BTreeSet<&str> = self
-            .entries
-            .iter()
-            .map(|e| e.candidate_id.as_str())
-            .collect();
-        for id in &self.frontier_ids {
-            if !entry_ids.contains(id.as_str()) {
-                return Err(format!("frontier id {id} not in entries"));
+        let mut flagged_frontier = Vec::new();
+        let mut previous: Option<&str> = None;
+        for entry in &self.entries {
+            if previous.is_some_and(|value| value >= entry.candidate_id.as_str()) {
+                return Err("entries must be strictly sorted by candidate_id".into());
             }
-        }
-        // entries must be sorted by candidate_id
-        let mut prev: Option<&str> = None;
-        for e in &self.entries {
-            if let Some(p) = prev {
-                if p >= e.candidate_id.as_str() {
-                    return Err("entries must be sorted by candidate_id".into());
+            previous = Some(&entry.candidate_id);
+            let candidate = LiveCandidate {
+                candidate_id: entry.candidate_id.clone(),
+                semantic_root: entry.semantic_root.clone(),
+                adapter_root: entry.adapter_root.clone(),
+                verifier: entry.verifier.clone(),
+                freshness: entry.freshness,
+                protected_vector: entry.protected_vector.clone(),
+                resources: entry.resources,
+                exact: entry.exact,
+            };
+            candidate.validate()?;
+            if candidate.binding_digest().to_hex() != entry.candidate_binding_digest {
+                return Err(format!(
+                    "candidate binding digest mismatch for {}",
+                    entry.candidate_id
+                ));
+            }
+            if entry.in_frontier {
+                if !entry.freshness.is_fresh() || entry.protected_vector.is_empty() {
+                    return Err(format!(
+                        "ineligible candidate {} is marked in frontier",
+                        entry.candidate_id
+                    ));
                 }
+                flagged_frontier.push(entry.candidate_id.clone());
             }
-            prev = Some(&e.candidate_id);
+        }
+        if flagged_frontier != self.frontier_ids {
+            return Err("frontier_ids disagree with entry membership flags".into());
         }
         Ok(())
     }
@@ -359,18 +397,28 @@ impl LiveParetoDecision {
         Ok(sha256_hex(&combined))
     }
 
+    /// Decode the canonical decision body stored in [`Self::canonical_json`].
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > LIVE_PARETO_MAX_CANONICAL_BYTES {
             return Err("live pareto bytes exceed bound".into());
         }
-        let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        let canon = zero_abi::canonical_json(&v);
-        if canon.as_bytes() != bytes {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        let canonical = zero_abi::canonical_json(&value);
+        if canonical.as_bytes() != bytes {
             return Err("bytes are not canonical sorted-key JSON".into());
         }
-        let decoded: Self = serde_json::from_value(v).map_err(|e| e.to_string())?;
-        decoded.validate()?;
-        Ok(decoded)
+        let body: LiveParetoBody =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        let decision = Self {
+            contract_version: body.contract_version,
+            decision_digest: Self::expected_digest(&value)?,
+            frontier_ids: body.frontier_ids,
+            entries: body.entries,
+            canonical_json: canonical,
+        };
+        decision.validate()?;
+        Ok(decision)
     }
 
     pub fn frontier(&self) -> &[String] {
@@ -390,7 +438,7 @@ impl LiveParetoDecision {
 
 fn live_dominates(a: &LiveCandidate, b: &LiveCandidate) -> bool {
     // Unknown, stale, missing never dominate.
-    if !a.freshness.is_fresh() {
+    if !a.freshness.is_fresh() || a.protected_vector.is_empty() {
         return false;
     }
     if a.candidate_id == b.candidate_id {
@@ -426,7 +474,8 @@ fn live_dominates(a: &LiveCandidate, b: &LiveCandidate) -> bool {
         return false;
     }
     // Need strictly better on at least one axis (protected or resources).
-    let strictly = a.resources.strictly_better_than(&b.resources)
+    let strictly = (a.exact && !b.exact)
+        || a.resources.strictly_better_than(&b.resources)
         || a.protected_vector
             .iter()
             .zip(b.protected_vector.iter())
@@ -440,8 +489,8 @@ fn live_dominates(a: &LiveCandidate, b: &LiveCandidate) -> bool {
 /// - Every candidate is validated. Unknown/stale/missing/incomparable never dominate.
 /// - Stale/unknown/missing candidates remain in `entries` with `in_frontier=false`
 ///   and an explicit reason; they never hide another candidate.
-/// - Incomparable protected vectors or verifier identities are visible with
-///   `incomparable_*` reasons but never claim dominance.
+/// - Incomparable protected vectors or verifier identities remain co-frontier;
+///   no dominance claim is made between them.
 /// - Determinism: frontier and entries are sorted by `candidate_id`; canonical
 ///   JSON uses sorted keys; digest is domain-separated sha256.
 pub fn decide_live_pareto(candidates: &[LiveCandidate]) -> Result<LiveParetoDecision, String> {
@@ -738,5 +787,69 @@ mod tests {
         assert!(!d.frontier_ids.contains(&"unknown".to_string()));
         assert!(!d.frontier_ids.contains(&"missing".to_string()));
         assert_eq!(d.entries.len(), 3);
+    }
+    #[test]
+    fn canonical_round_trip_rejects_outer_field_tampering() {
+        let candidate = LiveCandidate {
+            candidate_id: "candidate".into(),
+            semantic_root: "semantic".into(),
+            adapter_root: "adapter".into(),
+            verifier: verifier("verifier"),
+            freshness: EvidenceFreshness::Fresh,
+            protected_vector: vec![prot("accuracy", MetricOrder::AtLeast, 80, 90)],
+            resources: res(10),
+            exact: true,
+        };
+        let decision = decide_live_pareto(&[candidate]).unwrap();
+        let decoded =
+            LiveParetoDecision::from_canonical_bytes(decision.canonical_json.as_bytes()).unwrap();
+        assert_eq!(decoded, decision);
+
+        let mut tampered = decision;
+        tampered.entries[0].resources = res(1);
+        assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn dominance_requires_complete_nonregressing_comparable_evidence() {
+        let make = |id: &str, protected_vector: Vec<ProtectedOutcome>, exact: bool| LiveCandidate {
+            candidate_id: id.into(),
+            semantic_root: "semantic".into(),
+            adapter_root: "adapter".into(),
+            verifier: verifier("verifier"),
+            freshness: EvidenceFreshness::Fresh,
+            protected_vector,
+            resources: res(10),
+            exact,
+        };
+
+        let exact = make(
+            "exact",
+            vec![prot("accuracy", MetricOrder::AtLeast, 80, 90)],
+            true,
+        );
+        let inexact = make(
+            "inexact",
+            vec![prot("accuracy", MetricOrder::AtLeast, 80, 90)],
+            false,
+        );
+        let decision = decide_live_pareto(&[exact, inexact]).unwrap();
+        assert_eq!(decision.frontier_ids, vec!["exact"]);
+
+        let missing = make("missing", Vec::new(), true);
+        let complete = make(
+            "complete",
+            vec![prot("accuracy", MetricOrder::AtLeast, 80, 90)],
+            true,
+        );
+        let decision = decide_live_pareto(&[missing, complete]).unwrap();
+        assert_eq!(decision.frontier_ids, vec!["complete"]);
+
+        let regression = make(
+            "regression",
+            vec![prot("accuracy", MetricOrder::AtLeast, 80, 79)],
+            true,
+        );
+        assert!(decide_live_pareto(&[regression]).is_err());
     }
 }

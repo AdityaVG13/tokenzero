@@ -13,6 +13,11 @@
 /// imports `tokenzero_kernel`, not `tokenzero_engine`.
 pub const TOKEN_ENGINE_OWNER_CRATE: &str = env!("CARGO_PKG_NAME");
 
+pub use tokenzero_core::{
+    EvidenceFreshness, LiveCandidate, LiveEntry, LiveParetoDecision, MetricOrder, ProtectedOutcome,
+    VerifierIdentity, decide_live_pareto,
+};
+
 use std::path::PathBuf;
 use std::str::FromStr;
 
